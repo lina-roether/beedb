@@ -1,6 +1,7 @@
 use std::{
     alloc::{alloc, dealloc, handle_alloc_error, Layout},
     cell::Cell,
+    fmt::{self, Debug},
     iter,
     ptr::NonNull,
     slice,
@@ -30,6 +31,39 @@ struct PageMeta {
     status: Cell<PageStatus>,
 }
 
+impl PageMeta {
+    fn new(ref_count: usize, page_status: PageStatus) -> Self {
+        Self {
+            ref_count: AtomicUsize::new(ref_count),
+            lock: RawRwLock::INIT,
+            status: Cell::new(page_status),
+        }
+    }
+}
+
+impl Default for PageMeta {
+    fn default() -> Self {
+        Self::new(0, PageStatus::default())
+    }
+}
+
+impl Debug for PageMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut page_meta = f.debug_struct("PageMeta");
+        page_meta.field("ref_count", &self.ref_count);
+        if self.lock.is_locked_exclusive() {
+            page_meta.field("lock", &"<locked exclusive>");
+        } else if self.lock.is_locked() {
+            page_meta.field("lock", &"<locked shared>");
+        } else {
+            page_meta.field("lock", &"<unlocked>");
+        }
+        page_meta.field("status", &self.status);
+        page_meta.finish()
+    }
+}
+
+#[derive(Debug)]
 pub struct SharedPage<'a> {
     meta: &'a PageMeta,
     pub data: &'a [u8],
@@ -111,21 +145,38 @@ impl PageBuffer {
         }
     }
 
-    fn get_page_shared(&self, index: usize) -> Option<SharedPage> {
+    #[inline]
+    pub fn get_page_shared(&self, index: usize) -> Option<SharedPage> {
         debug_assert!(index < self.length);
         let meta = self.meta[index].as_ref()?;
         let data = unsafe { self.get_page_data(index) };
         Some(SharedPage::acquire(meta, data))
     }
 
-    fn get_page_exclusive(&self, index: usize) -> Option<ExclusivePage> {
+    #[inline]
+    pub fn get_page_exclusive(&self, index: usize) -> Option<ExclusivePage> {
         debug_assert!(index < self.length);
         let meta = self.meta[index].as_ref()?;
         let data = unsafe { self.get_page_data(index) };
         Some(ExclusivePage::acquire(meta, data))
     }
 
+    pub fn get_empty_page_mut(&mut self, index: usize) -> Option<&mut [u8]> {
+        debug_assert!(index < self.length);
+        if self.meta[index].is_some() {
+            return None;
+        }
+        Some(unsafe { self.get_page_data(index) })
+    }
+
+    pub fn set_filled(&mut self, index: usize) {
+        debug_assert!(index < self.length);
+        debug_assert!(self.meta[index].is_none());
+        self.meta[index] = Some(PageMeta::default())
+    }
+
     #[allow(clippy::mut_from_ref)]
+    #[inline]
     unsafe fn get_page_data(&self, index: usize) -> &mut [u8] {
         slice::from_raw_parts_mut(
             self.buffer.as_ptr().add(index * self.page_size_padded),
@@ -139,5 +190,52 @@ impl Drop for PageBuffer {
         unsafe {
             dealloc(self.buffer.as_ptr(), self.buffer_layout);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use super::*;
+
+    #[test]
+    fn page_buffer_construction() {
+        let _buffer = PageBuffer::new(69, 420);
+    }
+
+    #[test]
+    fn try_acquire_empty_page() {
+        let buffer = PageBuffer::new(69, 420);
+        assert!(buffer.get_page_shared(4).is_none());
+        assert!(buffer.get_page_shared(4).is_none());
+    }
+
+    #[test]
+    fn shared_page_read() {
+        let mut buffer = PageBuffer::new(size_of::<u32>(), 4);
+
+        {
+            let page_mut = buffer.get_empty_page_mut(3).unwrap();
+            page_mut.clone_from_slice(&69_i32.to_ne_bytes());
+            buffer.set_filled(3);
+        }
+
+        let shared_page = buffer.get_page_shared(3).unwrap();
+        assert_eq!(shared_page.data, 69_i32.to_ne_bytes());
+    }
+
+    #[test]
+    fn exclusive_page_read() {
+        let mut buffer = PageBuffer::new(size_of::<u32>(), 4);
+
+        {
+            let page_mut = buffer.get_empty_page_mut(3).unwrap();
+            page_mut.clone_from_slice(&69_i32.to_ne_bytes());
+            buffer.set_filled(3);
+        }
+
+        let exclusive_page = buffer.get_page_exclusive(3).unwrap();
+        assert_eq!(exclusive_page.data, 69_i32.to_ne_bytes());
     }
 }
