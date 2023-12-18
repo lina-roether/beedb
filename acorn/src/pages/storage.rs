@@ -218,7 +218,7 @@ where
             page_size_with_header,
             content_offset: header.content_offset as usize,
             file,
-            next_free: 0,
+            next_free: panic!("This doesn't make any sense. Needs to be reworked."),
             buffer: vec![0_u8; page_size_with_header].into_boxed_slice(),
         }
     }
