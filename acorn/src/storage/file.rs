@@ -21,14 +21,14 @@ impl StorageFile for Vec<u8> {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let range = get_buf_range(self.len(), buf.len(), offset);
         let num_read = range.len();
-        buf.copy_from_slice(&self[range]);
+        buf[0..num_read].copy_from_slice(&self[range]);
         Ok(num_read)
     }
 
     fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
         let range = get_buf_range(self.len(), buf.len(), offset);
         let num_written = range.len();
-        self[range].copy_from_slice(buf);
+        self[range].copy_from_slice(&buf[0..num_written]);
         Ok(num_written)
     }
 }
