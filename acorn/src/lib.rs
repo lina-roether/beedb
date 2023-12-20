@@ -4,5 +4,5 @@
 #![feature(cfg_match)]
 #![allow(dead_code)]
 
-mod pages;
+mod cache;
 mod storage;
