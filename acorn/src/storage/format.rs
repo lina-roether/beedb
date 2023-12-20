@@ -54,7 +54,7 @@ impl Meta {
     }
 
     fn read_from(file: &impl StorageFile) -> Result<Self, Error> {
-        let mut buffer: [u8; 32] = Default::default();
+        let mut buffer: [u8; 16] = Default::default();
         let bytes_read = file.read_at(&mut buffer, 0)?;
 
         let magic: [u8; 4] = buffer[0..4].try_into().unwrap();
@@ -71,7 +71,7 @@ impl Meta {
             return Err(Error::UnsupportedVersion(format_version));
         }
 
-        let page_size_exponent = u32::from_be_bytes(buffer[5..9].try_into().unwrap()) as usize;
+        let page_size_exponent = u8::from_be_bytes(buffer[5..6].try_into().unwrap()) as usize;
 
         Ok(Self {
             format_version,
@@ -81,11 +81,11 @@ impl Meta {
     }
 
     fn write_to(&self, file: &mut impl StorageFile) -> Result<(), Error> {
-        let mut buf: [u8; 32] = Default::default();
+        let mut buf: [u8; 16] = Default::default();
 
         buf[0..4].copy_from_slice(&MAGIC);
         buf[5] = self.format_version;
-        buf[5..9].copy_from_slice(&self.page_size.to_be_bytes());
+        buf[5..6].copy_from_slice(&self.page_size_exponent.to_be_bytes());
 
         if file.write_at(&buf, 0)? != buf.len() {
             return Err(Error::IncompleteWrite);
@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn read_metadata() {
         let data = vec![
-            0x41, 0x43, 0x52, 0x4e, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x41, 0x43, 0x52, 0x4e, 0x01, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
