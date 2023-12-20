@@ -32,22 +32,24 @@ const MAGIC: [u8; 4] = *b"ACRN";
  * |--------|------|----------------------------------------------------------------------------|
  * |      0 |    4 | The magic bytes "ACRN" (hex: 0x41 0x43 0x52 0x4e)                          |
  * |      4 |    1 | The format version. Must be 1.                                             |
- * |      5 |    4 | The page size used in the file (big-endian).                               |
- * |      9 |   23 | Reserved for future use. Must be zero.                                     |
+ * |      5 |    1 | The base 2 logarithm of the page size used in the file (big-endian).       |
+ * |      6 |   10 | Reserved for future use. Must be zero.                                     |
  *
  */
 
 #[derive(Debug, Clone)]
 struct Meta {
     pub format_version: u8,
+    pub page_size_exponent: usize,
     pub page_size: usize,
 }
 
 impl Meta {
-    fn new(page_size: usize) -> Self {
+    fn new(page_size_exponent: usize) -> Self {
         Self {
             format_version: CURRENT_VERSION,
-            page_size,
+            page_size_exponent,
+            page_size: 1 << page_size_exponent,
         }
     }
 
@@ -69,11 +71,12 @@ impl Meta {
             return Err(Error::UnsupportedVersion(format_version));
         }
 
-        let page_size = u32::from_be_bytes(buffer[5..9].try_into().unwrap()) as usize;
+        let page_size_exponent = u32::from_be_bytes(buffer[5..9].try_into().unwrap()) as usize;
 
         Ok(Self {
             format_version,
-            page_size,
+            page_size_exponent,
+            page_size: 1 << page_size_exponent,
         })
     }
 
