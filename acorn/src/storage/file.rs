@@ -1,4 +1,4 @@
-use std::{fs::File, io, iter, ops::Range, usize};
+use std::{fs::File, io, ops::Range, usize};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
