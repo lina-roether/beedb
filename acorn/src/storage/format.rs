@@ -1,4 +1,4 @@
-use std::{io, u64, usize};
+use std::{io, num::NonZeroU32, u64, usize};
 
 use thiserror::Error;
 
@@ -22,7 +22,6 @@ pub enum Error {
 	Io(#[from] io::Error),
 }
 
-const CURRENT_VERSION: u8 = 1;
 const MAGIC: [u8; 4] = *b"ACRN";
 
 /*
@@ -41,7 +40,6 @@ const MAGIC: [u8; 4] = *b"ACRN";
 pub struct Meta {
 	pub format_version: u8,
 	pub page_size_exponent: u8,
-	pub page_size: usize,
 }
 
 impl Meta {
@@ -70,7 +68,6 @@ impl Meta {
 		Ok(Self {
 			format_version,
 			page_size_exponent,
-			page_size: 1 << page_size_exponent,
 		})
 	}
 
@@ -102,9 +99,9 @@ impl Meta {
 
 #[derive(Debug)]
 pub struct State {
-	pub num_pages: u32,
-	pub freelist_trunk: u32,
-	pub freelist_length: u32,
+	pub num_pages: usize,
+	pub freelist_trunk: Option<NonZeroU32>,
+	pub freelist_length: usize,
 }
 
 impl State {
@@ -117,9 +114,9 @@ impl State {
 			return Err(Error::UnexpectedEOF);
 		}
 
-		let num_pages = u32::from_be_bytes(buf[0..4].try_into().unwrap());
-		let freelist_trunk = u32::from_be_bytes(buf[4..8].try_into().unwrap());
-		let freelist_length = u32::from_be_bytes(buf[8..12].try_into().unwrap());
+		let num_pages = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
+		let freelist_trunk = NonZeroU32::new(u32::from_be_bytes(buf[4..8].try_into().unwrap()));
+		let freelist_length = u32::from_be_bytes(buf[8..12].try_into().unwrap()) as usize;
 
 		Ok(Self {
 			num_pages,
@@ -131,9 +128,15 @@ impl State {
 	pub fn write_to(&self, file: &mut impl StorageFile) -> Result<(), Error> {
 		let mut buf: [u8; Self::SIZE] = Default::default();
 
-		buf[0..4].copy_from_slice(&self.num_pages.to_be_bytes());
-		buf[4..8].copy_from_slice(&self.freelist_trunk.to_be_bytes());
-		buf[8..12].copy_from_slice(&self.freelist_length.to_be_bytes());
+		buf[0..4].copy_from_slice(&(self.num_pages as u32).to_be_bytes());
+		buf[4..8].copy_from_slice(
+			&self
+				.freelist_trunk
+				.map(NonZeroU32::get)
+				.unwrap_or(0)
+				.to_be_bytes(),
+		);
+		buf[8..12].copy_from_slice(&(self.freelist_length as u32).to_be_bytes());
 
 		if file.write_at(&buf, Self::OFFSET)? != buf.len() {
 			return Err(Error::IncompleteWrite);
@@ -142,8 +145,6 @@ impl State {
 		Ok(())
 	}
 }
-
-const PAGE_SECTION_OFFSET: u64 = Meta::SIZE as u64 + State::SIZE as u64;
 
 pub struct PageStorage<F: StorageFile> {
 	page_size: usize,
@@ -155,7 +156,7 @@ impl<F: StorageFile> PageStorage<F> {
 		Self { file, page_size }
 	}
 
-	pub fn read_page(&self, buf: &mut [u8], page_number: u32) -> Result<(), Error> {
+	pub fn read_page(&self, buf: &mut [u8], page_number: NonZeroU32) -> Result<(), Error> {
 		debug_assert_eq!(buf.len(), self.page_size);
 
 		let offset = self.page_offset(page_number);
@@ -167,7 +168,7 @@ impl<F: StorageFile> PageStorage<F> {
 		Ok(())
 	}
 
-	pub fn write_page(&mut self, buf: &[u8], page_number: u32) -> Result<(), Error> {
+	pub fn write_page(&mut self, buf: &[u8], page_number: NonZeroU32) -> Result<(), Error> {
 		debug_assert_eq!(buf.len(), self.page_size);
 
 		let offset = self.page_offset(page_number);
@@ -179,8 +180,13 @@ impl<F: StorageFile> PageStorage<F> {
 		Ok(())
 	}
 
-	fn page_offset(&self, page_number: u32) -> u64 {
-		PAGE_SECTION_OFFSET + (page_number as u64) * (self.page_size as u64)
+	#[inline]
+	pub fn page_size(&self) -> usize {
+		self.page_size
+	}
+
+	fn page_offset(&self, page_number: NonZeroU32) -> u64 {
+		u32::from(page_number) as u64 * self.page_size as u64
 	}
 }
 
@@ -200,7 +206,6 @@ mod tests {
 
 		let meta = Meta::read_from(&data).unwrap();
 		assert_eq!(meta.format_version, 1);
-		assert_eq!(meta.page_size, 1024);
 	}
 
 	#[test]
@@ -246,7 +251,6 @@ mod tests {
 		let meta = Meta {
 			format_version: 1,
 			page_size_exponent: 10,
-			page_size: 1024,
 		};
 
 		meta.write_to(&mut data).unwrap();
@@ -274,7 +278,7 @@ mod tests {
 		let state = State::read_from(&data).unwrap();
 
 		assert_eq!(state.num_pages, 69);
-		assert_eq!(state.freelist_trunk, 420);
+		assert_eq!(state.freelist_trunk, NonZeroU32::new(420));
 		assert_eq!(state.freelist_length, 42069);
 	}
 
@@ -291,7 +295,7 @@ mod tests {
 
 		let state = State {
 			num_pages: 123,
-			freelist_trunk: 543,
+			freelist_trunk: NonZeroU32::new(543),
 			freelist_length: 5432,
 		};
 		state.write_to(&mut data).unwrap();
@@ -310,37 +314,27 @@ mod tests {
 
 	#[test]
 	fn read_page() {
-		let storage = PageStorage::new(
-			vec![
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x34,
-				0x56, 0x78,
-			],
-			4,
-		);
+		let storage = PageStorage::new(vec![0x00, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78], 4);
 
 		let mut buf: [u8; 4] = Default::default();
-		storage.read_page(&mut buf, 1).unwrap();
+		storage
+			.read_page(&mut buf, NonZeroU32::new(1).unwrap())
+			.unwrap();
 		assert_eq!(buf, [0x12, 0x34, 0x56, 0x78]);
 	}
 
 	#[test]
 	fn write_page() {
 		let mut storage = PageStorage::new(Vec::new(), 4);
-		storage.write_page(&[0x23, 0x89, 0x43, 0x79], 3).unwrap();
+		storage
+			.write_page(&[0x23, 0x89, 0x43, 0x79], NonZeroU32::new(3).unwrap())
+			.unwrap();
 
 		assert_eq!(
 			storage.file,
 			vec![
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x89, 0x43, 0x79,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x89,
+				0x43, 0x79,
 			]
 		)
 	}
