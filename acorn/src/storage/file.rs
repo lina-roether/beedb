@@ -1,4 +1,4 @@
-use std::{fs::File, io, ops::Range};
+use std::{fs::File, io, iter, ops::Range, usize};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
@@ -13,6 +13,9 @@ pub trait StorageFile {
 }
 
 fn get_buf_range(len: usize, buf_len: usize, offset: u64) -> Range<usize> {
+    if offset >= len as u64 {
+        return 0..0;
+    };
     let start = offset as usize;
     start..usize::min(start + buf_len, len)
 }
@@ -26,6 +29,10 @@ impl StorageFile for Vec<u8> {
     }
 
     fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        let min_length = (offset as usize) + buf.len();
+        if self.len() < min_length {
+            self.resize(min_length, 0);
+        }
         let range = get_buf_range(self.len(), buf.len(), offset);
         let num_written = range.len();
         self[range].copy_from_slice(&buf[0..num_written]);
