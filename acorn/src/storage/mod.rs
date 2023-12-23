@@ -3,7 +3,10 @@ use std::{num::NonZeroU32, usize};
 use parking_lot::RwLock;
 use thiserror::Error;
 
-use crate::units::{KiB, B};
+use crate::utils::{
+	byte_order::ByteOrder,
+	units::{KiB, B},
+};
 
 use self::{
 	file::StorageFile,
@@ -26,6 +29,9 @@ pub enum LoadError {
 
 	#[error("The page size set in the storage file ({0}) is invalid")]
 	InvalidPageSize(usize),
+
+	#[error("Cannot open a {0} storage file on a {} system", ByteOrder::NATIVE)]
+	ByteOrderMismatch(ByteOrder),
 
 	#[error(transparent)]
 	Format(#[from] format::Error),
@@ -74,6 +80,10 @@ impl<F: StorageFile> Storage<F> {
 			return Err(LoadError::UnsupportedVersion(meta.format_version));
 		}
 
+		if meta.byte_order != ByteOrder::NATIVE {
+			return Err(LoadError::ByteOrderMismatch(meta.byte_order));
+		}
+
 		let page_size = 1 << meta.page_size_exponent;
 		if page_size < MIN_PAGE_SIZE {
 			return Err(LoadError::InvalidPageSize(page_size));
@@ -93,6 +103,7 @@ impl<F: StorageFile> Storage<F> {
 		let meta = Meta {
 			format_version: CURRENT_VERSION,
 			page_size_exponent: params.page_size.ilog2() as u8,
+			byte_order: ByteOrder::NATIVE,
 		};
 		meta.write_to(&mut file)?;
 

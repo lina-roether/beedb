@@ -2,6 +2,8 @@ use std::{io, num::NonZeroU32, u64, usize};
 
 use thiserror::Error;
 
+use crate::utils::byte_order::ByteOrder;
+
 use super::file::StorageFile;
 
 #[derive(Debug, Error)]
@@ -18,6 +20,9 @@ pub enum Error {
 	#[error("Failed to expand storage file")]
 	IncompleteWrite,
 
+	#[error("The storage file metadata is corrupted")]
+	CorruptedMeta,
+
 	#[error(transparent)]
 	Io(#[from] io::Error),
 }
@@ -25,14 +30,18 @@ pub enum Error {
 const MAGIC: [u8; 4] = *b"ACRN";
 
 /*
+ * Since the metadata contains the byte order, it is architecture-independent
+ * and always big-endian.
+ *
  * Metadata layout:
  *
  * | Offset | Size | Description                                                                |
  * |--------|------|----------------------------------------------------------------------------|
  * |      0 |    4 | The magic bytes "ACRN" (hex: 0x41 0x43 0x52 0x4e)                          |
  * |      4 |    1 | The format version. Must be 1.                                             |
- * |      5 |    1 | The base 2 logarithm of the page size used in the file (big-endian).       |
- * |      6 |   26 | Reserved for future use. Must be zero.                                     |
+ * |      5 |    1 | The base 2 logarithm of the page size used in the file.                    |
+ * |      6 |    1 | The byte order used in the file. 0 for big endian, 1 for little endian     |
+ * |      7 |   25 | Reserved for future use. Must be zero.                                     |
  *
  */
 
@@ -40,6 +49,7 @@ const MAGIC: [u8; 4] = *b"ACRN";
 pub struct Meta {
 	pub format_version: u8,
 	pub page_size_exponent: u8,
+	pub byte_order: ByteOrder,
 }
 
 impl Meta {
@@ -63,11 +73,17 @@ impl Meta {
 			return Err(Error::UnsupportedVersion(format_version));
 		}
 
-		let page_size_exponent = u8::from_be_bytes(buffer[5..6].try_into().unwrap());
+		let page_size_exponent = buffer[5];
+		let byte_order = match buffer[6] {
+			0 => ByteOrder::Big,
+			1 => ByteOrder::Little,
+			_ => return Err(Error::CorruptedMeta),
+		};
 
 		Ok(Self {
 			format_version,
 			page_size_exponent,
+			byte_order,
 		})
 	}
 
@@ -76,7 +92,8 @@ impl Meta {
 
 		buf[0..4].copy_from_slice(&MAGIC);
 		buf[4] = self.format_version;
-		buf[5..6].copy_from_slice(&self.page_size_exponent.to_be_bytes());
+		buf[5] = self.page_size_exponent;
+		buf[6] = self.byte_order as u8;
 
 		if file.write_at(&buf, 0)? != buf.len() {
 			return Err(Error::IncompleteWrite);
@@ -114,9 +131,9 @@ impl State {
 			return Err(Error::UnexpectedEOF);
 		}
 
-		let num_pages = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
-		let freelist_trunk = NonZeroU32::new(u32::from_be_bytes(buf[4..8].try_into().unwrap()));
-		let freelist_length = u32::from_be_bytes(buf[8..12].try_into().unwrap()) as usize;
+		let num_pages = u32::from_ne_bytes(buf[0..4].try_into().unwrap()) as usize;
+		let freelist_trunk = NonZeroU32::new(u32::from_ne_bytes(buf[4..8].try_into().unwrap()));
+		let freelist_length = u32::from_ne_bytes(buf[8..12].try_into().unwrap()) as usize;
 
 		Ok(Self {
 			num_pages,
@@ -128,15 +145,15 @@ impl State {
 	pub fn write_to(&self, file: &mut impl StorageFile) -> Result<(), Error> {
 		let mut buf: [u8; Self::SIZE] = Default::default();
 
-		buf[0..4].copy_from_slice(&(self.num_pages as u32).to_be_bytes());
+		buf[0..4].copy_from_slice(&(self.num_pages as u32).to_ne_bytes());
 		buf[4..8].copy_from_slice(
 			&self
 				.freelist_trunk
 				.map(NonZeroU32::get)
 				.unwrap_or(0)
-				.to_be_bytes(),
+				.to_ne_bytes(),
 		);
-		buf[8..12].copy_from_slice(&(self.freelist_length as u32).to_be_bytes());
+		buf[8..12].copy_from_slice(&(self.freelist_length as u32).to_ne_bytes());
 
 		if file.write_at(&buf, Self::OFFSET)? != buf.len() {
 			return Err(Error::IncompleteWrite);
@@ -192,20 +209,22 @@ impl<F: StorageFile> PageStorage<F> {
 
 #[cfg(test)]
 mod tests {
-	use std::assert_matches::assert_matches;
+	use std::{assert_matches::assert_matches, iter};
 
 	use super::*;
 
 	#[test]
 	fn read_metadata() {
 		let data = vec![
-			0x41, 0x43, 0x52, 0x4e, 0x01, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x41, 0x43, 0x52, 0x4e, 0x01, 0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		];
 
 		let meta = Meta::read_from(&data).unwrap();
 		assert_eq!(meta.format_version, 1);
+		assert_eq!(meta.page_size_exponent, 10);
+		assert_eq!(meta.byte_order, ByteOrder::Little);
 	}
 
 	#[test]
@@ -251,6 +270,7 @@ mod tests {
 		let meta = Meta {
 			format_version: 1,
 			page_size_exponent: 10,
+			byte_order: ByteOrder::Little,
 		};
 
 		meta.write_to(&mut data).unwrap();
@@ -258,7 +278,7 @@ mod tests {
 		assert_eq!(
 			data,
 			vec![
-				0x41, 0x43, 0x52, 0x4e, 0x01, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x41, 0x43, 0x52, 0x4e, 0x01, 0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00
 			]
@@ -267,13 +287,11 @@ mod tests {
 
 	#[test]
 	fn read_state() {
-		let data = vec![
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x45, 0x00, 0x00, 0x01, 0xa4, 0x00, 0x00,
-			0xa4, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		];
+		let mut data: Vec<u8> = iter::repeat(0x00).take(Meta::SIZE).collect();
+		data.extend(69_u32.to_ne_bytes());
+		data.extend(420_u32.to_ne_bytes());
+		data.extend(42069_u32.to_ne_bytes());
+		data.extend(iter::repeat(0x00).take(20));
 
 		let state = State::read_from(&data).unwrap();
 
@@ -300,16 +318,13 @@ mod tests {
 		};
 		state.write_to(&mut data).unwrap();
 
-		assert_eq!(
-			data,
-			vec![
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7b, 0x00, 0x00, 0x02, 0x1f, 0x00, 0x00,
-				0x15, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-			]
-		);
+		let mut expected: Vec<u8> = iter::repeat(0x00).take(Meta::SIZE).collect();
+		expected.extend(123_u32.to_ne_bytes());
+		expected.extend(543_u32.to_ne_bytes());
+		expected.extend(5432_u32.to_ne_bytes());
+		expected.extend(iter::repeat(0x00).take(20));
+
+		assert_eq!(data, expected);
 	}
 
 	#[test]
