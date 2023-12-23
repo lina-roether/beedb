@@ -1,11 +1,13 @@
 use std::io;
 use thiserror::Error;
 
-pub use meta::*;
-pub use state::*;
-
 mod meta;
+mod pages;
 mod state;
+
+pub use meta::*;
+pub use pages::*;
+pub use state::*;
 
 const MAGIC: [u8; 4] = *b"ACRN";
 
@@ -23,8 +25,8 @@ pub enum Error {
 	#[error("Failed to expand storage file")]
 	IncompleteWrite,
 
-	#[error("The storage file metadata is corrupted")]
-	CorruptedMeta,
+	#[error("The storage file is corrupted")]
+	Corrupted,
 
 	#[error(transparent)]
 	Io(#[from] io::Error),

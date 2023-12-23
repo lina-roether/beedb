@@ -50,7 +50,7 @@ impl Meta {
 		let byte_order = match buffer[6] {
 			0 => ByteOrder::Big,
 			1 => ByteOrder::Little,
-			_ => return Err(Error::CorruptedMeta),
+			_ => return Err(Error::Corrupted),
 		};
 
 		Ok(Self {
