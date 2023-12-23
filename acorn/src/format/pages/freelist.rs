@@ -1,6 +1,8 @@
-use std::{num::NonZeroU32, ptr, usize};
+use std::{mem::size_of, num::NonZeroU32};
 
 use crate::format::Error;
+
+use super::Page;
 
 #[repr(C)]
 pub struct FreelistPage {
@@ -9,25 +11,12 @@ pub struct FreelistPage {
 	pub pages: [Option<NonZeroU32>],
 }
 
+impl Page for FreelistPage {
+	const HEADER_SIZE: usize = size_of::<Option<NonZeroU32>>() + size_of::<u32>();
+	const ITEM_SIZE: usize = size_of::<Option<NonZeroU32>>();
+}
+
 impl FreelistPage {
-	const HEADER_SIZE: usize = 8;
-	const ITEM_SIZE: usize = 4;
-
-	#[inline]
-	pub fn new(bytes: &[u8]) -> &Self {
-		unsafe { &*ptr::from_raw_parts(bytes.as_ptr() as *const (), Self::metadata(bytes.len())) }
-	}
-
-	#[inline]
-	pub fn new_mut(bytes: &mut [u8]) -> &mut Self {
-		unsafe {
-			&mut *ptr::from_raw_parts_mut(
-				bytes.as_mut_ptr() as *mut (),
-				Self::metadata(bytes.len()),
-			)
-		}
-	}
-
 	#[inline]
 	pub fn is_full(&self) -> bool {
 		self.length as usize == self.pages.len()
@@ -58,12 +47,6 @@ impl FreelistPage {
 		};
 		self.length -= 1;
 		Ok(Some(page))
-	}
-
-	#[inline]
-	fn metadata(len: usize) -> usize {
-		debug_assert!(len >= Self::HEADER_SIZE);
-		(len - Self::HEADER_SIZE) / Self::ITEM_SIZE
 	}
 }
 
