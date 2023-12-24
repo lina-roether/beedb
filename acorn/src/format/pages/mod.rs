@@ -1,12 +1,15 @@
-use core::slice;
-use std::ptr::Pointee;
+use std::alloc::Layout;
+use std::mem::{align_of, size_of};
 use std::{ptr, usize};
 
 use crate::storage::StorageFile;
+use crate::utils::byte_view::ByteView;
 
 mod freelist;
+mod header;
 
 pub use freelist::*;
+pub use header::*;
 
 use super::Error;
 
@@ -46,66 +49,50 @@ impl<F: StorageFile> PageStorage<F> {
 	}
 }
 
-#[inline]
-fn num_items_from_byte_length<P: ?Sized + Page>(len: usize) -> usize {
-	debug_assert!(len >= P::HEADER_SIZE);
-	(len - P::HEADER_SIZE) / P::ITEM_SIZE
+#[repr(C)]
+pub struct Page<H, I>
+where
+	H: ByteView,
+	I: ByteView,
+{
+	pub header: H,
+	pub items: [I],
 }
 
-#[inline]
-fn byte_length_from_num_items<P: ?Sized + Page>(num_items: usize) -> usize {
-	num_items * P::ITEM_SIZE + P::HEADER_SIZE
-}
-
-pub trait Page: Pointee<Metadata = usize> {
-	const HEADER_SIZE: usize;
-	const ITEM_SIZE: usize;
-
+impl<H, I> Page<H, I>
+where
+	H: ByteView,
+	I: ByteView,
+{
 	#[inline]
-	fn new(bytes: &[u8]) -> &Self {
-		unsafe {
-			&*ptr::from_raw_parts(
-				bytes.as_ptr() as *const (),
-				num_items_from_byte_length::<Self>(bytes.len()),
-			)
-		}
+	pub fn from_bytes(bytes: &[u8]) -> &Self {
+		unsafe { &*ptr::from_raw_parts(bytes.as_ptr() as *const (), Self::num_items(bytes.len())) }
 	}
 
 	#[inline]
-	fn new_mut(bytes: &mut [u8]) -> &mut Self {
+	pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Self {
 		unsafe {
 			&mut *ptr::from_raw_parts_mut(
-				bytes.as_ptr() as *mut (),
-				num_items_from_byte_length::<Self>(bytes.len()),
+				bytes.as_mut_ptr() as *mut (),
+				Self::num_items(bytes.len()),
 			)
 		}
 	}
 
-	#[inline]
-	fn as_bytes(&self) -> &[u8] {
-		unsafe {
-			slice::from_raw_parts(
-				self as *const Self as *const u8,
-				byte_length_from_num_items::<Self>(ptr::metadata(self as *const Self)),
-			)
-		}
-	}
+	const HEADER_PADDING: usize = Layout::new::<H>().padding_needed_for(align_of::<I>());
+	const ITEM_PADDING: usize = Layout::new::<I>().padding_needed_for(align_of::<I>());
+
+	const HEADER_SIZE_PADDED: usize = size_of::<H>() + Self::HEADER_PADDING;
+	const ITEM_SIZE_PADDED: usize = size_of::<I>() + Self::ITEM_PADDING;
 
 	#[inline]
-	fn as_bytes_mut(&mut self) -> &[u8] {
-		unsafe {
-			slice::from_raw_parts_mut(
-				self as *mut Self as *mut u8,
-				byte_length_from_num_items::<Self>(ptr::metadata(self as *const Self)),
-			)
-		}
+	fn num_items(size: usize) -> usize {
+		(size - Self::HEADER_SIZE_PADDED) / Self::ITEM_SIZE_PADDED
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use std::mem::size_of;
-
 	use super::*;
 
 	#[test]
@@ -131,16 +118,6 @@ mod tests {
 		);
 	}
 
-	struct TestPage {
-		number: u32,
-		items: [u16],
-	}
-
-	impl Page for TestPage {
-		const HEADER_SIZE: usize = size_of::<u32>();
-		const ITEM_SIZE: usize = size_of::<u16>();
-	}
-
 	#[test]
 	fn interpret_page() {
 		let mut page: [u8; 9] = Default::default();
@@ -148,8 +125,8 @@ mod tests {
 		page[4..6].copy_from_slice(&69_u16.to_ne_bytes());
 		page[6..8].copy_from_slice(&420_u16.to_ne_bytes());
 
-		let test_page = TestPage::new(&page);
-		assert_eq!(test_page.number, 16);
+		let test_page = Page::<u32, u16>::from_bytes(&page);
+		assert_eq!(test_page.header, 16);
 		assert_eq!(test_page.items.len(), 2);
 		assert_eq!(test_page.items[0], 69);
 		assert_eq!(test_page.items[1], 420);

@@ -1,16 +1,20 @@
-use std::{mem::size_of, num::NonZeroU32};
+use std::num::NonZeroU32;
 
-use crate::format::Error;
+use crate::utils::byte_view::ByteView;
 
 use super::Page;
 
 #[repr(C)]
-pub struct FreelistPage {
+pub struct FreelistPageHeader {
 	pub next: Option<NonZeroU32>,
 	pub length: u32,
-	pub pages: [Option<NonZeroU32>],
 }
 
+unsafe impl ByteView for FreelistPageHeader {}
+
+pub type FreelistPage = Page<FreelistPageHeader, Option<NonZeroU32>>;
+
+/*
 impl Page for FreelistPage {
 	const HEADER_SIZE: usize = size_of::<Option<NonZeroU32>>() + size_of::<u32>();
 	const ITEM_SIZE: usize = size_of::<Option<NonZeroU32>>();
@@ -50,6 +54,8 @@ impl FreelistPage {
 	}
 }
 
+*/
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -64,23 +70,24 @@ mod tests {
 		bytes.extend(0_u32.to_ne_bytes());
 		bytes.extend([0x00, 0x00]);
 
-		let page = FreelistPage::new(&bytes);
+		let page = FreelistPage::from_bytes(&bytes);
 
-		assert_eq!(page.next, None);
-		assert_eq!(page.length, 3);
-		assert_eq!(page.pages, [NonZeroU32::new(1), NonZeroU32::new(2), None])
+		assert_eq!(page.header.next, None);
+		assert_eq!(page.header.length, 3);
+		assert_eq!(page.items, [NonZeroU32::new(1), NonZeroU32::new(2), None])
 	}
 
 	#[test]
-	fn pages_push_format() {
+	fn write_freelist_page() {
 		let mut bytes = Vec::new();
 		bytes.extend(0_u32.to_ne_bytes());
 		bytes.extend(0_u32.to_ne_bytes());
 		bytes.extend(0_u32.to_ne_bytes());
 
-		let page = FreelistPage::new_mut(&mut bytes);
+		let page = FreelistPage::from_bytes_mut(&mut bytes);
 
-		assert!(page.push_page(NonZeroU32::new(69).unwrap()));
+		page.header.length = 1;
+		page.items[0] = NonZeroU32::new(69);
 
 		let mut expected = Vec::new();
 		expected.extend(0_u32.to_ne_bytes());
@@ -88,20 +95,5 @@ mod tests {
 		expected.extend(69_u32.to_ne_bytes());
 
 		assert_eq!(bytes, expected);
-	}
-
-	#[test]
-	fn pages_push_and_pop() {
-		let mut bytes = Vec::new();
-		bytes.extend(0_u32.to_ne_bytes());
-		bytes.extend(0_u32.to_ne_bytes());
-		bytes.extend(0_u32.to_ne_bytes());
-
-		let page = FreelistPage::new_mut(&mut bytes);
-
-		assert!(page.push_page(NonZeroU32::new(69).unwrap()));
-		assert!(!page.push_page(NonZeroU32::new(420).unwrap()));
-		assert_eq!(page.pop_page().unwrap(), NonZeroU32::new(69));
-		assert_eq!(page.pop_page().unwrap(), None);
 	}
 }
