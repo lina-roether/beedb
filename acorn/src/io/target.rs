@@ -6,7 +6,7 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 
-pub trait StorageFile {
+pub trait IoTarget {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
 
 	fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize>;
@@ -20,7 +20,7 @@ fn get_buf_range(len: usize, buf_len: usize, offset: u64) -> Range<usize> {
 	start..usize::min(start + buf_len, len)
 }
 
-impl StorageFile for Vec<u8> {
+impl IoTarget for Vec<u8> {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 		let range = get_buf_range(self.len(), buf.len(), offset);
 		let num_read = range.len();
@@ -42,7 +42,7 @@ impl StorageFile for Vec<u8> {
 
 cfg_match! {
 	cfg(unix) => {
-		impl StorageFile for File {
+		impl IoTarget for File {
 			fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 				FileExt::read_at(self, buf, offset)
 			}
@@ -53,7 +53,7 @@ cfg_match! {
 		}
 	}
 	cfg(windows) => {
-		impl StorageFile for File {
+		impl IoTarget for File {
 			fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 				FileExt::seek_read(self, buf, offset)
 			}

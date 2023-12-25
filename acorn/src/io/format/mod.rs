@@ -2,7 +2,6 @@ use std::alloc::Layout;
 use std::mem::{align_of, size_of};
 use std::{ptr, usize};
 
-use crate::storage::StorageFile;
 use crate::utils::byte_view::ByteView;
 
 mod freelist;
@@ -10,44 +9,6 @@ mod header;
 
 pub use freelist::*;
 pub use header::*;
-
-use super::Error;
-
-pub struct PageStorage<F: StorageFile> {
-	page_size: usize,
-	file: F,
-}
-
-impl<F: StorageFile> PageStorage<F> {
-	#[inline]
-	pub fn new(file: F, page_size: usize) -> Self {
-		Self { page_size, file }
-	}
-
-	#[inline]
-	pub fn page_size(&self) -> usize {
-		self.page_size
-	}
-
-	#[inline]
-	pub fn read_page(&self, buf: &mut [u8], page_number: u32) -> Result<(), Error> {
-		self.file
-			.read_at(&mut buf[0..self.page_size], self.page_offset(page_number))?;
-		Ok(())
-	}
-
-	#[inline]
-	pub fn write_page(&mut self, buf: &[u8], page_number: u32) -> Result<(), Error> {
-		self.file
-			.write_at(&buf[0..self.page_size], self.page_offset(page_number))?;
-		Ok(())
-	}
-
-	#[inline]
-	fn page_offset(&self, page_number: u32) -> u64 {
-		(page_number as u64) * (self.page_size as u64)
-	}
-}
 
 #[repr(C)]
 pub struct Page<H, I>
@@ -94,29 +55,6 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn read_page() {
-		let data = vec![0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
-		let pages = PageStorage::new(data, 4);
-
-		let mut buf: [u8; 4] = Default::default();
-		pages.read_page(&mut buf, 1).unwrap();
-
-		assert_eq!(buf, [0x01, 0x02, 0x03, 0x04]);
-	}
-
-	#[test]
-	fn write_page() {
-		let mut pages = PageStorage::new(Vec::new(), 4);
-
-		pages.write_page(&[0xaa, 0xbb, 0xcc, 0xdd], 2).unwrap();
-
-		assert_eq!(
-			pages.file,
-			vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd]
-		);
-	}
 
 	#[test]
 	fn interpret_page() {

@@ -1,18 +1,16 @@
 use std::io;
 use thiserror::Error;
 
-mod meta;
-mod pages;
-mod state;
+use self::target::IoTarget;
 
-pub use meta::*;
-pub use pages::*;
-pub use state::*;
+mod format;
+mod lock;
+mod target;
 
 const MAGIC: [u8; 4] = *b"ACRN";
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum StorageError {
 	#[error("The provided file is not an acorn storage file (expected magic bytes {MAGIC:08x?})")]
 	NotAStorageFile,
 
@@ -20,14 +18,17 @@ pub enum Error {
 	UnsupportedVersion(u8),
 
 	#[error("The storage is corrupted (Unexpected end of file)")]
-	UnexpectedEOF,
+	IncompleteRead,
 
 	#[error("Failed to expand storage file")]
 	IncompleteWrite,
 
-	#[error("The storage file is corrupted")]
-	Corrupted,
-
-	#[error(transparent)]
+	#[error("An error occurred accessing the storage file: {0}")]
 	Io(#[from] io::Error),
+}
+
+pub struct StorageFile<T: IoTarget> {
+	header_buf: Box<[u8]>,
+	page_size: usize,
+	target: T,
 }
