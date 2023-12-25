@@ -13,6 +13,13 @@ pub struct HeaderPage {
 
 unsafe impl ByteView for HeaderPage {}
 
+impl HeaderPage {
+	#[inline]
+	pub fn page_size(&self) -> usize {
+		1 << self.page_size_exponent
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::utils::byte_order::ByteOrder;

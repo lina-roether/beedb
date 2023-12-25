@@ -7,4 +7,5 @@
 
 mod cache;
 mod io;
+mod lock;
 mod utils;
