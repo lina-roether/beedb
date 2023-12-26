@@ -92,8 +92,8 @@ impl<T: IoTarget> StorageFile<T> {
 			format_version: FORMAT_VERSION,
 			page_size_exponent,
 			byte_order: ByteOrder::NATIVE as u8,
-			freelist_trunk: None,
 			num_pages: 1,
+			freelist_trunk: None,
 		};
 		if target.write_at(&header_buf, 0)? != header_buf.len() {
 			return Err(InitError::IncompleteWrite);
@@ -199,7 +199,12 @@ impl<T: IoTarget> StorageFile<T> {
 		let trunk_page = cache.get_page();
 
 		if trunk_page.header.length == 0 {
-			self.set_freelist_trunk(trunk_page.header.next)?;
+			let new_trunk = trunk_page.header.next;
+			self.set_freelist_trunk(new_trunk)?;
+			cache.page_num = new_trunk;
+			if let Some(new_trunk) = new_trunk {
+				self.read_page(&mut cache.buf, new_trunk)?;
+			}
 			return Ok(Some(page_num));
 		}
 
@@ -308,7 +313,7 @@ impl FreelistCache {
 
 #[cfg(test)]
 mod tests {
-	use std::assert_matches::assert_matches;
+	use std::{assert_matches::assert_matches, collections::HashSet, hash::Hash};
 
 	use super::*;
 
@@ -431,5 +436,95 @@ mod tests {
 			Ok(..) => panic!("Should not succeed"),
 			Err(err) => assert_matches!(err, StorageError::Corrupted),
 		}
+	}
+
+	#[test]
+	fn simple_alloc_write_read() {
+		let mut file: Vec<u8> = Vec::new();
+		StorageFile::init(&mut file, InitParams::default()).unwrap();
+		let storage = StorageFile::load(file).unwrap();
+
+		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+
+		let page_num = storage.allocate_page().unwrap();
+
+		src_buf.fill(69);
+		src_buf[0] = 25;
+		src_buf[storage.page_size() - 1] = 42;
+		storage.write_page(&src_buf, page_num).unwrap();
+
+		storage.read_page(&mut dst_buf, page_num).unwrap();
+
+		assert_eq!(src_buf, dst_buf);
+	}
+
+	#[test]
+	fn simple_free() {
+		let mut file: Vec<u8> = Vec::new();
+		StorageFile::init(&mut file, InitParams::default()).unwrap();
+		let storage = StorageFile::load(file).unwrap();
+
+		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+
+		let page_num_1 = storage.allocate_page().unwrap();
+		let page_num_2 = storage.allocate_page().unwrap();
+
+		storage.free_page(page_num_1).unwrap();
+		storage.free_page(page_num_2).unwrap();
+
+		let page_num_3 = storage.allocate_page().unwrap();
+		let page_num_4 = storage.allocate_page().unwrap();
+
+		src_buf.fill(69);
+		storage.write_page(&src_buf, page_num_3).unwrap();
+
+		src_buf.fill(25);
+		storage.write_page(&src_buf, page_num_4).unwrap();
+
+		src_buf.fill(69);
+		storage.read_page(&mut dst_buf, page_num_3).unwrap();
+		assert_eq!(src_buf, dst_buf);
+
+		src_buf.fill(25);
+		storage.read_page(&mut dst_buf, page_num_4).unwrap();
+		assert_eq!(src_buf, dst_buf);
+
+		assert_eq!(storage.num_pages(), 3);
+	}
+
+	#[test]
+	fn saturating_alloc_free() {
+		let mut file: Vec<u8> = Vec::new();
+		StorageFile::init(&mut file, InitParams { page_size: 512 }).unwrap();
+		let storage = StorageFile::load(file).unwrap();
+
+		let mut pages: Vec<NonZeroU32> = Vec::new();
+		for _ in 0..500 {
+			pages.push(storage.allocate_page().unwrap());
+		}
+		for page in pages.iter().copied() {
+			storage.free_page(page).unwrap();
+		}
+		let mut reallocated_pages: Vec<NonZeroU32> = Vec::new();
+		for _ in 0..500 {
+			reallocated_pages.push(storage.allocate_page().unwrap());
+		}
+
+		assert!(has_no_duplicates(pages));
+		assert!(has_no_duplicates(reallocated_pages));
+		assert_eq!(storage.num_pages(), 501);
+	}
+
+	fn has_no_duplicates<T: Eq + Hash>(items: impl IntoIterator<Item = T>) -> bool {
+		let mut known_values: HashSet<T> = HashSet::new();
+		for item in items {
+			if known_values.contains(&item) {
+				return false;
+			}
+			known_values.insert(item);
+		}
+		true
 	}
 }
