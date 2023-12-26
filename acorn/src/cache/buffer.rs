@@ -1,204 +1,160 @@
+use core::slice;
 use std::{
 	alloc::{alloc, dealloc, handle_alloc_error, Layout},
-	cell::{Cell, UnsafeCell},
-	fmt::{self, Debug},
+	cell::UnsafeCell,
 	iter,
+	ops::{Deref, DerefMut},
 	ptr::NonNull,
-	slice,
-	sync::atomic::{AtomicUsize, Ordering},
+	usize,
 };
 
 use parking_lot::{lock_api::RawRwLock as _, RawRwLock};
 
-const PAGE_ALIGN: usize = 8;
-
-const fn page_layout(content_size: usize) -> Layout {
-	unsafe { Layout::from_size_align_unchecked(content_size, PAGE_ALIGN) }
+pub struct PageReadGuard<'a> {
+	lock: &'a RawRwLock,
+	page: &'a [u8],
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-#[repr(u8)]
-enum PageStatus {
-	#[default]
-	Clean,
-	InUse,
-	Dirty,
-}
-
-struct PageMeta {
-	ref_count: AtomicUsize,
-	lock: RawRwLock,
-	status: Cell<PageStatus>,
-}
-
-impl PageMeta {
-	fn new(ref_count: usize, page_status: PageStatus) -> Self {
-		Self {
-			ref_count: AtomicUsize::new(ref_count),
-			lock: RawRwLock::INIT,
-			status: Cell::new(page_status),
+impl<'a> Drop for PageReadGuard<'a> {
+	fn drop(&mut self) {
+		unsafe {
+			self.lock.unlock_shared();
 		}
 	}
 }
 
-impl Default for PageMeta {
-	fn default() -> Self {
-		Self::new(0, PageStatus::default())
+impl<'a> Deref for PageReadGuard<'a> {
+	type Target = [u8];
+
+	#[inline]
+	fn deref(&self) -> &Self::Target {
+		self.page
 	}
 }
 
-impl Debug for PageMeta {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let mut page_meta = f.debug_struct("PageMeta");
-		page_meta.field("ref_count", &self.ref_count);
-		if self.lock.is_locked_exclusive() {
-			page_meta.field("lock", &"<locked exclusive>");
-		} else if self.lock.is_locked() {
-			page_meta.field("lock", &"<locked shared>");
-		} else {
-			page_meta.field("lock", &"<unlocked>");
+impl<'a> AsRef<[u8]> for PageReadGuard<'a> {
+	#[inline]
+	fn as_ref(&self) -> &[u8] {
+		self
+	}
+}
+
+pub struct PageWriteGuard<'a> {
+	lock: &'a RawRwLock,
+	page: &'a mut [u8],
+}
+
+impl<'a> Drop for PageWriteGuard<'a> {
+	fn drop(&mut self) {
+		unsafe {
+			self.lock.unlock_exclusive();
 		}
-		page_meta.field("status", &self.status);
-		page_meta.finish()
 	}
 }
 
-#[derive(Debug)]
-pub struct SharedPage<'a> {
-	meta: &'a PageMeta,
-	pub data: &'a [u8],
-}
+impl<'a> Deref for PageWriteGuard<'a> {
+	type Target = [u8];
 
-impl<'a> SharedPage<'a> {
-	fn acquire(meta: &'a PageMeta, data: &'a [u8]) -> Self {
-		meta.lock.lock_shared();
-		meta.ref_count.fetch_add(1, Ordering::Relaxed);
-		Self { meta, data }
+	#[inline]
+	fn deref(&self) -> &Self::Target {
+		self.page
 	}
 }
 
-impl<'a> Clone for SharedPage<'a> {
-	fn clone(&self) -> Self {
-		Self::acquire(self.meta, self.data)
+impl<'a> DerefMut for PageWriteGuard<'a> {
+	#[inline]
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.page
 	}
 }
 
-impl<'a> Drop for SharedPage<'a> {
-	fn drop(&mut self) {
-		self.meta.ref_count.fetch_sub(1, Ordering::Relaxed);
-		unsafe { self.meta.lock.unlock_shared() };
+impl<'a> AsRef<[u8]> for PageWriteGuard<'a> {
+	#[inline]
+	fn as_ref(&self) -> &[u8] {
+		self
 	}
 }
 
-pub struct ExclusivePage<'a> {
-	meta: &'a PageMeta,
-	pub data: &'a mut [u8],
-}
-
-impl<'a> ExclusivePage<'a> {
-	fn acquire(meta: &'a PageMeta, data: &'a mut [u8]) -> Self {
-		meta.lock.lock_exclusive();
-		meta.ref_count.fetch_add(1, Ordering::Relaxed);
-		meta.status.set(PageStatus::InUse);
-		Self { meta, data }
+impl<'a> AsMut<[u8]> for PageWriteGuard<'a> {
+	#[inline]
+	fn as_mut(&mut self) -> &mut [u8] {
+		self
 	}
 }
 
-impl<'a> Drop for ExclusivePage<'a> {
-	fn drop(&mut self) {
-		self.meta.status.set(PageStatus::Dirty);
-		self.meta.ref_count.fetch_sub(1, Ordering::Relaxed);
-		unsafe { self.meta.lock.unlock_exclusive() };
-	}
-}
-
-struct PageBuffer {
+pub struct PageBuffer {
 	length: usize,
-	buffer_layout: Layout,
 	page_size: usize,
 	page_size_padded: usize,
-	buffer: UnsafeCell<NonNull<u8>>,
-	meta: Box<[Option<PageMeta>]>,
+	locks: Box<[RawRwLock]>,
+	pages: UnsafeCell<NonNull<u8>>,
 }
 
 impl PageBuffer {
-	fn new(page_content_size: usize, length: usize) -> Self {
-		let page_layout = page_layout(page_content_size);
-		let (buffer_layout, page_size_padded) = page_layout
-			.repeat(length)
-			.expect("It seems someone thinks they have infinite memory...");
+	const PAGE_ALIGNMENT: usize = 8;
 
-		let buffer = unsafe {
-			let ptr = alloc(buffer_layout);
-			NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(buffer_layout))
+	pub fn new(page_size: usize, length: usize) -> Self {
+		let (buf_layout, page_size_padded) = Self::page_buffer_layout(page_size, length);
+		let Some(pages) = (unsafe { NonNull::new(alloc(buf_layout)) }) else {
+			handle_alloc_error(buf_layout);
 		};
-
-		let meta = iter::repeat_with(|| None).take(length).collect();
 
 		Self {
 			length,
-			buffer_layout,
-			page_size: page_layout.size(),
+			page_size,
 			page_size_padded,
-			buffer: UnsafeCell::new(buffer),
-			meta,
+			locks: iter::repeat_with(|| RawRwLock::INIT).take(length).collect(),
+			pages: UnsafeCell::new(pages),
 		}
 	}
 
-	#[inline]
-	pub fn get_page_shared(&self, index: usize) -> Option<SharedPage> {
-		debug_assert!(index < self.length);
-		let meta = self.meta[index].as_ref()?;
-		let data = unsafe { self.get_page_data(index) };
-		Some(SharedPage::acquire(meta, data))
-	}
-
-	#[inline]
-	pub fn get_page_exclusive(&self, index: usize) -> Option<ExclusivePage> {
-		debug_assert!(index < self.length);
-		let meta = self.meta[index].as_ref()?;
-		let data = unsafe { self.get_page_data(index) };
-		Some(ExclusivePage::acquire(meta, data))
-	}
-
-	pub fn get_empty_page_mut(&mut self, index: usize) -> Option<&mut [u8]> {
-		debug_assert!(index < self.length);
-		if self.meta[index].is_some() {
-			return None;
+	pub fn read_page(&self, index: usize) -> PageReadGuard {
+		self.locks[index].lock_shared();
+		PageReadGuard {
+			lock: &self.locks[index],
+			page: unsafe { slice::from_raw_parts(self.get_page_ptr(index), self.page_size) },
 		}
-		Some(unsafe { self.get_page_data(index) })
 	}
 
-	pub fn set_filled(&mut self, index: usize) {
-		debug_assert!(index < self.length);
-		debug_assert!(self.meta[index].is_none());
-		self.meta[index] = Some(PageMeta::default())
+	pub fn write_page(&self, index: usize) -> PageWriteGuard {
+		self.locks[index].lock_exclusive();
+		PageWriteGuard {
+			lock: &self.locks[index],
+			page: unsafe { slice::from_raw_parts_mut(self.get_page_ptr(index), self.page_size) },
+		}
 	}
 
-	#[allow(clippy::mut_from_ref)]
-	#[inline]
-	unsafe fn get_page_data(&self, index: usize) -> &mut [u8] {
-		slice::from_raw_parts_mut(
-			(*self.buffer.get())
-				.as_ptr()
-				.add(index * self.page_size_padded),
-			self.page_size,
-		)
+	unsafe fn get_page_ptr(&self, index: usize) -> *mut u8 {
+		if index >= self.length {
+			panic!(
+				"Page buffer index {index} out of bounds for length {}",
+				self.length
+			);
+		}
+		(*self.pages.get())
+			.as_ptr()
+			.add(index * self.page_size_padded)
+	}
+
+	fn page_buffer_layout(page_size: usize, length: usize) -> (Layout, usize) {
+		let page_layout = Layout::from_size_align(page_size, Self::PAGE_ALIGNMENT).unwrap();
+		page_layout.repeat(length).unwrap()
 	}
 }
 
 impl Drop for PageBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			dealloc((*self.buffer.get()).as_ptr(), self.buffer_layout);
+			dealloc(
+				(*self.pages.get()).as_ptr(),
+				Self::page_buffer_layout(self.page_size, self.length).0,
+			)
 		}
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use std::mem::size_of;
-
 	use super::*;
 
 	#[test]
@@ -207,37 +163,23 @@ mod tests {
 	}
 
 	#[test]
-	fn try_acquire_empty_page() {
-		let buffer = PageBuffer::new(69, 420);
-		assert!(buffer.get_page_shared(4).is_none());
-		assert!(buffer.get_page_shared(4).is_none());
-	}
-
-	#[test]
-	fn shared_page_read() {
-		let mut buffer = PageBuffer::new(size_of::<u32>(), 4);
+	fn read_and_write_pages() {
+		let buffer = PageBuffer::new(4, 10);
 
 		{
-			let page_mut = buffer.get_empty_page_mut(3).unwrap();
-			page_mut.clone_from_slice(&69_i32.to_ne_bytes());
-			buffer.set_filled(3);
+			let mut page_4 = buffer.write_page(4);
+			page_4.copy_from_slice(b"moin");
 		}
-
-		let shared_page = buffer.get_page_shared(3).unwrap();
-		assert_eq!(shared_page.data, 69_i32.to_ne_bytes());
-	}
-
-	#[test]
-	fn exclusive_page_read() {
-		let mut buffer = PageBuffer::new(size_of::<u32>(), 4);
 
 		{
-			let page_mut = buffer.get_empty_page_mut(3).unwrap();
-			page_mut.clone_from_slice(&69_i32.to_ne_bytes());
-			buffer.set_filled(3);
+			let mut page_5 = buffer.write_page(5);
+			page_5.copy_from_slice(b"tree");
 		}
 
-		let exclusive_page = buffer.get_page_exclusive(3).unwrap();
-		assert_eq!(exclusive_page.data, 69_i32.to_ne_bytes());
+		let page_4 = buffer.read_page(4);
+		let page_5 = buffer.read_page(5);
+
+		assert_eq!(*page_4, *b"moin");
+		assert_eq!(*page_5, *b"tree");
 	}
 }
