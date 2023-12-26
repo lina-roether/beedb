@@ -16,6 +16,14 @@ impl ByteOrder {
 			pub const NATIVE: Self = Self::Little;
 		}
 	}
+
+	pub fn from_byte(byte: u8) -> Option<Self> {
+		match byte {
+			0 => Some(Self::Big),
+			1 => Some(Self::Little),
+			_ => None,
+		}
+	}
 }
 
 impl fmt::Display for ByteOrder {

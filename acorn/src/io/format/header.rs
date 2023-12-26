@@ -4,21 +4,15 @@ use crate::utils::byte_view::ByteView;
 
 #[repr(C)]
 pub struct HeaderPage {
-	magic: [u8; 4],
-	byte_order: u8,
-	page_size_exponent: u8,
-	num_pages: u32,
-	freelist_trunk: Option<NonZeroU32>,
+	pub magic: [u8; 4],
+	pub format_version: u8,
+	pub byte_order: u8,
+	pub page_size_exponent: u8,
+	pub num_pages: u32,
+	pub freelist_trunk: Option<NonZeroU32>,
 }
 
 unsafe impl ByteView for HeaderPage {}
-
-impl HeaderPage {
-	#[inline]
-	pub fn page_size(&self) -> usize {
-		1 << self.page_size_exponent
-	}
-}
 
 #[cfg(test)]
 mod tests {
@@ -30,6 +24,7 @@ mod tests {
 	fn read_header_page() {
 		let mut bytes: Vec<u8> = Vec::new();
 		bytes.extend(b"TOME");
+		bytes.push(1);
 		bytes.push(ByteOrder::Little as u8);
 		bytes.push(3);
 		bytes.extend([0, 0]);
@@ -39,6 +34,7 @@ mod tests {
 
 		let header_page = HeaderPage::from_bytes(&bytes);
 		assert_eq!(header_page.magic, *b"TOME");
+		assert_eq!(header_page.format_version, 1);
 		assert_eq!(header_page.byte_order, ByteOrder::Little as u8);
 		assert_eq!(header_page.page_size_exponent, 3);
 		assert_eq!(header_page.num_pages, 69);

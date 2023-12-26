@@ -1,6 +1,6 @@
 use std::{
 	alloc::{alloc, dealloc, handle_alloc_error, Layout},
-	cell::Cell,
+	cell::{Cell, UnsafeCell},
 	fmt::{self, Debug},
 	iter,
 	ptr::NonNull,
@@ -117,7 +117,7 @@ struct PageBuffer {
 	buffer_layout: Layout,
 	page_size: usize,
 	page_size_padded: usize,
-	buffer: NonNull<u8>,
+	buffer: UnsafeCell<NonNull<u8>>,
 	meta: Box<[Option<PageMeta>]>,
 }
 
@@ -140,7 +140,7 @@ impl PageBuffer {
 			buffer_layout,
 			page_size: page_layout.size(),
 			page_size_padded,
-			buffer,
+			buffer: UnsafeCell::new(buffer),
 			meta,
 		}
 	}
@@ -179,7 +179,9 @@ impl PageBuffer {
 	#[inline]
 	unsafe fn get_page_data(&self, index: usize) -> &mut [u8] {
 		slice::from_raw_parts_mut(
-			self.buffer.as_ptr().add(index * self.page_size_padded),
+			(*self.buffer.get())
+				.as_ptr()
+				.add(index * self.page_size_padded),
 			self.page_size,
 		)
 	}
@@ -188,7 +190,7 @@ impl PageBuffer {
 impl Drop for PageBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			dealloc(self.buffer.as_ptr(), self.buffer_layout);
+			dealloc((*self.buffer.get()).as_ptr(), self.buffer_layout);
 		}
 	}
 }
