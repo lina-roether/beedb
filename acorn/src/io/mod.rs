@@ -305,3 +305,131 @@ impl FreelistCache {
 		FreelistPage::from_bytes_mut(&mut self.buf)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::assert_matches::assert_matches;
+
+	use super::*;
+
+	#[test]
+	fn init_file() {
+		let mut file = Vec::new();
+
+		StorageFile::init(
+			&mut file,
+			InitParams {
+				page_size: 32 * KiB,
+			},
+		)
+		.unwrap();
+
+		let header = HeaderPage::from_bytes(&file);
+		assert_eq!(header.magic, *b"ACRN");
+		assert_eq!(header.format_version, 1);
+		assert_eq!(header.byte_order, ByteOrder::NATIVE as u8);
+		assert_eq!(header.page_size_exponent, 15);
+		assert_eq!(header.num_pages, 1);
+		assert_eq!(header.freelist_trunk, None);
+	}
+
+	#[test]
+	fn try_init_with_non_power_of_two_page_size() {
+		let mut file = Vec::new();
+		let result = StorageFile::init(
+			&mut file,
+			InitParams {
+				page_size: 31 * KiB,
+			},
+		);
+		assert_matches!(result, Err(InitError::InvalidPageSize(..)));
+	}
+
+	#[test]
+	fn try_init_with_too_small_page_size() {
+		let mut file = Vec::new();
+		let result = StorageFile::init(&mut file, InitParams { page_size: 256 * B });
+		assert_matches!(result, Err(InitError::InvalidPageSize(..)));
+	}
+
+	#[test]
+	fn load_file() {
+		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let header = HeaderPage::from_bytes_mut(&mut file);
+		header.magic = *b"ACRN";
+		header.format_version = 1;
+		header.byte_order = ByteOrder::NATIVE as u8;
+		header.page_size_exponent = 14;
+		header.num_pages = 1;
+		header.freelist_trunk = None;
+
+		let storage = StorageFile::load(file).unwrap();
+		assert_eq!(storage.page_size(), 16 * KiB);
+	}
+
+	#[test]
+	fn try_load_without_magic() {
+		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let header = HeaderPage::from_bytes_mut(&mut file);
+		header.magic = *b"AAAA";
+
+		match StorageFile::load(file) {
+			Ok(..) => panic!("Should not succeed"),
+			Err(err) => assert_matches!(err, StorageError::NotAStorageFile),
+		}
+	}
+
+	#[test]
+	fn try_load_with_wrong_format_version() {
+		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let header = HeaderPage::from_bytes_mut(&mut file);
+		header.magic = *b"ACRN";
+		header.format_version = 69;
+
+		match StorageFile::load(file) {
+			Ok(..) => panic!("Should not succeed"),
+			Err(err) => assert_matches!(err, StorageError::UnsupportedVersion(..)),
+		}
+	}
+
+	#[test]
+	fn try_load_with_wrong_byte_order() {
+		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let header = HeaderPage::from_bytes_mut(&mut file);
+		header.magic = *b"ACRN";
+		header.format_version = 1;
+		header.byte_order = match ByteOrder::NATIVE {
+			ByteOrder::Big => ByteOrder::Little as u8,
+			ByteOrder::Little => ByteOrder::Big as u8,
+		};
+
+		match StorageFile::load(file) {
+			Ok(..) => panic!("Should not succeed"),
+			Err(err) => assert_matches!(err, StorageError::ByteOrderMismatch(..)),
+		}
+	}
+
+	#[test]
+	fn try_load_incomplete_file() {
+		let file: Vec<u8> = iter::repeat(0).take(10 * B).collect();
+
+		match StorageFile::load(file) {
+			Ok(..) => panic!("Should not succeed"),
+			Err(err) => assert_matches!(err, StorageError::IncompleteRead),
+		}
+	}
+
+	#[test]
+	fn try_load_with_corrupted_byte_order() {
+		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let header = HeaderPage::from_bytes_mut(&mut file);
+		header.magic = *b"ACRN";
+		header.format_version = 1;
+		header.byte_order = 2;
+
+		match StorageFile::load(file) {
+			Ok(..) => panic!("Should not succeed"),
+			Err(err) => assert_matches!(err, StorageError::Corrupted),
+		}
+	}
+}
