@@ -27,7 +27,7 @@ mod tests {
 		bytes.push(1);
 		bytes.push(ByteOrder::Little as u8);
 		bytes.push(3);
-		bytes.extend([0, 0]);
+		bytes.push(0);
 		bytes.extend(69_u32.to_ne_bytes());
 		bytes.extend(3_u32.to_ne_bytes());
 		bytes.extend(10_u32.to_ne_bytes());
