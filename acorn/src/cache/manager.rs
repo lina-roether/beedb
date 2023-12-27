@@ -21,21 +21,20 @@ impl CacheManager {
 		}
 	}
 
-	pub fn access(&mut self, item: NonZeroU32) -> bool {
+	pub fn access(&mut self, item: NonZeroU32) {
 		if self.fast.contains(&item) {
-			return false;
+			return;
 		}
 		if let Some(index) = self.slow.iter().position(|v| *v == item) {
 			self.slow.remove(index);
 			self.slow.push_front(item);
-			return false;
+			return;
 		}
 		if self.graveyard.contains(&item) {
 			self.slow.push_front(item);
-			return true;
+			return;
 		}
 		self.fast.push_front(item);
-		true
 	}
 
 	pub fn reclaim(&mut self) -> Option<NonZeroU32> {
@@ -61,28 +60,17 @@ mod tests {
 		let mut mgr = CacheManager::new(8);
 
 		// Flood the fast queue
-		assert!(mgr.access(NonZeroU32::new(1).unwrap()));
-		assert!(mgr.access(NonZeroU32::new(2).unwrap()));
-		assert!(mgr.access(NonZeroU32::new(3).unwrap()));
-		assert!(mgr.access(NonZeroU32::new(4).unwrap()));
-		assert!(mgr.access(NonZeroU32::new(5).unwrap()));
-
-		// Shouldn't try to re-store stuff that's already in the queue
-		// (Also, order of subsequent accesses should not matter)
-		assert!(!mgr.access(NonZeroU32::new(2).unwrap()));
-		assert!(!mgr.access(NonZeroU32::new(1).unwrap()));
-		assert!(!mgr.access(NonZeroU32::new(3).unwrap()));
+		mgr.access(NonZeroU32::new(1).unwrap());
+		mgr.access(NonZeroU32::new(2).unwrap());
+		mgr.access(NonZeroU32::new(3).unwrap());
+		mgr.access(NonZeroU32::new(4).unwrap());
+		mgr.access(NonZeroU32::new(5).unwrap());
 
 		// Should immediately reclaim the tail of the fast queue
 		assert_eq!(mgr.reclaim(), Some(NonZeroU32::new(1).unwrap()));
 		assert_eq!(mgr.reclaim(), Some(NonZeroU32::new(2).unwrap()));
 		assert_eq!(mgr.reclaim(), Some(NonZeroU32::new(3).unwrap()));
 		assert_eq!(mgr.reclaim(), None);
-
-		// Should need to re-store the evicted values
-		assert!(mgr.access(NonZeroU32::new(1).unwrap()));
-		assert!(mgr.access(NonZeroU32::new(2).unwrap()));
-		assert!(mgr.access(NonZeroU32::new(3).unwrap()));
 	}
 
 	#[test]
