@@ -189,6 +189,9 @@ impl<T: IoTarget> Storage<T> {
 		};
 		header.num_pages += 1;
 		self.write_page_raw(&header_buf, 0)?;
+
+		let zeroed_buf: Box<[u8]> = iter::repeat(0).take(self.page_size).collect();
+		self.write_page(&zeroed_buf, new_page)?;
 		Ok(new_page)
 	}
 
@@ -527,5 +530,17 @@ mod tests {
 			known_values.insert(item);
 		}
 		true
+	}
+
+	#[test]
+	fn can_read_after_alloc() {
+		let mut file = Vec::new();
+		Storage::init(&mut file, InitParams::default()).unwrap();
+		let storage = Storage::load(file).unwrap();
+
+		let allocated = storage.allocate_page().unwrap();
+
+		let mut buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+		storage.read_page(&mut buf, allocated).unwrap()
 	}
 }
