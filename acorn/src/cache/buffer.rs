@@ -106,9 +106,7 @@ impl PageBuffer {
 			length,
 			page_size,
 			page_size_padded,
-			meta: iter::repeat_with(|| PageMeta::default())
-				.take(length)
-				.collect(),
+			meta: iter::repeat_with(PageMeta::default).take(length).collect(),
 			freelist: Mutex::new(Vec::new()),
 			last_filled: AtomicUsize::new(0),
 			pages: UnsafeCell::new(pages),
