@@ -11,7 +11,6 @@ pub struct CacheManager {
 
 impl CacheManager {
 	pub fn new(length: usize) -> Self {
-		debug_assert!(length >= 4);
 		Self {
 			slow: VecDeque::new(),
 			fast_cap: length / 4,
