@@ -115,11 +115,13 @@ impl PageBuffer {
 
 	pub fn free_page(&self, index: usize) {
 		let meta = &self.meta[index];
+		meta.lock.lock_exclusive();
 		if !meta.occupied.load(Ordering::Acquire) {
 			return;
 		}
 		meta.occupied.store(false, Ordering::Release);
 		self.freelist.lock().push(index);
+		unsafe { meta.lock.unlock_exclusive() }
 	}
 
 	pub fn allocate_page(&self) -> Option<usize> {
