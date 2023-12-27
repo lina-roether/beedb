@@ -4,7 +4,6 @@ use thiserror::Error;
 
 use crate::{
 	io::format::{FreelistPageHeader, HeaderPage},
-	lock::PageLocker,
 	utils::{
 		byte_order::ByteOrder,
 		byte_view::ByteView,
@@ -13,10 +12,13 @@ use crate::{
 };
 
 mod format;
+mod lock;
 mod target;
 
 pub use format::*;
 pub use target::*;
+
+use self::lock::PageLocker;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
