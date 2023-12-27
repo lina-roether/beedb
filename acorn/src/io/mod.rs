@@ -12,10 +12,11 @@ use crate::{
 	},
 };
 
-use self::{format::FreelistPage, target::IoTarget};
-
 mod format;
 mod target;
+
+pub use format::*;
+pub use target::*;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -70,7 +71,7 @@ impl Default for InitParams {
 	}
 }
 
-pub struct StorageFile<T: IoTarget> {
+pub struct Storage<T: IoTarget> {
 	header_buf: RwLock<Box<[u8]>>,
 	freelist_cache: Mutex<FreelistCache>,
 	page_size: usize,
@@ -78,7 +79,7 @@ pub struct StorageFile<T: IoTarget> {
 	locker: PageLocker,
 }
 
-impl<T: IoTarget> StorageFile<T> {
+impl<T: IoTarget> Storage<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
 		if !params.page_size.is_power_of_two() || params.page_size < MIN_PAGE_SIZE {
 			return Err(InitError::InvalidPageSize(params.page_size));
@@ -321,7 +322,7 @@ mod tests {
 	fn init_file() {
 		let mut file = Vec::new();
 
-		StorageFile::init(
+		Storage::init(
 			&mut file,
 			InitParams {
 				page_size: 32 * KiB,
@@ -341,7 +342,7 @@ mod tests {
 	#[test]
 	fn try_init_with_non_power_of_two_page_size() {
 		let mut file = Vec::new();
-		let result = StorageFile::init(
+		let result = Storage::init(
 			&mut file,
 			InitParams {
 				page_size: 31 * KiB,
@@ -353,7 +354,7 @@ mod tests {
 	#[test]
 	fn try_init_with_too_small_page_size() {
 		let mut file = Vec::new();
-		let result = StorageFile::init(&mut file, InitParams { page_size: 256 * B });
+		let result = Storage::init(&mut file, InitParams { page_size: 256 * B });
 		assert_matches!(result, Err(InitError::InvalidPageSize(..)));
 	}
 
@@ -368,7 +369,7 @@ mod tests {
 		header.num_pages = 1;
 		header.freelist_trunk = None;
 
-		let storage = StorageFile::load(file).unwrap();
+		let storage = Storage::load(file).unwrap();
 		assert_eq!(storage.page_size(), 16 * KiB);
 	}
 
@@ -378,7 +379,7 @@ mod tests {
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		header.magic = *b"AAAA";
 
-		match StorageFile::load(file) {
+		match Storage::load(file) {
 			Ok(..) => panic!("Should not succeed"),
 			Err(err) => assert_matches!(err, StorageError::NotAStorageFile),
 		}
@@ -391,7 +392,7 @@ mod tests {
 		header.magic = *b"ACRN";
 		header.format_version = 69;
 
-		match StorageFile::load(file) {
+		match Storage::load(file) {
 			Ok(..) => panic!("Should not succeed"),
 			Err(err) => assert_matches!(err, StorageError::UnsupportedVersion(..)),
 		}
@@ -408,7 +409,7 @@ mod tests {
 			ByteOrder::Little => ByteOrder::Big as u8,
 		};
 
-		match StorageFile::load(file) {
+		match Storage::load(file) {
 			Ok(..) => panic!("Should not succeed"),
 			Err(err) => assert_matches!(err, StorageError::ByteOrderMismatch(..)),
 		}
@@ -418,7 +419,7 @@ mod tests {
 	fn try_load_incomplete_file() {
 		let file: Vec<u8> = iter::repeat(0).take(10 * B).collect();
 
-		match StorageFile::load(file) {
+		match Storage::load(file) {
 			Ok(..) => panic!("Should not succeed"),
 			Err(err) => assert_matches!(err, StorageError::IncompleteRead),
 		}
@@ -432,7 +433,7 @@ mod tests {
 		header.format_version = 1;
 		header.byte_order = 2;
 
-		match StorageFile::load(file) {
+		match Storage::load(file) {
 			Ok(..) => panic!("Should not succeed"),
 			Err(err) => assert_matches!(err, StorageError::Corrupted),
 		}
@@ -441,8 +442,8 @@ mod tests {
 	#[test]
 	fn simple_alloc_write_read() {
 		let mut file: Vec<u8> = Vec::new();
-		StorageFile::init(&mut file, InitParams::default()).unwrap();
-		let storage = StorageFile::load(file).unwrap();
+		Storage::init(&mut file, InitParams::default()).unwrap();
+		let storage = Storage::load(file).unwrap();
 
 		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
 		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
@@ -462,8 +463,8 @@ mod tests {
 	#[test]
 	fn simple_free() {
 		let mut file: Vec<u8> = Vec::new();
-		StorageFile::init(&mut file, InitParams::default()).unwrap();
-		let storage = StorageFile::load(file).unwrap();
+		Storage::init(&mut file, InitParams::default()).unwrap();
+		let storage = Storage::load(file).unwrap();
 
 		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
 		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
@@ -497,8 +498,8 @@ mod tests {
 	#[test]
 	fn saturating_alloc_free() {
 		let mut file: Vec<u8> = Vec::new();
-		StorageFile::init(&mut file, InitParams { page_size: 512 }).unwrap();
-		let storage = StorageFile::load(file).unwrap();
+		Storage::init(&mut file, InitParams { page_size: 512 }).unwrap();
+		let storage = Storage::load(file).unwrap();
 
 		let mut pages: Vec<NonZeroU32> = Vec::new();
 		for _ in 0..500 {
