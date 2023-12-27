@@ -124,6 +124,10 @@ impl PageBuffer {
 		unsafe { meta.lock.unlock_exclusive() }
 	}
 
+	pub fn has_space(&self) -> bool {
+		self.last_filled.load(Ordering::Relaxed) < self.length || self.freelist.lock().len() != 0
+	}
+
 	pub fn allocate_page(&self) -> Option<usize> {
 		let last_filled = self.last_filled.load(Ordering::Acquire);
 		let allocated_idx = if last_filled < self.length {
