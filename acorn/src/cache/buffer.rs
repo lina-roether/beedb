@@ -5,10 +5,11 @@ use std::{
 	iter,
 	ops::{Deref, DerefMut},
 	ptr::NonNull,
+	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 	usize,
 };
 
-use parking_lot::{lock_api::RawRwLock as _, RawRwLock};
+use parking_lot::{lock_api::RawRwLock as _, Mutex, RawRwLock};
 
 pub struct PageReadGuard<'a> {
 	lock: &'a RawRwLock,
@@ -86,7 +87,9 @@ pub struct PageBuffer {
 	length: usize,
 	page_size: usize,
 	page_size_padded: usize,
-	locks: Box<[RawRwLock]>,
+	meta: Box<[PageMeta]>,
+	freelist: Mutex<Vec<usize>>,
+	last_filled: AtomicUsize,
 	pages: UnsafeCell<NonNull<u8>>,
 }
 
@@ -103,25 +106,60 @@ impl PageBuffer {
 			length,
 			page_size,
 			page_size_padded,
-			locks: iter::repeat_with(|| RawRwLock::INIT).take(length).collect(),
+			meta: iter::repeat_with(|| PageMeta::default())
+				.take(length)
+				.collect(),
+			freelist: Mutex::new(Vec::new()),
+			last_filled: AtomicUsize::new(0),
 			pages: UnsafeCell::new(pages),
 		}
 	}
 
-	pub fn read_page(&self, index: usize) -> PageReadGuard {
-		self.locks[index].lock_shared();
-		PageReadGuard {
-			lock: &self.locks[index],
-			page: unsafe { slice::from_raw_parts(self.get_page_ptr(index), self.page_size) },
+	pub fn free_page(&self, index: usize) {
+		let meta = &self.meta[index];
+		if !meta.occupied.load(Ordering::Acquire) {
+			return;
 		}
+		meta.occupied.store(false, Ordering::Release);
+		self.freelist.lock().push(index);
 	}
 
-	pub fn write_page(&self, index: usize) -> PageWriteGuard {
-		self.locks[index].lock_exclusive();
-		PageWriteGuard {
-			lock: &self.locks[index],
+	pub fn allocate_page(&self) -> Option<usize> {
+		let last_filled = self.last_filled.load(Ordering::Acquire);
+		let allocated_idx = if last_filled < self.length {
+			self.last_filled.store(last_filled + 1, Ordering::Release);
+			last_filled
+		} else {
+			self.freelist.lock().pop()?
+		};
+		self.meta[allocated_idx]
+			.occupied
+			.store(true, Ordering::Relaxed);
+		Some(allocated_idx)
+	}
+
+	pub fn read_page(&self, index: usize) -> Option<PageReadGuard> {
+		let meta = &self.meta[index];
+		if !meta.occupied.load(Ordering::Relaxed) {
+			return None;
+		};
+		meta.lock.lock_shared();
+		Some(PageReadGuard {
+			lock: &meta.lock,
+			page: unsafe { slice::from_raw_parts(self.get_page_ptr(index), self.page_size) },
+		})
+	}
+
+	pub fn write_page(&self, index: usize) -> Option<PageWriteGuard> {
+		let meta = &self.meta[index];
+		if !meta.occupied.load(Ordering::Relaxed) {
+			return None;
+		};
+		meta.lock.lock_exclusive();
+		Some(PageWriteGuard {
+			lock: &meta.lock,
 			page: unsafe { slice::from_raw_parts_mut(self.get_page_ptr(index), self.page_size) },
-		}
+		})
 	}
 
 	unsafe fn get_page_ptr(&self, index: usize) -> *mut u8 {
@@ -153,33 +191,77 @@ impl Drop for PageBuffer {
 	}
 }
 
+struct PageMeta {
+	occupied: AtomicBool,
+	lock: RawRwLock,
+}
+
+impl Default for PageMeta {
+	fn default() -> Self {
+		Self {
+			occupied: AtomicBool::new(false),
+			lock: RawRwLock::INIT,
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
-	fn page_buffer_construction() {
-		let _buffer = PageBuffer::new(69, 420);
+	fn allocate_read_and_write_pages() {
+		let buffer = PageBuffer::new(4, 10);
+
+		let idx_1 = buffer.allocate_page().unwrap();
+		let idx_2 = buffer.allocate_page().unwrap();
+
+		{
+			let mut page_1 = buffer.write_page(idx_1).unwrap();
+			page_1.copy_from_slice(b"moin");
+		}
+
+		{
+			let mut page_2 = buffer.write_page(idx_2).unwrap();
+			page_2.copy_from_slice(b"tree");
+		}
+
+		let page_1 = buffer.read_page(idx_1).unwrap();
+		let page_2 = buffer.read_page(idx_2).unwrap();
+
+		assert_eq!(*page_1, *b"moin");
+		assert_eq!(*page_2, *b"tree");
 	}
 
 	#[test]
-	fn read_and_write_pages() {
+	fn try_access_freed_index() {
 		let buffer = PageBuffer::new(4, 10);
 
-		{
-			let mut page_4 = buffer.write_page(4);
-			page_4.copy_from_slice(b"moin");
+		let idx = buffer.allocate_page().unwrap();
+		buffer.free_page(idx);
+
+		assert!(buffer.read_page(idx).is_none());
+	}
+
+	#[test]
+	fn fills_all_slots() {
+		let buffer = PageBuffer::new(4, 10);
+
+		let mut allocated: Vec<usize> = Vec::new();
+		while let Some(idx) = buffer.allocate_page() {
+			allocated.push(idx);
 		}
 
-		{
-			let mut page_5 = buffer.write_page(5);
-			page_5.copy_from_slice(b"tree");
+		for idx in allocated.iter().copied() {
+			buffer.free_page(idx);
 		}
 
-		let page_4 = buffer.read_page(4);
-		let page_5 = buffer.read_page(5);
+		let mut num_reallocated = 0;
+		while buffer.allocate_page().is_some() {
+			num_reallocated += 1;
+		}
 
-		assert_eq!(*page_4, *b"moin");
-		assert_eq!(*page_5, *b"tree");
+		assert_eq!(allocated.len(), 10);
+		assert_eq!(num_reallocated, 10);
 	}
 }
