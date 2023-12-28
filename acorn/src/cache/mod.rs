@@ -12,7 +12,7 @@ use self::{
 	manager::CacheManager,
 };
 
-use crate::io::{IoTarget, Storage, StorageError};
+use crate::storage::{IoTarget, Storage, StorageError};
 
 mod buffer;
 mod manager;
@@ -114,7 +114,7 @@ struct CacheState {
 
 #[cfg(test)]
 mod tests {
-	use crate::io::InitParams;
+	use crate::storage::InitParams;
 
 	use super::*;
 

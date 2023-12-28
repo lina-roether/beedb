@@ -3,7 +3,7 @@ use std::{cell::UnsafeCell, io, iter, mem::size_of, num::NonZeroU32, usize};
 use thiserror::Error;
 
 use crate::{
-	io::format::{FreelistPageHeader, HeaderPage},
+	storage::format::{FreelistPageHeader, HeaderPage},
 	utils::{
 		byte_order::ByteOrder,
 		byte_view::ByteView,
