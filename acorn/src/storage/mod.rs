@@ -1,5 +1,5 @@
 use parking_lot::{Mutex, RwLock};
-use std::{cell::UnsafeCell, io, iter, mem::size_of, num::NonZeroU32, usize};
+use std::{cell::UnsafeCell, io, iter, mem::size_of, num::NonZeroU16, usize};
 use thiserror::Error;
 
 use crate::{
@@ -19,6 +19,8 @@ pub use format::*;
 pub use target::*;
 
 use self::lock::PageLocker;
+
+pub type PageNumber = NonZeroU16;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -136,23 +138,23 @@ impl<T: IoTarget> Storage<T> {
 	}
 
 	#[inline]
-	pub fn num_pages(&self) -> u32 {
+	pub fn num_pages(&self) -> u16 {
 		let header_buf = self.header_buf.read();
 		let header = HeaderPage::from_bytes(&header_buf);
 		header.num_pages
 	}
 
 	#[inline]
-	pub fn read_page(&self, buf: &mut [u8], page_number: NonZeroU32) -> Result<(), StorageError> {
+	pub fn read_page(&self, buf: &mut [u8], page_number: PageNumber) -> Result<(), StorageError> {
 		self.read_page_raw(buf, page_number.get())
 	}
 
 	#[inline]
-	pub fn write_page(&self, buf: &[u8], page_number: NonZeroU32) -> Result<(), StorageError> {
+	pub fn write_page(&self, buf: &[u8], page_number: PageNumber) -> Result<(), StorageError> {
 		self.write_page_raw(buf, page_number.get())
 	}
 
-	pub fn allocate_page(&self) -> Result<NonZeroU32, StorageError> {
+	pub fn allocate_page(&self) -> Result<PageNumber, StorageError> {
 		if let Some(free_page) = self.pop_free_page()? {
 			return Ok(free_page);
 		}
@@ -160,11 +162,11 @@ impl<T: IoTarget> Storage<T> {
 		Ok(new_page)
 	}
 
-	pub fn free_page(&self, page_number: NonZeroU32) -> Result<(), StorageError> {
+	pub fn free_page(&self, page_number: PageNumber) -> Result<(), StorageError> {
 		let mut cache = self.freelist_cache.lock();
 		if let Some(page_num) = cache.page_num {
 			let trunk_page = cache.get_page();
-			if trunk_page.header.length < trunk_page.items.len() as u32 {
+			if trunk_page.header.length < trunk_page.items.len() as u16 {
 				trunk_page.items[trunk_page.header.length as usize] = Some(page_number);
 				trunk_page.header.length += 1;
 
@@ -183,10 +185,10 @@ impl<T: IoTarget> Storage<T> {
 		Ok(())
 	}
 
-	fn create_new_page(&self) -> Result<NonZeroU32, StorageError> {
+	fn create_new_page(&self) -> Result<PageNumber, StorageError> {
 		let mut header_buf = self.header_buf.write();
 		let header = HeaderPage::from_bytes_mut(&mut header_buf);
-		let Some(new_page) = NonZeroU32::new(header.num_pages) else {
+		let Some(new_page) = PageNumber::new(header.num_pages) else {
 			return Err(StorageError::Corrupted);
 		};
 		header.num_pages += 1;
@@ -197,7 +199,7 @@ impl<T: IoTarget> Storage<T> {
 		Ok(new_page)
 	}
 
-	fn pop_free_page(&self) -> Result<Option<NonZeroU32>, StorageError> {
+	fn pop_free_page(&self) -> Result<Option<PageNumber>, StorageError> {
 		let mut cache = self.freelist_cache.lock();
 		let Some(page_num) = cache.page_num else {
 			return Ok(None);
@@ -234,20 +236,20 @@ impl<T: IoTarget> Storage<T> {
 		Ok(())
 	}
 
-	fn freelist_trunk(&self) -> Option<NonZeroU32> {
+	fn freelist_trunk(&self) -> Option<PageNumber> {
 		let header_buf = self.header_buf.read();
 		let header = HeaderPage::from_bytes(&header_buf);
 		header.freelist_trunk
 	}
 
-	fn set_freelist_trunk(&self, trunk: Option<NonZeroU32>) -> Result<(), StorageError> {
+	fn set_freelist_trunk(&self, trunk: Option<PageNumber>) -> Result<(), StorageError> {
 		let mut header_buf = self.header_buf.write();
 		let header = HeaderPage::from_bytes_mut(&mut header_buf);
 		header.freelist_trunk = trunk;
 		self.write_page_raw(&header_buf, 0)
 	}
 
-	fn read_page_raw(&self, buf: &mut [u8], page_number: u32) -> Result<(), StorageError> {
+	fn read_page_raw(&self, buf: &mut [u8], page_number: u16) -> Result<(), StorageError> {
 		self.locker.lock_shared(page_number);
 		let bytes_read;
 		unsafe {
@@ -261,7 +263,7 @@ impl<T: IoTarget> Storage<T> {
 		Ok(())
 	}
 
-	fn write_page_raw(&self, buf: &[u8], page_number: u32) -> Result<(), StorageError> {
+	fn write_page_raw(&self, buf: &[u8], page_number: u16) -> Result<(), StorageError> {
 		self.locker.lock_exclusive(page_number);
 		let bytes_written;
 		unsafe {
@@ -275,7 +277,7 @@ impl<T: IoTarget> Storage<T> {
 		Ok(())
 	}
 
-	fn offset_of(&self, page_number: u32) -> u64 {
+	fn offset_of(&self, page_number: u16) -> u64 {
 		page_number as u64 * self.page_size() as u64
 	}
 
@@ -299,7 +301,7 @@ impl<T: IoTarget> Storage<T> {
 }
 
 struct FreelistCache {
-	page_num: Option<NonZeroU32>,
+	page_num: Option<PageNumber>,
 	buf: Box<[u8]>,
 }
 
@@ -506,14 +508,14 @@ mod tests {
 		Storage::init(&mut file, InitParams { page_size: 512 }).unwrap();
 		let storage = Storage::load(file).unwrap();
 
-		let mut pages: Vec<NonZeroU32> = Vec::new();
+		let mut pages: Vec<PageNumber> = Vec::new();
 		for _ in 0..500 {
 			pages.push(storage.allocate_page().unwrap());
 		}
 		for page in pages.iter().copied() {
 			storage.free_page(page).unwrap();
 		}
-		let mut reallocated_pages: Vec<NonZeroU32> = Vec::new();
+		let mut reallocated_pages: Vec<PageNumber> = Vec::new();
 		for _ in 0..500 {
 			reallocated_pages.push(storage.allocate_page().unwrap());
 		}

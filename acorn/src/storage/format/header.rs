@@ -1,6 +1,4 @@
-use std::num::NonZeroU32;
-
-use crate::utils::byte_view::ByteView;
+use crate::{storage::PageNumber, utils::byte_view::ByteView};
 
 #[repr(C)]
 pub struct HeaderPage {
@@ -8,8 +6,8 @@ pub struct HeaderPage {
 	pub format_version: u8,
 	pub byte_order: u8,
 	pub page_size_exponent: u8,
-	pub num_pages: u32,
-	pub freelist_trunk: Option<NonZeroU32>,
+	pub num_pages: u16,
+	pub freelist_trunk: Option<PageNumber>,
 }
 
 unsafe impl ByteView for HeaderPage {}
@@ -28,9 +26,8 @@ mod tests {
 		bytes.push(ByteOrder::Little as u8);
 		bytes.push(3);
 		bytes.push(0);
-		bytes.extend(69_u32.to_ne_bytes());
-		bytes.extend(3_u32.to_ne_bytes());
-		bytes.extend(10_u32.to_ne_bytes());
+		bytes.extend(69_u16.to_ne_bytes());
+		bytes.extend(3_u16.to_ne_bytes());
 
 		let header_page = HeaderPage::from_bytes(&bytes);
 		assert_eq!(header_page.magic, *b"TOME");
@@ -38,6 +35,6 @@ mod tests {
 		assert_eq!(header_page.byte_order, ByteOrder::Little as u8);
 		assert_eq!(header_page.page_size_exponent, 3);
 		assert_eq!(header_page.num_pages, 69);
-		assert_eq!(header_page.freelist_trunk, NonZeroU32::new(3));
+		assert_eq!(header_page.freelist_trunk, PageNumber::new(3));
 	}
 }

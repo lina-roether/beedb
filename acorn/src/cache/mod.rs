@@ -1,8 +1,6 @@
 use std::{
 	collections::{HashMap, HashSet},
-	mem,
-	num::NonZeroU32,
-	usize,
+	mem, usize,
 };
 
 use parking_lot::Mutex;
@@ -12,7 +10,7 @@ use self::{
 	manager::CacheManager,
 };
 
-use crate::storage::{IoTarget, Storage, StorageError};
+use crate::storage::{IoTarget, PageNumber, Storage, StorageError};
 
 mod buffer;
 mod manager;
@@ -36,12 +34,12 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		}
 	}
 
-	pub fn read_page(&self, page_number: NonZeroU32) -> Result<PageReadGuard, StorageError> {
+	pub fn read_page(&self, page_number: PageNumber) -> Result<PageReadGuard, StorageError> {
 		let index = self.access(page_number, false)?;
 		Ok(self.buffer.read_page(index).unwrap())
 	}
 
-	pub fn write_page(&self, page_number: NonZeroU32) -> Result<PageWriteGuard, StorageError> {
+	pub fn write_page(&self, page_number: PageNumber) -> Result<PageWriteGuard, StorageError> {
 		let index = self.access(page_number, true)?;
 		Ok(self.buffer.write_page(index).unwrap())
 	}
@@ -62,7 +60,7 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		Ok(())
 	}
 
-	fn access(&self, page_number: NonZeroU32, dirty: bool) -> Result<usize, StorageError> {
+	fn access(&self, page_number: PageNumber, dirty: bool) -> Result<usize, StorageError> {
 		let mut state = self.state.lock();
 		state.manager.access(page_number);
 
@@ -108,8 +106,8 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 
 struct CacheState {
 	manager: CacheManager,
-	map: HashMap<NonZeroU32, usize>,
-	dirty: HashSet<NonZeroU32>,
+	map: HashMap<PageNumber, usize>,
+	dirty: HashSet<PageNumber>,
 }
 
 #[cfg(test)]

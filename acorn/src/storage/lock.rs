@@ -1,48 +1,48 @@
 use std::{
 	iter,
-	sync::atomic::{AtomicU32, Ordering},
+	sync::atomic::{AtomicU16, Ordering},
 	usize,
 };
 
 use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock};
 
 pub struct PageLocker {
-	locks_len: AtomicU32,
 	locks: RwLock<Vec<RawRwLock>>,
+	locks_len: AtomicU16,
 }
 
 impl PageLocker {
 	#[inline]
 	pub fn new() -> Self {
 		Self {
-			locks_len: AtomicU32::new(0),
+			locks_len: AtomicU16::new(0),
 			locks: RwLock::new(Vec::new()),
 		}
 	}
 
-	pub fn lock_shared(&self, page_num: u32) {
+	pub fn lock_shared(&self, page_num: u16) {
 		self.ensure_has_lock(page_num);
 		let locks = self.locks.read();
 		locks[page_num as usize].lock_shared();
 	}
 
-	pub unsafe fn unlock_shared(&self, page_num: u32) {
+	pub unsafe fn unlock_shared(&self, page_num: u16) {
 		let locks = self.locks.read();
 		locks[page_num as usize].unlock_shared();
 	}
 
-	pub fn lock_exclusive(&self, page_num: u32) {
+	pub fn lock_exclusive(&self, page_num: u16) {
 		self.ensure_has_lock(page_num);
 		let locks = self.locks.read();
 		locks[page_num as usize].lock_exclusive();
 	}
 
-	pub unsafe fn unlock_exclusive(&self, page_num: u32) {
+	pub unsafe fn unlock_exclusive(&self, page_num: u16) {
 		let locks = self.locks.read();
 		locks[page_num as usize].unlock_exclusive();
 	}
 
-	fn ensure_has_lock(&self, page_num: u32) {
+	fn ensure_has_lock(&self, page_num: u16) {
 		if self.locks_len.load(Ordering::Acquire) <= page_num {
 			let new_length = page_num + 1;
 			self.extend_until(new_length as usize);
