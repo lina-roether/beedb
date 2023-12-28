@@ -6,5 +6,6 @@
 #![allow(dead_code)]
 
 mod cache;
+mod segment;
 mod storage;
 mod utils;
