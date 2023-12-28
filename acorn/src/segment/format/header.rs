@@ -1,4 +1,4 @@
-use crate::{storage::PageNumber, utils::byte_view::ByteView};
+use crate::{segment::PageNumber, utils::byte_view::ByteView};
 
 #[repr(C)]
 pub struct HeaderPage {

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::storage::PageNumber;
+use crate::segment::PageNumber;
 
 #[derive(Debug)]
 pub struct CacheManager {

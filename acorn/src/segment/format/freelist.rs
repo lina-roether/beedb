@@ -1,4 +1,4 @@
-use crate::storage::PageNumber;
+use crate::segment::PageNumber;
 use crate::utils::byte_view::ByteView;
 
 use super::Page;

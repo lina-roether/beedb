@@ -10,7 +10,7 @@ use self::{
 	manager::CacheManager,
 };
 
-use crate::storage::{IoTarget, PageNumber, Storage, StorageError};
+use crate::segment::{self, IoTarget, PageNumber, Segment};
 
 mod buffer;
 mod manager;
@@ -18,11 +18,11 @@ mod manager;
 pub struct PageCache<'a, T: IoTarget> {
 	state: Mutex<CacheState>,
 	buffer: PageBuffer,
-	storage: &'a Storage<T>,
+	storage: &'a Segment<T>,
 }
 
 impl<'a, T: IoTarget> PageCache<'a, T> {
-	pub fn new(storage: &'a Storage<T>, length: usize) -> Self {
+	pub fn new(storage: &'a Segment<T>, length: usize) -> Self {
 		Self {
 			state: Mutex::new(CacheState {
 				manager: CacheManager::new(length),
@@ -34,12 +34,12 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		}
 	}
 
-	pub fn read_page(&self, page_number: PageNumber) -> Result<PageReadGuard, StorageError> {
+	pub fn read_page(&self, page_number: PageNumber) -> Result<PageReadGuard, segment::Error> {
 		let index = self.access(page_number, false)?;
 		Ok(self.buffer.read_page(index).unwrap())
 	}
 
-	pub fn write_page(&self, page_number: PageNumber) -> Result<PageWriteGuard, StorageError> {
+	pub fn write_page(&self, page_number: PageNumber) -> Result<PageWriteGuard, segment::Error> {
 		let index = self.access(page_number, true)?;
 		Ok(self.buffer.write_page(index).unwrap())
 	}
@@ -49,7 +49,7 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		self.state.lock().dirty.len()
 	}
 
-	pub fn flush(&self) -> Result<(), StorageError> {
+	pub fn flush(&self) -> Result<(), segment::Error> {
 		let mut state = self.state.lock();
 		for dirty_page in state.dirty.iter().copied() {
 			let index = *state.map.get(&dirty_page).unwrap();
@@ -60,7 +60,7 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		Ok(())
 	}
 
-	fn access(&self, page_number: PageNumber, dirty: bool) -> Result<usize, StorageError> {
+	fn access(&self, page_number: PageNumber, dirty: bool) -> Result<usize, segment::Error> {
 		let mut state = self.state.lock();
 		state.manager.access(page_number);
 
@@ -112,15 +112,15 @@ struct CacheState {
 
 #[cfg(test)]
 mod tests {
-	use crate::storage::InitParams;
+	use crate::segment::InitParams;
 
 	use super::*;
 
 	#[test]
 	fn simple_read_write() {
 		let mut file = Vec::new();
-		Storage::init(&mut file, InitParams::default()).unwrap();
-		let storage = Storage::load(file).unwrap();
+		Segment::init(&mut file, InitParams::default()).unwrap();
+		let storage = Segment::load(file).unwrap();
 		let cache = PageCache::new(&storage, 128);
 
 		let page_num_1 = storage.allocate_page().unwrap();
