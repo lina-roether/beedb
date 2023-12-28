@@ -7,7 +7,7 @@ use crate::{
 	utils::{
 		byte_order::ByteOrder,
 		byte_view::ByteView,
-		units::{KiB, B},
+		units::{display_size, KiB, B},
 	},
 };
 
@@ -51,7 +51,11 @@ pub enum InitError {
 	#[error("Failed to write the complete file header")]
 	IncompleteWrite,
 
-	#[error("Page size {0} is invalid; must be a power of two and at least {MIN_PAGE_SIZE} B")]
+	#[error(
+		"Page size {0} is invalid; must be a power of two and at between {} and {}",
+		display_size(MIN_PAGE_SIZE),
+		display_size(MAX_PAGE_SIZE)
+	)]
 	InvalidPageSize(usize),
 
 	#[error("An error occurred initializing the storage file: {0}")]
@@ -62,6 +66,7 @@ pub const MAGIC: [u8; 4] = *b"ACRN";
 pub const FORMAT_VERSION: u8 = 1;
 pub const MIN_PAGE_SIZE: usize = 512 * B;
 pub const DEFAULT_PAGE_SIZE: usize = 16 * KiB;
+pub const MAX_PAGE_SIZE: usize = 64 * KiB;
 
 pub struct InitParams {
 	pub page_size: usize,
