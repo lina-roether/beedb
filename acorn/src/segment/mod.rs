@@ -2,11 +2,9 @@ use parking_lot::{Mutex, RwLock};
 use std::{cell::UnsafeCell, io, iter, mem::size_of, num::NonZeroU16, usize};
 use thiserror::Error;
 
+use crate::consts::DEFAULT_PAGE_SIZE;
 use crate::{
-	consts::{
-		validate_page_size, PageSizeBoundsError, DEFAULT_PAGE_SIZE, PAGE_SIZE_RANGE,
-		SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC,
-	},
+	consts::{validate_page_size, PageSizeBoundsError, SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC},
 	segment::format::{FreelistPageHeader, HeaderPage},
 	utils::{byte_order::ByteOrder, byte_view::ByteView},
 };
@@ -59,7 +57,7 @@ pub enum InitError {
 }
 
 pub struct InitParams {
-	pub page_size: usize,
+	pub page_size: u16,
 }
 
 impl Default for InitParams {
@@ -73,7 +71,7 @@ impl Default for InitParams {
 pub struct Segment<T: IoTarget> {
 	header_buf: RwLock<Box<[u8]>>,
 	freelist_cache: Mutex<FreelistCache>,
-	page_size: usize,
+	page_size: u16,
 	target: UnsafeCell<T>,
 	locker: PageLocker,
 }
@@ -82,13 +80,12 @@ impl<T: IoTarget> Segment<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
 		validate_page_size(params.page_size)?;
 
-		let page_size_exponent = params.page_size.ilog2() as u8;
 		let mut header_buf: [u8; size_of::<HeaderPage>()] = Default::default();
 		let header = HeaderPage::from_bytes_mut(&mut header_buf);
 		*header = HeaderPage {
 			magic: SEGMENT_MAGIC,
 			format_version: SEGMENT_FORMAT_VERSION,
-			page_size_exponent,
+			page_size: params.page_size,
 			byte_order: ByteOrder::NATIVE as u8,
 			num_pages: 1,
 			freelist_trunk: None,
@@ -108,17 +105,13 @@ impl<T: IoTarget> Segment<T> {
 		let header = HeaderPage::from_bytes(&buf);
 		Self::validate_header(header)?;
 
-		let page_size = 1_usize
-			.checked_shl(header.page_size_exponent.into())
-			.unwrap_or(*PAGE_SIZE_RANGE.end());
-
-		let mut header_buf: Box<[u8]> = iter::repeat(0).take(page_size).collect();
+		let mut header_buf: Box<[u8]> = iter::repeat(0).take(header.page_size as usize).collect();
 		header_buf[0..size_of::<HeaderPage>()].copy_from_slice(&buf);
 
 		let storage_file = Self {
 			header_buf: RwLock::new(header_buf),
-			freelist_cache: Mutex::new(FreelistCache::new(page_size)),
-			page_size,
+			freelist_cache: Mutex::new(FreelistCache::new(header.page_size as usize)),
+			page_size: header.page_size,
 			target: UnsafeCell::new(target),
 			locker: PageLocker::new(),
 		};
@@ -128,7 +121,7 @@ impl<T: IoTarget> Segment<T> {
 	}
 
 	#[inline]
-	pub fn page_size(&self) -> usize {
+	pub fn page_size(&self) -> u16 {
 		self.page_size
 	}
 
@@ -189,7 +182,7 @@ impl<T: IoTarget> Segment<T> {
 		header.num_pages += 1;
 		self.write_page_raw(&header_buf, 0)?;
 
-		let zeroed_buf: Box<[u8]> = iter::repeat(0).take(self.page_size).collect();
+		let zeroed_buf: Box<[u8]> = iter::repeat(0).take(self.page_size.into()).collect();
 		self.write_page(&zeroed_buf, new_page)?;
 		Ok(new_page)
 	}
@@ -248,11 +241,13 @@ impl<T: IoTarget> Segment<T> {
 		self.locker.lock_shared(page_number);
 		let bytes_read;
 		unsafe {
-			bytes_read = (*self.target.get())
-				.read_at(&mut buf[0..self.page_size()], self.offset_of(page_number))?;
+			bytes_read = (*self.target.get()).read_at(
+				&mut buf[0..self.page_size().into()],
+				self.offset_of(page_number),
+			)?;
 			self.locker.unlock_shared(page_number);
 		};
-		if bytes_read != self.page_size() {
+		if bytes_read != self.page_size().into() {
 			return Err(Error::IncompleteRead);
 		}
 		Ok(())
@@ -262,11 +257,13 @@ impl<T: IoTarget> Segment<T> {
 		self.locker.lock_exclusive(page_number);
 		let bytes_written;
 		unsafe {
-			bytes_written = (*self.target.get())
-				.write_at(&buf[0..self.page_size()], self.offset_of(page_number))?;
+			bytes_written = (*self.target.get()).write_at(
+				&buf[0..self.page_size().into()],
+				self.offset_of(page_number),
+			)?;
 			self.locker.unlock_exclusive(page_number);
 		};
-		if bytes_written != self.page_size() {
+		if bytes_written != self.page_size().into() {
 			return Err(Error::IncompleteWrite);
 		}
 		Ok(())
@@ -318,10 +315,7 @@ impl FreelistCache {
 mod tests {
 	use std::{assert_matches::assert_matches, collections::HashSet, hash::Hash};
 
-	use crate::{
-		consts::PAGE_SIZE_RANGE,
-		utils::units::{KiB, B},
-	};
+	use crate::utils::units::{KiB, B};
 
 	use super::*;
 
@@ -332,7 +326,7 @@ mod tests {
 		Segment::init(
 			&mut file,
 			InitParams {
-				page_size: 32 * KiB,
+				page_size: 32 * KiB as u16,
 			},
 		)
 		.unwrap();
@@ -341,7 +335,7 @@ mod tests {
 		assert_eq!(header.magic, *b"ACNS");
 		assert_eq!(header.format_version, 1);
 		assert_eq!(header.byte_order, ByteOrder::NATIVE as u8);
-		assert_eq!(header.page_size_exponent, 15);
+		assert_eq!(header.page_size, 32 * KiB as u16);
 		assert_eq!(header.num_pages, 1);
 		assert_eq!(header.freelist_trunk, None);
 	}
@@ -352,7 +346,7 @@ mod tests {
 		let result = Segment::init(
 			&mut file,
 			InitParams {
-				page_size: 31 * KiB,
+				page_size: 31 * KiB as u16,
 			},
 		);
 		assert_matches!(result, Err(InitError::PageSizeBounds(..)));
@@ -361,7 +355,12 @@ mod tests {
 	#[test]
 	fn try_init_with_too_small_page_size() {
 		let mut file = Vec::new();
-		let result = Segment::init(&mut file, InitParams { page_size: 256 * B });
+		let result = Segment::init(
+			&mut file,
+			InitParams {
+				page_size: 256 * B as u16,
+			},
+		);
 		assert_matches!(result, Err(InitError::PageSizeBounds(..)));
 	}
 
@@ -372,27 +371,12 @@ mod tests {
 		header.magic = *b"ACNS";
 		header.format_version = 1;
 		header.byte_order = ByteOrder::NATIVE as u8;
-		header.page_size_exponent = 14;
+		header.page_size = 16 * KiB as u16;
 		header.num_pages = 1;
 		header.freelist_trunk = None;
 
 		let storage = Segment::load(file).unwrap();
-		assert_eq!(storage.page_size(), 16 * KiB);
-	}
-
-	#[test]
-	fn try_load_file_with_too_large_page_size_exponent() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
-		let header = HeaderPage::from_bytes_mut(&mut file);
-		header.magic = *b"ACNS";
-		header.format_version = 1;
-		header.byte_order = ByteOrder::NATIVE as u8;
-		header.page_size_exponent = 69;
-		header.num_pages = 1;
-		header.freelist_trunk = None;
-
-		let storage = Segment::load(file).unwrap();
-		assert_eq!(storage.page_size(), *PAGE_SIZE_RANGE.end());
+		assert_eq!(storage.page_size(), 16 * KiB as u16);
 	}
 
 	#[test]
@@ -467,14 +451,14 @@ mod tests {
 		Segment::init(&mut file, InitParams::default()).unwrap();
 		let storage = Segment::load(file).unwrap();
 
-		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
-		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size().into()).collect();
+		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size().into()).collect();
 
 		let page_num = storage.allocate_page().unwrap();
 
 		src_buf.fill(69);
 		src_buf[0] = 25;
-		src_buf[storage.page_size() - 1] = 42;
+		src_buf[storage.page_size() as usize - 1] = 42;
 		storage.write_page(&src_buf, page_num).unwrap();
 
 		storage.read_page(&mut dst_buf, page_num).unwrap();
@@ -488,8 +472,8 @@ mod tests {
 		Segment::init(&mut file, InitParams::default()).unwrap();
 		let storage = Segment::load(file).unwrap();
 
-		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
-		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+		let mut src_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size().into()).collect();
+		let mut dst_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size().into()).collect();
 
 		let page_num_1 = storage.allocate_page().unwrap();
 		let page_num_2 = storage.allocate_page().unwrap();
@@ -559,7 +543,7 @@ mod tests {
 
 		let allocated = storage.allocate_page().unwrap();
 
-		let mut buf: Box<[u8]> = iter::repeat(0).take(storage.page_size()).collect();
+		let mut buf: Box<[u8]> = iter::repeat(0).take(storage.page_size().into()).collect();
 		storage.read_page(&mut buf, allocated).unwrap()
 	}
 }

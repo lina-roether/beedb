@@ -29,7 +29,7 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 				map: HashMap::new(),
 				dirty: HashSet::new(),
 			}),
-			buffer: PageBuffer::new(storage.page_size(), length),
+			buffer: PageBuffer::new(storage.page_size().into(), length),
 			storage,
 		}
 	}

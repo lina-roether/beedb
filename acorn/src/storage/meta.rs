@@ -1,7 +1,6 @@
 use std::{
 	io::{self, Read, Seek, SeekFrom, Write},
 	mem::size_of,
-	usize,
 };
 
 use thiserror::Error;
@@ -46,7 +45,7 @@ pub enum InitError {
 }
 
 pub struct InitParams {
-	page_size: usize,
+	page_size: u16,
 }
 
 pub struct StorageMetaFile<F: Seek + Read + Write> {
@@ -124,8 +123,8 @@ pub struct StorageMeta {
 
 impl StorageMeta {
 	#[inline]
-	pub fn page_size(&self) -> usize {
-		1_usize
+	pub fn page_size(&self) -> u16 {
+		1_u16
 			.checked_shl(self.page_size_exponent.into())
 			.unwrap_or(*PAGE_SIZE_RANGE.end())
 	}
@@ -156,7 +155,7 @@ mod tests {
 		assert_eq!(meta.format_version, 1);
 		assert_eq!(meta.byte_order, ByteOrder::NATIVE as u8);
 		assert_eq!(meta.page_size_exponent, 14);
-		assert_eq!(meta.page_size(), 16 * KiB);
+		assert_eq!(meta.page_size(), 16 * KiB as u16);
 		assert_eq!(meta.num_clusters, 420);
 	}
 
@@ -172,6 +171,6 @@ mod tests {
 
 		let meta_file = StorageMetaFile::load(Cursor::new(data)).unwrap();
 		let meta = meta_file.get();
-		assert_eq!(meta.page_size(), 64 * KiB); // Should be the maximum
+		assert_eq!(meta.page_size(), 32 * KiB as u16); // Should be the maximum
 	}
 }
