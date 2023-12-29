@@ -3,12 +3,12 @@ use std::{cell::UnsafeCell, io, iter, mem::size_of, num::NonZeroU16, usize};
 use thiserror::Error;
 
 use crate::{
-	segment::format::{FreelistPageHeader, HeaderPage},
-	utils::{
-		byte_order::ByteOrder,
-		byte_view::ByteView,
-		units::{display_size, KiB, B},
+	consts::{
+		validate_page_size, PageSizeBoundsError, DEFAULT_PAGE_SIZE, PAGE_SIZE_RANGE,
+		SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC,
 	},
+	segment::format::{FreelistPageHeader, HeaderPage},
+	utils::{byte_order::ByteOrder, byte_view::ByteView},
 };
 
 mod format;
@@ -24,25 +24,25 @@ pub type PageNumber = NonZeroU16;
 
 #[derive(Debug, Error)]
 pub enum Error {
-	#[error("The provided file is not an acorn storage file (expected magic bytes {MAGIC:08x?})")]
-	NotAStorageFile,
+	#[error("The provided file is not an acorn segment file (expected magic bytes {SEGMENT_MAGIC:08x?})")]
+	NotASegmentFile,
 
-	#[error("The format version {0} is not supported in this version of acorn")]
+	#[error("Segment format version {0} is not supported in this version of acorn")]
 	UnsupportedVersion(u8),
 
-	#[error("Cannot open a {0} storage file on a {} system", ByteOrder::NATIVE)]
+	#[error("Cannot open a {0} segment file on a {} system", ByteOrder::NATIVE)]
 	ByteOrderMismatch(ByteOrder),
 
-	#[error("The storage is corrupted (Unexpected end of file)")]
+	#[error("The segment is corrupted (Unexpected end of file)")]
 	IncompleteRead,
 
-	#[error("Failed to expand storage file")]
+	#[error("Failed to expand segment file")]
 	IncompleteWrite,
 
-	#[error("The storage file is corrupted")]
+	#[error("The segment file is corrupted")]
 	Corrupted,
 
-	#[error("An error occurred accessing the storage file: {0}")]
+	#[error("An error occurred accessing the segment file: {0}")]
 	Io(#[from] io::Error),
 }
 
@@ -51,22 +51,12 @@ pub enum InitError {
 	#[error("Failed to write the complete file header")]
 	IncompleteWrite,
 
-	#[error(
-		"Page size {0} is invalid; must be a power of two and at between {} and {}",
-		display_size(MIN_PAGE_SIZE),
-		display_size(MAX_PAGE_SIZE)
-	)]
-	InvalidPageSize(usize),
+	#[error(transparent)]
+	PageSizeBounds(#[from] PageSizeBoundsError),
 
 	#[error("An error occurred initializing the storage file: {0}")]
 	Io(#[from] io::Error),
 }
-
-pub const MAGIC: [u8; 4] = *b"ACRN";
-pub const FORMAT_VERSION: u8 = 1;
-pub const MIN_PAGE_SIZE: usize = 512 * B;
-pub const DEFAULT_PAGE_SIZE: usize = 16 * KiB;
-pub const MAX_PAGE_SIZE: usize = 64 * KiB;
 
 pub struct InitParams {
 	pub page_size: usize,
@@ -90,16 +80,14 @@ pub struct Segment<T: IoTarget> {
 
 impl<T: IoTarget> Segment<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
-		if !params.page_size.is_power_of_two() || params.page_size < MIN_PAGE_SIZE {
-			return Err(InitError::InvalidPageSize(params.page_size));
-		}
+		validate_page_size(params.page_size)?;
 
 		let page_size_exponent = params.page_size.ilog2() as u8;
 		let mut header_buf: [u8; size_of::<HeaderPage>()] = Default::default();
 		let header = HeaderPage::from_bytes_mut(&mut header_buf);
 		*header = HeaderPage {
-			magic: MAGIC,
-			format_version: FORMAT_VERSION,
+			magic: SEGMENT_MAGIC,
+			format_version: SEGMENT_FORMAT_VERSION,
 			page_size_exponent,
 			byte_order: ByteOrder::NATIVE as u8,
 			num_pages: 1,
@@ -120,7 +108,9 @@ impl<T: IoTarget> Segment<T> {
 		let header = HeaderPage::from_bytes(&buf);
 		Self::validate_header(header)?;
 
-		let page_size = 1 << header.page_size_exponent;
+		let page_size = 1_usize
+			.checked_shl(header.page_size_exponent.into())
+			.unwrap_or(*PAGE_SIZE_RANGE.end());
 
 		let mut header_buf: Box<[u8]> = iter::repeat(0).take(page_size).collect();
 		header_buf[0..size_of::<HeaderPage>()].copy_from_slice(&buf);
@@ -287,11 +277,11 @@ impl<T: IoTarget> Segment<T> {
 	}
 
 	fn validate_header(header: &HeaderPage) -> Result<(), Error> {
-		if header.magic != MAGIC {
-			return Err(Error::NotAStorageFile);
+		if header.magic != SEGMENT_MAGIC {
+			return Err(Error::NotASegmentFile);
 		}
 
-		if header.format_version != FORMAT_VERSION {
+		if header.format_version != SEGMENT_FORMAT_VERSION {
 			return Err(Error::UnsupportedVersion(header.format_version));
 		}
 
@@ -328,6 +318,11 @@ impl FreelistCache {
 mod tests {
 	use std::{assert_matches::assert_matches, collections::HashSet, hash::Hash};
 
+	use crate::{
+		consts::PAGE_SIZE_RANGE,
+		utils::units::{KiB, B},
+	};
+
 	use super::*;
 
 	#[test]
@@ -343,7 +338,7 @@ mod tests {
 		.unwrap();
 
 		let header = HeaderPage::from_bytes(&file);
-		assert_eq!(header.magic, *b"ACRN");
+		assert_eq!(header.magic, *b"ACNS");
 		assert_eq!(header.format_version, 1);
 		assert_eq!(header.byte_order, ByteOrder::NATIVE as u8);
 		assert_eq!(header.page_size_exponent, 15);
@@ -360,21 +355,21 @@ mod tests {
 				page_size: 31 * KiB,
 			},
 		);
-		assert_matches!(result, Err(InitError::InvalidPageSize(..)));
+		assert_matches!(result, Err(InitError::PageSizeBounds(..)));
 	}
 
 	#[test]
 	fn try_init_with_too_small_page_size() {
 		let mut file = Vec::new();
 		let result = Segment::init(&mut file, InitParams { page_size: 256 * B });
-		assert_matches!(result, Err(InitError::InvalidPageSize(..)));
+		assert_matches!(result, Err(InitError::PageSizeBounds(..)));
 	}
 
 	#[test]
 	fn load_file() {
 		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
 		let header = HeaderPage::from_bytes_mut(&mut file);
-		header.magic = *b"ACRN";
+		header.magic = *b"ACNS";
 		header.format_version = 1;
 		header.byte_order = ByteOrder::NATIVE as u8;
 		header.page_size_exponent = 14;
@@ -386,6 +381,21 @@ mod tests {
 	}
 
 	#[test]
+	fn try_load_file_with_too_large_page_size_exponent() {
+		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let header = HeaderPage::from_bytes_mut(&mut file);
+		header.magic = *b"ACNS";
+		header.format_version = 1;
+		header.byte_order = ByteOrder::NATIVE as u8;
+		header.page_size_exponent = 69;
+		header.num_pages = 1;
+		header.freelist_trunk = None;
+
+		let storage = Segment::load(file).unwrap();
+		assert_eq!(storage.page_size(), *PAGE_SIZE_RANGE.end());
+	}
+
+	#[test]
 	fn try_load_without_magic() {
 		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
 		let header = HeaderPage::from_bytes_mut(&mut file);
@@ -393,7 +403,7 @@ mod tests {
 
 		match Segment::load(file) {
 			Ok(..) => panic!("Should not succeed"),
-			Err(err) => assert_matches!(err, Error::NotAStorageFile),
+			Err(err) => assert_matches!(err, Error::NotASegmentFile),
 		}
 	}
 
@@ -401,7 +411,7 @@ mod tests {
 	fn try_load_with_wrong_format_version() {
 		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
 		let header = HeaderPage::from_bytes_mut(&mut file);
-		header.magic = *b"ACRN";
+		header.magic = *b"ACNS";
 		header.format_version = 69;
 
 		match Segment::load(file) {
@@ -414,7 +424,7 @@ mod tests {
 	fn try_load_with_wrong_byte_order() {
 		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
 		let header = HeaderPage::from_bytes_mut(&mut file);
-		header.magic = *b"ACRN";
+		header.magic = *b"ACNS";
 		header.format_version = 1;
 		header.byte_order = match ByteOrder::NATIVE {
 			ByteOrder::Big => ByteOrder::Little as u8,
@@ -441,7 +451,7 @@ mod tests {
 	fn try_load_with_corrupted_byte_order() {
 		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
 		let header = HeaderPage::from_bytes_mut(&mut file);
-		header.magic = *b"ACRN";
+		header.magic = *b"ACNS";
 		header.format_version = 1;
 		header.byte_order = 2;
 
