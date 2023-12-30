@@ -15,19 +15,19 @@ impl StorageDir {
 		Self { path }
 	}
 
-	pub fn open_segment_file(&self, segment_num: u32) -> Result<File, io::Error> {
+	pub fn open_segment_file(&self, segment_num: u32, create: bool) -> Result<File, io::Error> {
 		OpenOptions::new()
 			.read(true)
 			.write(true)
-			.create(true)
+			.create(create)
 			.open(self.path.join(Self::segment_file_name(segment_num)))
 	}
 
-	pub fn open_meta(&self) -> Result<File, io::Error> {
+	pub fn open_meta_file(&self, create: bool) -> Result<File, io::Error> {
 		OpenOptions::new()
 			.read(true)
 			.write(true)
-			.create(true)
+			.create(create)
 			.open(self.path.join(Self::META_FILE_NAME))
 	}
 
@@ -54,7 +54,7 @@ mod tests {
 		let storage_dir = StorageDir::new(dir.path().into());
 		let mut buf = Vec::new();
 		storage_dir
-			.open_segment_file(0)
+			.open_segment_file(0, false)
 			.unwrap()
 			.read_to_end(&mut buf)
 			.unwrap();
@@ -70,7 +70,7 @@ mod tests {
 		let storage_dir = StorageDir::new(dir.path().into());
 		let mut buf = Vec::new();
 		storage_dir
-			.open_meta()
+			.open_meta_file(false)
 			.unwrap()
 			.read_to_end(&mut buf)
 			.unwrap();
@@ -82,7 +82,7 @@ mod tests {
 		let dir = tempdir().unwrap();
 
 		let storage_dir = StorageDir::new(dir.path().into());
-		storage_dir.open_segment_file(1).unwrap();
+		storage_dir.open_segment_file(1, true).unwrap();
 
 		assert!(dir.path().join("1.acns").exists());
 	}
@@ -92,8 +92,24 @@ mod tests {
 		let dir = tempdir().unwrap();
 
 		let storage_dir = StorageDir::new(dir.path().into());
-		storage_dir.open_meta().unwrap();
+		storage_dir.open_meta_file(true).unwrap();
 
 		assert!(dir.path().join("storage.acnm").exists());
+	}
+
+	#[test]
+	fn dont_create_segment_file_when_flag_is_not_set() {
+		let dir = tempdir().unwrap();
+		let storage_dir = StorageDir::new(dir.path().into());
+		assert!(storage_dir.open_segment_file(69, false).is_err());
+		assert!(!dir.path().join("69.acns").exists());
+	}
+
+	#[test]
+	fn dont_create_meta_file_when_flag_is_not_set() {
+		let dir = tempdir().unwrap();
+		let storage_dir = StorageDir::new(dir.path().into());
+		assert!(storage_dir.open_meta_file(false).is_err());
+		assert!(!dir.path().join("storage.acnm").exists());
 	}
 }

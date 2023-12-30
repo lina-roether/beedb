@@ -4,6 +4,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+use parking_lot::RwLock;
 use thiserror::Error;
 
 use crate::{consts::DEFAULT_PAGE_SIZE, segment::Segment};
@@ -14,15 +15,30 @@ mod dir;
 mod meta;
 
 pub struct Storage {
-	meta: StorageMetaFile<File>,
+	meta: RwLock<StorageMetaFile<File>>,
 	dir: StorageDir,
-	segments: Vec<Segment<File>>,
+	segments: RwLock<Vec<Segment<File>>>,
+}
+
+#[derive(Debug, Error)]
+pub enum Error {
+	#[error("The folder {} doesn't exist", _0.display())]
+	DoesntExist(PathBuf),
+
+	#[error("Failed to open storage meta file: {0}")]
+	FailedToOpenMeta(io::Error),
+
+	#[error(transparent)]
+	Meta(#[from] meta::Error),
 }
 
 #[derive(Debug, Error)]
 pub enum InitError {
 	#[error("Failed to initialize meta file: {0}")]
 	Meta(#[from] meta::InitError),
+
+	#[error("Failed to create storage meta file: {0}")]
+	FailedToCreateMeta(io::Error),
 
 	#[error("The folder {} doesn't exist", _0.display())]
 	DoesntExist(PathBuf),
@@ -51,7 +67,9 @@ impl Storage {
 		fs::remove_dir_all(&path).map_err(InitError::FailedToClear)?;
 		fs::create_dir(&path).map_err(InitError::FailedToClear)?;
 		let dir = StorageDir::new(path.as_ref().into());
-		let mut meta_file = dir.open_meta().map_err(meta::InitError::from)?;
+		let mut meta_file = dir
+			.open_meta_file(true)
+			.map_err(InitError::FailedToCreateMeta)?;
 		StorageMetaFile::init(
 			&mut meta_file,
 			meta::InitParams {
@@ -60,13 +78,38 @@ impl Storage {
 		)?;
 		Ok(())
 	}
+
+	pub fn load(path: PathBuf) -> Result<Self, Error> {
+		if !path.exists() {
+			return Err(Error::DoesntExist(path));
+		}
+		let dir = StorageDir::new(path);
+		let meta_file = dir.open_meta_file(false).map_err(Error::FailedToOpenMeta)?;
+		let meta = StorageMetaFile::load(meta_file)?;
+
+		Ok(Self {
+			meta: RwLock::new(meta),
+			dir,
+			segments: RwLock::new(Vec::new()),
+		})
+	}
+
+	#[inline]
+	pub fn page_size(&self) -> u16 {
+		self.meta.read().get().page_size()
+	}
 }
 
 #[cfg(test)]
 mod tests {
+	use std::mem::size_of;
+
 	use tempfile::tempdir;
 
-	use crate::{storage::meta::StorageMeta, utils::byte_view::ByteView};
+	use crate::{
+		storage::meta::StorageMeta,
+		utils::{byte_order::ByteOrder, byte_view::ByteView},
+	};
 
 	use super::*;
 
@@ -83,5 +126,22 @@ mod tests {
 
 		assert!(!dir.path().join("junk").exists());
 		assert_eq!(meta.page_size_exponent, 14);
+	}
+
+	#[test]
+	fn load() {
+		let dir = tempdir().unwrap();
+		let mut meta_data: [u8; size_of::<StorageMeta>()] = Default::default();
+		*StorageMeta::from_bytes_mut(&mut meta_data) = StorageMeta {
+			magic: *b"ACNM",
+			byte_order: ByteOrder::NATIVE as u8,
+			format_version: 1,
+			page_size_exponent: 14,
+			num_clusters: 0,
+		};
+		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
+
+		let storage = Storage::load(dir.path().into()).unwrap();
+		assert_eq!(storage.page_size(), 1 << 14);
 	}
 }
