@@ -7,6 +7,7 @@
 
 mod cache;
 mod consts;
+mod index;
 mod io;
 mod segment;
 mod storage;
