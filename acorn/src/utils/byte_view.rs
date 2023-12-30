@@ -5,6 +5,8 @@ use std::{
 		NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroU128, NonZeroU16,
 		NonZeroU32, NonZeroU64, NonZeroU8,
 	},
+	ops::{Deref, DerefMut},
+	usize,
 };
 
 /// This trait indicates that it is safe to reinterpret
@@ -73,3 +75,56 @@ impl_byte_view!(
 	Option<NonZeroU128>,
 	Option<NonZeroI128>
 );
+
+#[repr(align(8))]
+pub struct AlignedBuffer<const S: usize>([u8; S]);
+
+impl<const S: usize> Deref for AlignedBuffer<S> {
+	type Target = [u8; S];
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl<const S: usize> DerefMut for AlignedBuffer<S> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
+	}
+}
+
+impl<const S: usize> From<[u8; S]> for AlignedBuffer<S> {
+	fn from(value: [u8; S]) -> Self {
+		Self(value)
+	}
+}
+
+impl<const S: usize> AsRef<[u8; S]> for AlignedBuffer<S> {
+	fn as_ref(&self) -> &[u8; S] {
+		self
+	}
+}
+
+impl<const S: usize> AsMut<[u8; S]> for AlignedBuffer<S> {
+	fn as_mut(&mut self) -> &mut [u8; S] {
+		self
+	}
+}
+
+impl<const S: usize> AsRef<[u8]> for AlignedBuffer<S> {
+	fn as_ref(&self) -> &[u8] {
+		&self.0
+	}
+}
+
+impl<const S: usize> AsMut<[u8]> for AlignedBuffer<S> {
+	fn as_mut(&mut self) -> &mut [u8] {
+		&mut self.0
+	}
+}
+
+impl<const S: usize> Default for AlignedBuffer<S> {
+	fn default() -> Self {
+		Self([0; S])
+	}
+}

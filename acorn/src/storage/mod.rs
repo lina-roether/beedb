@@ -1,6 +1,7 @@
 use std::{
 	fs::{self, File},
 	io, mem,
+	num::NonZeroU16,
 	path::{Path, PathBuf},
 	usize,
 };
@@ -128,7 +129,7 @@ impl Storage {
 		let segments = self.segments.read();
 		let segment = self.get_segment(&segments, id.segment_num)?;
 		segment
-			.read_page(buf, id.page_num)
+			.read_page(buf, NonZeroU16::new(id.page_num).unwrap())
 			.map_err(|err| Error::ReadFailed(id, err))?;
 		Ok(())
 	}
@@ -137,7 +138,7 @@ impl Storage {
 		let segments = self.segments.read();
 		let segment = self.get_segment(&segments, id.segment_num)?;
 		segment
-			.write_page(buf, id.page_num)
+			.write_page(buf, NonZeroU16::new(id.page_num).unwrap())
 			.map_err(|err| Error::WriteFailed(id, err))?;
 		Ok(())
 	}
@@ -239,7 +240,7 @@ mod tests {
 		mem::drop(segment);
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let page_id = PageId::new(0, page_num);
+		let page_id = PageId::new(0, page_num.get());
 
 		let mut res_buf: Box<[u8]> = iter::repeat(0).take(1 << 14).collect();
 		storage.read_page(&mut res_buf, page_id).unwrap();

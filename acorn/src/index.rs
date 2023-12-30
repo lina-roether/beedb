@@ -1,15 +1,14 @@
 use core::fmt;
-use std::num::NonZeroU16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageId {
 	pub segment_num: u32,
-	pub page_num: NonZeroU16,
+	pub page_num: u16,
 }
 
 impl PageId {
 	#[inline]
-	pub fn new(segment_num: u32, page_num: NonZeroU16) -> Self {
+	pub fn new(segment_num: u32, page_num: u16) -> Self {
 		Self {
 			segment_num,
 			page_num,
@@ -26,7 +25,7 @@ impl fmt::Display for PageId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StorageIndex {
 	pub segment_num: u32,
-	pub page_num: NonZeroU16,
+	pub page_num: u16,
 	pub index: u16,
 }
 
