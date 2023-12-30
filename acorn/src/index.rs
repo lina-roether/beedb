@@ -1,109 +1,53 @@
-use std::{
-	fmt::{self},
-	hash::{Hash, Hasher},
-	num::NonZeroU16,
-};
+use core::fmt;
+use std::num::NonZeroU16;
 
-#[derive(Clone, Copy)]
-pub union StorageIndex {
-	num: u64,
-	parts: StorageIndexParts,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageId {
+	pub segment_num: u32,
+	pub page_num: NonZeroU16,
+}
+
+impl PageId {
+	#[inline]
+	pub fn new(segment_num: u32, page_num: NonZeroU16) -> Self {
+		Self {
+			segment_num,
+			page_num,
+		}
+	}
+}
+
+impl fmt::Display for PageId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{:08x}:{:04x}", self.segment_num, self.page_num)
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StorageIndex {
+	pub segment_num: u32,
+	pub page_num: NonZeroU16,
+	pub index: u16,
 }
 
 impl StorageIndex {
 	#[inline]
-	pub unsafe fn from_num_unchecked(num: u64) -> Self {
-		Self { num }
-	}
-
-	#[inline]
-	pub fn from_parts(segment_num: u32, page_num: NonZeroU16, page_index: u16) -> Self {
+	pub fn new(page_id: PageId, index: u16) -> Self {
 		Self {
-			parts: StorageIndexParts {
-				segment_num,
-				page_num,
-				page_index,
-			},
+			segment_num: page_id.segment_num,
+			page_num: page_id.page_num,
+			index,
 		}
 	}
 
 	#[inline]
-	fn as_num(&self) -> u64 {
-		unsafe { self.num }
-	}
-
-	#[inline]
-	pub fn segment_num(&self) -> u32 {
-		unsafe { self.parts.segment_num }
-	}
-
-	#[inline]
-	pub fn page_num(&self) -> NonZeroU16 {
-		unsafe { self.parts.page_num }
-	}
-
-	#[inline]
-	pub fn page_index(&self) -> u16 {
-		unsafe { self.parts.page_index }
+	pub fn page_id(self) -> PageId {
+		PageId::new(self.segment_num, self.page_num)
 	}
 }
 
-impl From<StorageIndex> for u64 {
-	fn from(value: StorageIndex) -> Self {
-		value.as_num()
-	}
-}
-
-impl fmt::Debug for StorageIndex {
+impl fmt::Display for StorageIndex {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(
-			f,
-			"{:08x}:{:04x}:{:04x}",
-			self.segment_num(),
-			self.page_num(),
-			self.page_index()
-		)
-	}
-}
-
-impl PartialEq for StorageIndex {
-	fn eq(&self, other: &Self) -> bool {
-		self.as_num() == other.as_num()
-	}
-}
-
-impl Eq for StorageIndex {}
-
-impl Hash for StorageIndex {
-	fn hash<H: Hasher>(&self, state: &mut H) {
-		self.as_num().hash(state);
-	}
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(packed)]
-struct StorageIndexParts {
-	segment_num: u32,
-	page_num: NonZeroU16,
-	page_index: u16,
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn from_parts() {
-		let idx = StorageIndex::from_parts(0x0004_2069, NonZeroU16::new(0x0420).unwrap(), 0x0069);
-		assert_eq!(idx.segment_num(), 0x0004_2069);
-		assert_eq!(idx.page_num(), NonZeroU16::new(0x0420).unwrap());
-		assert_eq!(idx.page_index(), 0x0069);
-	}
-
-	#[test]
-	fn debug_repr() {
-		let idx = StorageIndex::from_parts(0x04206942, NonZeroU16::new(0x0694).unwrap(), 0x2069);
-
-		assert_eq!(format!("{idx:?}"), String::from("04206942:0694:2069"));
+		write!(f, "{}:{:04x}", self.page_id(), self.index)
 	}
 }
