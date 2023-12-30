@@ -3,6 +3,7 @@ use std::{cell::UnsafeCell, io, iter, mem::size_of, num::NonZeroU16, usize};
 use thiserror::Error;
 
 use crate::consts::DEFAULT_PAGE_SIZE;
+use crate::io::IoTarget;
 use crate::{
 	consts::{validate_page_size, PageSizeBoundsError, SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC},
 	segment::format::{FreelistPageHeader, HeaderPage},
@@ -11,10 +12,8 @@ use crate::{
 
 mod format;
 mod lock;
-mod target;
 
 pub use format::*;
-pub use target::*;
 
 use self::lock::PageLocker;
 

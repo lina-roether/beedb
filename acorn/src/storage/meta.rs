@@ -1,5 +1,5 @@
 use std::{
-	io::{self, Read, Seek, SeekFrom, Write},
+	io::{self},
 	mem::size_of,
 };
 
@@ -9,11 +9,12 @@ use crate::{
 	consts::{
 		validate_page_size, PageSizeBoundsError, META_FORMAT_VERSION, META_MAGIC, PAGE_SIZE_RANGE,
 	},
+	io::IoTarget,
 	utils::{byte_order::ByteOrder, byte_view::ByteView},
 };
 
 #[derive(Debug, Error)]
-pub enum MetaError {
+pub enum Error {
 	#[error(
 		"The provided file is not a storage meta file (expected magic bytes {META_MAGIC:08x?})"
 	)]
@@ -40,37 +41,41 @@ pub enum InitError {
 	#[error(transparent)]
 	PageSizeBounds(#[from] PageSizeBoundsError),
 
-	#[error("Failed to initialize the data directory meta file: {0}")]
+	#[error(transparent)]
 	Io(#[from] io::Error),
 }
 
 pub struct InitParams {
-	page_size: u16,
+	pub page_size: u16,
 }
 
-pub struct StorageMetaFile<F: Seek + Read + Write> {
+pub struct StorageMetaFile<F: IoTarget> {
 	buf: Vec<u8>,
 	file: F,
 }
 
-impl<F: Seek + Read + Write> StorageMetaFile<F> {
-	pub fn load(mut file: F) -> Result<Self, MetaError> {
-		file.seek(SeekFrom::Start(0))?;
-		let mut buf = Vec::new();
-		file.read_to_end(&mut buf)?;
-		let meta_file = Self { buf, file };
+impl<F: IoTarget> StorageMetaFile<F> {
+	pub fn load(file: F) -> Result<Self, Error> {
+		let mut buf: [u8; size_of::<StorageMeta>()] = Default::default();
+		if file.read_at(&mut buf, 0)? != buf.len() {
+			return Err(Error::NotAMetaFile);
+		}
+		let meta_file = Self {
+			buf: buf.to_vec(),
+			file,
+		};
 		let meta = meta_file.get();
 		if meta.magic != META_MAGIC {
-			return Err(MetaError::NotAMetaFile);
+			return Err(Error::NotAMetaFile);
 		}
 		if meta.format_version != META_FORMAT_VERSION {
-			return Err(MetaError::UnsupportedVersion(meta.format_version));
+			return Err(Error::UnsupportedVersion(meta.format_version));
 		}
 		let Some(byte_order) = ByteOrder::from_byte(meta.byte_order) else {
-			return Err(MetaError::Corrupted);
+			return Err(Error::Corrupted);
 		};
 		if byte_order != ByteOrder::NATIVE {
-			return Err(MetaError::ByteOrderMismatch(byte_order));
+			return Err(Error::ByteOrderMismatch(byte_order));
 		}
 		validate_page_size(meta.page_size())?;
 		Ok(meta_file)
@@ -80,7 +85,6 @@ impl<F: Seek + Read + Write> StorageMetaFile<F> {
 		validate_page_size(params.page_size)?;
 		let page_size_exponent = params.page_size.ilog2() as u8;
 
-		file.seek(SeekFrom::Start(0))?;
 		let mut buf: [u8; size_of::<StorageMeta>()] = Default::default();
 		let meta = StorageMeta::from_bytes_mut(&mut buf);
 		*meta = StorageMeta {
@@ -90,6 +94,9 @@ impl<F: Seek + Read + Write> StorageMetaFile<F> {
 			page_size_exponent,
 			num_clusters: 0,
 		};
+
+		file.set_len(0)?;
+		file.write_at(&buf, 0)?;
 
 		Ok(())
 	}
@@ -104,10 +111,9 @@ impl<F: Seek + Read + Write> StorageMetaFile<F> {
 		StorageMeta::from_bytes_mut(&mut self.buf)
 	}
 
-	pub fn flush(&mut self) -> Result<(), MetaError> {
-		self.file.seek(SeekFrom::Start(0))?;
-		self.file.write_all(&self.buf)?;
-		self.file.flush()?;
+	pub fn flush(&mut self) -> Result<(), Error> {
+		self.file.set_len(0)?;
+		self.file.write_at(&self.buf, 0)?;
 		Ok(())
 	}
 }
@@ -134,8 +140,6 @@ unsafe impl ByteView for StorageMeta {}
 
 #[cfg(test)]
 mod tests {
-	use std::io::Cursor;
-
 	use crate::utils::units::KiB;
 
 	use super::*;
@@ -150,7 +154,7 @@ mod tests {
 		data.push(0);
 		data.extend(420_u32.to_ne_bytes());
 
-		let meta_file = StorageMetaFile::load(Cursor::new(data)).unwrap();
+		let meta_file = StorageMetaFile::load(data).unwrap();
 		let meta = meta_file.get();
 		assert_eq!(meta.format_version, 1);
 		assert_eq!(meta.byte_order, ByteOrder::NATIVE as u8);
@@ -169,7 +173,7 @@ mod tests {
 		data.push(0);
 		data.extend(420_u32.to_ne_bytes());
 
-		let meta_file = StorageMetaFile::load(Cursor::new(data)).unwrap();
+		let meta_file = StorageMetaFile::load(data).unwrap();
 		let meta = meta_file.get();
 		assert_eq!(meta.page_size(), 32 * KiB as u16); // Should be the maximum
 	}

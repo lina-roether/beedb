@@ -1,4 +1,4 @@
-use std::{fs::File, io, ops::Range, usize};
+use std::{fs::File, io, iter, ops::Range, usize};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
@@ -10,6 +10,8 @@ pub trait IoTarget {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
 
 	fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize>;
+
+	fn set_len(&mut self, len: u64) -> io::Result<()>;
 }
 
 fn get_buf_range(len: usize, buf_len: usize, offset: u64) -> Range<usize> {
@@ -38,6 +40,15 @@ impl IoTarget for Vec<u8> {
 		self[range].copy_from_slice(&buf[0..num_written]);
 		Ok(num_written)
 	}
+
+	fn set_len(&mut self, len: u64) -> io::Result<()> {
+		if len as usize <= self.len() {
+			self.truncate(len as usize);
+		} else {
+			self.extend(iter::repeat(0).take(len as usize - self.len()))
+		}
+		Ok(())
+	}
 }
 
 cfg_match! {
@@ -50,6 +61,10 @@ cfg_match! {
 			fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
 				FileExt::write_at(self, buf, offset)
 			}
+
+			fn set_len(&mut self, len: u64) -> io::Result<()> {
+				File::set_len(self, len)
+			}
 		}
 	}
 	cfg(windows) => {
@@ -60,6 +75,10 @@ cfg_match! {
 
 			fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
 				FileExt::seek_write(self, buf, offset)
+			}
+
+			fn set_len(&mut self, len: u64) -> io::Result<()> {
+				File::set_len(self, len)
 			}
 		}
 	}

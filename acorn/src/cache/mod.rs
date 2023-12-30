@@ -10,7 +10,10 @@ use self::{
 	manager::CacheManager,
 };
 
-use crate::segment::{self, IoTarget, PageNumber, Segment};
+use crate::{
+	io::IoTarget,
+	segment::{self, PageNumber, Segment},
+};
 
 mod buffer;
 mod manager;
