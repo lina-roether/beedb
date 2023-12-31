@@ -7,6 +7,7 @@ use std::{
 };
 
 use parking_lot::{lock_api::RawRwLock as _, Mutex, RawRwLock};
+use static_assertions::assert_impl_all;
 
 use crate::utils::byte_view::AlignedBuffer;
 
@@ -91,6 +92,10 @@ pub struct PageBuffer {
 	last_filled: AtomicUsize,
 	pages: UnsafeCell<AlignedBuffer>,
 }
+
+unsafe impl Sync for PageBuffer {}
+
+assert_impl_all!(PageBuffer: Sync);
 
 impl PageBuffer {
 	const PAGE_ALIGNMENT: usize = 8;

@@ -6,6 +6,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
+use static_assertions::assert_impl_all;
 use thiserror::Error;
 
 use crate::index::PageId;
@@ -88,6 +89,8 @@ pub struct DiskStorage {
 	dir: StorageDir,
 	segment_files: RwLock<Vec<SegmentFile<File>>>,
 }
+
+assert_impl_all!(DiskStorage: Send, Sync);
 
 impl DiskStorage {
 	pub fn init(path: impl AsRef<Path>, params: InitParams) -> Result<(), InitError> {

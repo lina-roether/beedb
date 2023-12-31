@@ -4,9 +4,13 @@ use std::{
 	path::PathBuf,
 };
 
+use static_assertions::assert_impl_all;
+
 pub struct StorageDir {
 	path: PathBuf,
 }
+
+assert_impl_all!(StorageDir: Send, Sync);
 
 impl StorageDir {
 	const META_FILE_NAME: &'static str = "storage.acnm";

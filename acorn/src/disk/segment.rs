@@ -1,5 +1,6 @@
-use std::{cell::UnsafeCell, io};
+use std::{cell::UnsafeCell, fs::File, io};
 
+use static_assertions::assert_impl_all;
 use thiserror::Error;
 
 use crate::{
@@ -8,7 +9,7 @@ use crate::{
 	pages::HeaderPage,
 	utils::{
 		byte_order::ByteOrder,
-		byte_view::{AlignedBytes, ByteView},
+		byte_view::{AlignedBuffer, AlignedBytes, ByteView},
 		units::display_size,
 	},
 };
@@ -61,6 +62,10 @@ pub struct SegmentFile<T: IoTarget> {
 	target: UnsafeCell<T>,
 	locker: PageLocker,
 }
+
+unsafe impl<T: IoTarget> Sync for SegmentFile<T> {}
+
+assert_impl_all!(SegmentFile<File>: Sync);
 
 impl<T: IoTarget> SegmentFile<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
