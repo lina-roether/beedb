@@ -5,11 +5,14 @@ use std::{
 };
 
 use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock};
+use static_assertions::assert_impl_all;
 
 pub struct PageLocker {
 	locks: RwLock<Vec<RawRwLock>>,
 	locks_len: AtomicU16,
 }
+
+assert_impl_all!(PageLocker: Send, Sync);
 
 impl PageLocker {
 	#[inline]

@@ -10,6 +10,7 @@ pub struct FreelistPageHeader {
 	pub length: u16,
 }
 
+// Safety: No fields in FreelistPageHeader have internal invariants
 unsafe impl ByteView for FreelistPageHeader {}
 
 pub type FreelistPage = Page<FreelistPageHeader, Option<NonZeroU16>>;

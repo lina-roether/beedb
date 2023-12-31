@@ -27,7 +27,7 @@ pub struct PageCache {
 	storage: Arc<DiskStorage>,
 }
 
-assert_impl_all!(PageCache: Sync);
+assert_impl_all!(PageCache: Send, Sync);
 
 impl PageCache {
 	pub fn new(storage: Arc<DiskStorage>, length: usize) -> Self {

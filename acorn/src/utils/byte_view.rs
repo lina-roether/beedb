@@ -10,6 +10,8 @@ use std::{
 	ptr::{self},
 };
 
+use static_assertions::assert_impl_all;
+
 /// This trait indicates that it is safe to reinterpret
 /// a byte array as this type.
 ///
@@ -69,7 +71,12 @@ macro_rules! impl_byte_view {
     };
 }
 
+// Safety: None of the integer types have internal invariants
 impl_byte_view!(u8, i8, u16, i16, u32, i32, u64, i64, u128, i128);
+
+// Safety: While the nonzero variants of integers have the internal invariant
+// that they disallow zero, for the corresponding option type `None` is
+// represented as zero, so this is safe.
 impl_byte_view!(
 	Option<NonZeroU8>,
 	Option<NonZeroI8>,
@@ -140,6 +147,15 @@ pub struct AlignedBuffer {
 	layout: Layout,
 	bytes: *mut u8,
 }
+
+// Safety: AlignedBuffer's internal `bytes` pointer is unique
+unsafe impl Send for AlignedBuffer {}
+
+// Safety: AlignedBuffer requires a mutable reference for modification, so the
+// borrow checker enforces soundness
+unsafe impl Sync for AlignedBuffer {}
+
+assert_impl_all!(AlignedBuffer: Send, Sync);
 
 impl AlignedBuffer {
 	pub fn new(align: usize) -> Self {

@@ -9,7 +9,7 @@ use crate::{
 	pages::HeaderPage,
 	utils::{
 		byte_order::ByteOrder,
-		byte_view::{AlignedBuffer, AlignedBytes, ByteView},
+		byte_view::{AlignedBytes, ByteView},
 		units::display_size,
 	},
 };
@@ -63,9 +63,12 @@ pub struct SegmentFile<T: IoTarget> {
 	locker: PageLocker,
 }
 
+// Safety: Each page is SegmentFile<T> is only read while a shared lock is
+// acquired on it via the PageLocker, and only written to while an exclusive
+// lock is acquired on it via the PageLocker.
 unsafe impl<T: IoTarget> Sync for SegmentFile<T> {}
 
-assert_impl_all!(SegmentFile<File>: Sync);
+assert_impl_all!(SegmentFile<File>: Send, Sync);
 
 impl<T: IoTarget> SegmentFile<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {

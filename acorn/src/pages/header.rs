@@ -12,6 +12,7 @@ pub struct HeaderPage {
 	pub freelist_trunk: Option<NonZeroU16>,
 }
 
+// Safety: No fields in HeaderPage have internal invariants
 unsafe impl ByteView for HeaderPage {}
 
 #[cfg(test)]

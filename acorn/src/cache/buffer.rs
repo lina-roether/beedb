@@ -93,9 +93,13 @@ pub struct PageBuffer {
 	pages: UnsafeCell<AlignedBuffer>,
 }
 
+// Safety: Each page in the buffer is effectively protected by an RwLock in its
+// corresponding PageMeta. The area of the buffer belonging to the page is only
+// read when a shared lock is acquired on it, and only written to when an
+// exclusive lock is acquired on it.
 unsafe impl Sync for PageBuffer {}
 
-assert_impl_all!(PageBuffer: Sync);
+assert_impl_all!(PageBuffer: Send, Sync);
 
 impl PageBuffer {
 	const PAGE_ALIGNMENT: usize = 8;

@@ -148,6 +148,7 @@ impl StorageMeta {
 	}
 }
 
+// Safety: No fields in StorageMeta have internal invariants
 unsafe impl ByteView for StorageMeta {}
 
 #[cfg(test)]
