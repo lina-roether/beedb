@@ -111,7 +111,7 @@ impl<F: IoTarget> StorageMetaFile<F> {
 		StorageMeta::from_bytes_mut(&mut self.buf)
 	}
 
-	pub fn flush(&mut self) -> Result<(), LoadError> {
+	pub fn flush(&mut self) -> Result<(), io::Error> {
 		self.file.set_len(0)?;
 		self.file.write_at(&self.buf, 0)?;
 		Ok(())
