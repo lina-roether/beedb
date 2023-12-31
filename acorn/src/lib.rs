@@ -10,6 +10,7 @@ mod consts;
 mod disk;
 mod index;
 mod io;
+mod manage;
 mod pages;
 mod segment;
 mod storage;
