@@ -11,21 +11,21 @@ use self::{
 };
 
 use crate::{
-	io::IoTarget,
-	segment::{self, PageNumber, Segment},
+	disk::{self, DiskStorage},
+	index::PageId,
 };
 
 mod buffer;
 mod manager;
 
-pub struct PageCache<'a, T: IoTarget> {
+pub struct PageCache<'a> {
 	state: Mutex<CacheState>,
 	buffer: PageBuffer,
-	storage: &'a Segment<T>,
+	storage: &'a DiskStorage,
 }
 
-impl<'a, T: IoTarget> PageCache<'a, T> {
-	pub fn new(storage: &'a Segment<T>, length: usize) -> Self {
+impl<'a> PageCache<'a> {
+	pub fn new(storage: &'a DiskStorage, length: usize) -> Self {
 		Self {
 			state: Mutex::new(CacheState {
 				manager: CacheManager::new(length),
@@ -37,13 +37,13 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		}
 	}
 
-	pub fn read_page(&self, page_number: PageNumber) -> Result<PageReadGuard, segment::Error> {
-		let index = self.access(page_number, false)?;
+	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
+		let index = self.access(page_id, false)?;
 		Ok(self.buffer.read_page(index).unwrap())
 	}
 
-	pub fn write_page(&self, page_number: PageNumber) -> Result<PageWriteGuard, segment::Error> {
-		let index = self.access(page_number, true)?;
+	pub fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, disk::Error> {
+		let index = self.access(page_id, true)?;
 		Ok(self.buffer.write_page(index).unwrap())
 	}
 
@@ -52,7 +52,7 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		self.state.lock().dirty.len()
 	}
 
-	pub fn flush(&self) -> Result<(), segment::Error> {
+	pub fn flush(&self) -> Result<(), disk::Error> {
 		let mut state = self.state.lock();
 		for dirty_page in state.dirty.iter().copied() {
 			let index = *state.map.get(&dirty_page).unwrap();
@@ -63,15 +63,15 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 		Ok(())
 	}
 
-	fn access(&self, page_number: PageNumber, dirty: bool) -> Result<usize, segment::Error> {
+	fn access(&self, page_id: PageId, dirty: bool) -> Result<usize, disk::Error> {
 		let mut state = self.state.lock();
-		state.manager.access(page_number);
+		state.manager.access(page_id);
 
-		if dirty && !state.dirty.contains(&page_number) {
-			state.dirty.insert(page_number);
+		if dirty && !state.dirty.contains(&page_id) {
+			state.dirty.insert(page_id);
 		}
 
-		if let Some(&index) = state.map.get(&page_number) {
+		if let Some(&index) = state.map.get(&page_id) {
 			return Ok(index);
 		}
 
@@ -98,10 +98,10 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 			.expect("Failed to allocate a page in the page cache");
 
 		let mut page = self.buffer.write_page(index).unwrap();
-		self.storage.read_page(&mut page, page_number)?;
+		self.storage.read_page(&mut page, page_id)?;
 		mem::drop(page);
 
-		state.map.insert(page_number, index);
+		state.map.insert(page_id, index);
 
 		Ok(index)
 	}
@@ -109,33 +109,32 @@ impl<'a, T: IoTarget> PageCache<'a, T> {
 
 struct CacheState {
 	manager: CacheManager,
-	map: HashMap<PageNumber, usize>,
-	dirty: HashSet<PageNumber>,
+	map: HashMap<PageId, usize>,
+	dirty: HashSet<PageId>,
 }
 
 #[cfg(test)]
 mod tests {
-	use crate::segment::InitParams;
+	use tempfile::tempdir;
 
 	use super::*;
 
 	#[test]
 	fn simple_read_write() {
-		let mut file = Vec::new();
-		Segment::init(&mut file, InitParams::default()).unwrap();
-		let storage = Segment::load(file).unwrap();
+		let dir = tempdir().unwrap();
+		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
 		let cache = PageCache::new(&storage, 128);
 
-		let page_num_1 = storage.allocate_page().unwrap();
-		let page_num_2 = storage.allocate_page().unwrap();
+		let segment = storage.new_segment().unwrap();
 
 		{
-			let mut page_1 = cache.write_page(page_num_1).unwrap();
+			let mut page_1 = cache.write_page(PageId::new(segment, 1)).unwrap();
 			page_1.fill(69);
 		}
 
 		{
-			let mut page_2 = cache.write_page(page_num_2).unwrap();
+			let mut page_2 = cache.write_page(PageId::new(segment, 2)).unwrap();
 			page_2.fill(25);
 		}
 
@@ -143,8 +142,8 @@ mod tests {
 		cache.flush().unwrap();
 		assert_eq!(cache.num_dirty(), 0);
 
-		let page_1 = cache.read_page(page_num_1).unwrap();
-		let page_2 = cache.read_page(page_num_2).unwrap();
+		let page_1 = cache.read_page(PageId::new(segment, 1)).unwrap();
+		let page_2 = cache.read_page(PageId::new(segment, 2)).unwrap();
 
 		assert!(page_1.iter().all(|b| *b == 69));
 		assert!(page_2.iter().all(|b| *b == 25));

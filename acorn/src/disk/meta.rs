@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::{
 	consts::{
-		validate_page_size, PageSizeBoundsError, META_FORMAT_VERSION, META_MAGIC, PAGE_SIZE_RANGE,
+		validate_page_size, PageSizeBoundsError, DEFAULT_PAGE_SIZE, META_FORMAT_VERSION,
+		META_MAGIC, PAGE_SIZE_RANGE,
 	},
 	io::IoTarget,
 	utils::{byte_order::ByteOrder, byte_view::ByteView},
@@ -47,6 +48,14 @@ pub enum InitError {
 
 pub struct InitParams {
 	pub page_size: u16,
+}
+
+impl Default for InitParams {
+	fn default() -> Self {
+		Self {
+			page_size: DEFAULT_PAGE_SIZE,
+		}
+	}
 }
 
 pub struct StorageMetaFile<F: IoTarget> {

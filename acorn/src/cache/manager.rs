@@ -1,14 +1,14 @@
 use std::collections::VecDeque;
 
-use crate::segment::PageNumber;
+use crate::index::PageId;
 
 #[derive(Debug)]
 pub struct CacheManager {
-	slow: VecDeque<PageNumber>,
+	slow: VecDeque<PageId>,
 	fast_cap: usize,
-	fast: VecDeque<PageNumber>,
+	fast: VecDeque<PageId>,
 	graveyard_cap: usize,
-	graveyard: VecDeque<PageNumber>,
+	graveyard: VecDeque<PageId>,
 }
 
 impl CacheManager {
@@ -22,7 +22,7 @@ impl CacheManager {
 		}
 	}
 
-	pub fn access(&mut self, item: PageNumber) {
+	pub fn access(&mut self, item: PageId) {
 		if self.fast.contains(&item) {
 			return;
 		}
@@ -38,7 +38,7 @@ impl CacheManager {
 		self.fast.push_front(item);
 	}
 
-	pub fn reclaim(&mut self) -> Option<PageNumber> {
+	pub fn reclaim(&mut self) -> Option<PageId> {
 		if self.fast.len() > self.fast_cap {
 			let reclaimed = self.fast.pop_back().unwrap();
 			self.graveyard.push_front(reclaimed);
@@ -61,16 +61,16 @@ mod tests {
 		let mut mgr = CacheManager::new(8);
 
 		// Flood the fast queue
-		mgr.access(PageNumber::new(1).unwrap());
-		mgr.access(PageNumber::new(2).unwrap());
-		mgr.access(PageNumber::new(3).unwrap());
-		mgr.access(PageNumber::new(4).unwrap());
-		mgr.access(PageNumber::new(5).unwrap());
+		mgr.access(PageId::new(0, 1));
+		mgr.access(PageId::new(0, 2));
+		mgr.access(PageId::new(0, 3));
+		mgr.access(PageId::new(0, 4));
+		mgr.access(PageId::new(0, 5));
 
 		// Should immediately reclaim the tail of the fast queue
-		assert_eq!(mgr.reclaim(), Some(PageNumber::new(1).unwrap()));
-		assert_eq!(mgr.reclaim(), Some(PageNumber::new(2).unwrap()));
-		assert_eq!(mgr.reclaim(), Some(PageNumber::new(3).unwrap()));
+		assert_eq!(mgr.reclaim(), Some(PageId::new(0, 1)));
+		assert_eq!(mgr.reclaim(), Some(PageId::new(0, 2)));
+		assert_eq!(mgr.reclaim(), Some(PageId::new(0, 3)));
 		assert_eq!(mgr.reclaim(), None);
 	}
 
@@ -79,11 +79,11 @@ mod tests {
 		let mut mgr = CacheManager::new(8);
 
 		// Flood the fast queue
-		mgr.access(PageNumber::new(1).unwrap());
-		mgr.access(PageNumber::new(2).unwrap());
-		mgr.access(PageNumber::new(3).unwrap());
-		mgr.access(PageNumber::new(69).unwrap());
-		mgr.access(PageNumber::new(420).unwrap());
+		mgr.access(PageId::new(0, 1));
+		mgr.access(PageId::new(0, 2));
+		mgr.access(PageId::new(0, 3));
+		mgr.access(PageId::new(0, 69));
+		mgr.access(PageId::new(0, 420));
 
 		// Reclaim to make shure 1, 2, and 3 are in the graveyard
 		mgr.reclaim();
@@ -91,17 +91,17 @@ mod tests {
 		mgr.reclaim();
 
 		// Resurrect 1, 2, and 3 from the graveyard to the slow queue
-		mgr.access(PageNumber::new(1).unwrap());
-		mgr.access(PageNumber::new(2).unwrap());
-		mgr.access(PageNumber::new(3).unwrap());
+		mgr.access(PageId::new(0, 1));
+		mgr.access(PageId::new(0, 2));
+		mgr.access(PageId::new(0, 3));
 
 		// This should influence the order of reclaiming
-		mgr.access(PageNumber::new(1).unwrap());
-		mgr.access(PageNumber::new(3).unwrap());
+		mgr.access(PageId::new(0, 1));
+		mgr.access(PageId::new(0, 3));
 
 		// Should reclaim from slow queue according to LRU
-		assert_eq!(mgr.reclaim(), Some(PageNumber::new(2).unwrap()));
-		assert_eq!(mgr.reclaim(), Some(PageNumber::new(1).unwrap()));
-		assert_eq!(mgr.reclaim(), Some(PageNumber::new(3).unwrap()));
+		assert_eq!(mgr.reclaim(), Some(PageId::new(0, 2)));
+		assert_eq!(mgr.reclaim(), Some(PageId::new(0, 1)));
+		assert_eq!(mgr.reclaim(), Some(PageId::new(0, 3)));
 	}
 }
