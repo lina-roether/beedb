@@ -120,6 +120,7 @@ mod tests {
 	use super::*;
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn simple_read_write() {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();

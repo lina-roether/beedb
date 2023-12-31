@@ -1,10 +1,12 @@
-use std::{fs::File, io, iter, ops::Range, usize};
+use std::{fs::File, io, ops::Range};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
+
+use crate::utils::byte_view::AlignedBuffer;
 
 pub trait IoTarget {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
@@ -22,7 +24,7 @@ fn get_buf_range(len: usize, buf_len: usize, offset: u64) -> Range<usize> {
 	start..usize::min(start + buf_len, len)
 }
 
-impl IoTarget for Vec<u8> {
+impl IoTarget for AlignedBuffer {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 		let range = get_buf_range(self.len(), buf.len(), offset);
 		let num_read = range.len();
@@ -33,7 +35,7 @@ impl IoTarget for Vec<u8> {
 	fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
 		let min_length = (offset as usize) + buf.len();
 		if self.len() < min_length {
-			self.resize(min_length, 0);
+			self.resize_to(min_length);
 		}
 		let range = get_buf_range(self.len(), buf.len(), offset);
 		let num_written = range.len();
@@ -42,11 +44,7 @@ impl IoTarget for Vec<u8> {
 	}
 
 	fn set_len(&mut self, len: u64) -> io::Result<()> {
-		if len as usize <= self.len() {
-			self.truncate(len as usize);
-		} else {
-			self.extend(iter::repeat(0).take(len as usize - self.len()))
-		}
+		self.resize_to(len as usize);
 		Ok(())
 	}
 }

@@ -11,7 +11,10 @@ use crate::{
 		META_MAGIC, PAGE_SIZE_RANGE,
 	},
 	io::IoTarget,
-	utils::{byte_order::ByteOrder, byte_view::ByteView},
+	utils::{
+		byte_order::ByteOrder,
+		byte_view::{AlignedBytes, ByteView},
+	},
 };
 
 #[derive(Debug, Error)]
@@ -59,7 +62,7 @@ impl Default for InitParams {
 }
 
 pub struct StorageMetaFile<F: IoTarget> {
-	buf: Vec<u8>,
+	buf: Box<AlignedBytes<12>>,
 	file: F,
 }
 
@@ -70,7 +73,7 @@ impl<F: IoTarget> StorageMetaFile<F> {
 			return Err(LoadError::NotAMetaFile);
 		}
 		let meta_file = Self {
-			buf: buf.to_vec(),
+			buf: Box::new(AlignedBytes::from(buf)),
 			file,
 		};
 		let meta = meta_file.get();
@@ -94,8 +97,8 @@ impl<F: IoTarget> StorageMetaFile<F> {
 		validate_page_size(params.page_size)?;
 		let page_size_exponent = params.page_size.ilog2() as u8;
 
-		let mut buf: [u8; size_of::<StorageMeta>()] = Default::default();
-		let meta = StorageMeta::from_bytes_mut(&mut buf);
+		let mut buf: AlignedBytes<12> = Default::default();
+		let meta = StorageMeta::from_bytes_mut(buf.as_mut());
 		*meta = StorageMeta {
 			magic: META_MAGIC,
 			format_version: META_FORMAT_VERSION,
@@ -105,24 +108,24 @@ impl<F: IoTarget> StorageMetaFile<F> {
 		};
 
 		file.set_len(0)?;
-		file.write_at(&buf, 0)?;
+		file.write_at(buf.as_ref(), 0)?;
 
 		Ok(())
 	}
 
 	#[inline]
 	pub fn get(&self) -> &StorageMeta {
-		StorageMeta::from_bytes(&self.buf)
+		StorageMeta::from_bytes(&**self.buf)
 	}
 
 	#[inline]
 	pub fn get_mut(&mut self) -> &mut StorageMeta {
-		StorageMeta::from_bytes_mut(&mut self.buf)
+		StorageMeta::from_bytes_mut(&mut **self.buf)
 	}
 
 	pub fn flush(&mut self) -> Result<(), io::Error> {
 		self.file.set_len(0)?;
-		self.file.write_at(&self.buf, 0)?;
+		self.file.write_at(&**self.buf, 0)?;
 		Ok(())
 	}
 }
@@ -149,19 +152,19 @@ unsafe impl ByteView for StorageMeta {}
 
 #[cfg(test)]
 mod tests {
-	use crate::utils::units::KiB;
+	use crate::utils::{byte_view::AlignedBuffer, units::KiB};
 
 	use super::*;
 
 	#[test]
 	fn load() {
-		let mut data = Vec::new();
-		data.extend(*b"ACNM");
-		data.push(1);
-		data.push(ByteOrder::NATIVE as u8);
-		data.push(14);
-		data.push(0);
-		data.extend(420_u32.to_ne_bytes());
+		let mut data = AlignedBuffer::with_capacity(8, size_of::<StorageMeta>());
+		data[0..4].copy_from_slice(b"ACNM");
+		data[4] = 1;
+		data[5] = ByteOrder::NATIVE as u8;
+		data[6] = 14;
+		data[7] = 0;
+		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
 		let meta_file = StorageMetaFile::load(data).unwrap();
 		let meta = meta_file.get();
@@ -174,13 +177,13 @@ mod tests {
 
 	#[test]
 	fn load_with_too_large_page_size_exponent() {
-		let mut data = Vec::new();
-		data.extend(*b"ACNM");
-		data.push(1);
-		data.push(ByteOrder::NATIVE as u8);
-		data.push(69);
-		data.push(0);
-		data.extend(420_u32.to_ne_bytes());
+		let mut data = AlignedBuffer::with_capacity(8, size_of::<StorageMeta>());
+		data[0..4].copy_from_slice(b"ACNM");
+		data[4] = 1;
+		data[5] = ByteOrder::NATIVE as u8;
+		data[6] = 69;
+		data[7] = 0;
+		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
 		let meta_file = StorageMetaFile::load(data).unwrap();
 		let meta = meta_file.get();
@@ -189,13 +192,13 @@ mod tests {
 
 	#[test]
 	fn write_and_flush() {
-		let mut data = Vec::new();
-		data.extend(*b"ACNM");
-		data.push(1);
-		data.push(ByteOrder::NATIVE as u8);
-		data.push(14);
-		data.push(0);
-		data.extend(420_u32.to_ne_bytes());
+		let mut data = AlignedBuffer::with_capacity(8, size_of::<StorageMeta>());
+		data[0..4].copy_from_slice(b"ACNM");
+		data[4] = 1;
+		data[5] = ByteOrder::NATIVE as u8;
+		data[6] = 14;
+		data[7] = 0;
+		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
 		let mut meta_file = StorageMetaFile::load(data).unwrap();
 		let meta = meta_file.get_mut();

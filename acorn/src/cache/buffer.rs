@@ -1,15 +1,14 @@
-use core::slice;
 use std::{
-	alloc::{alloc, dealloc, handle_alloc_error, Layout},
+	alloc::Layout,
 	cell::UnsafeCell,
 	iter,
-	ops::{Deref, DerefMut},
-	ptr::NonNull,
+	ops::{Deref, DerefMut, Range},
 	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-	usize,
 };
 
 use parking_lot::{lock_api::RawRwLock as _, Mutex, RawRwLock};
+
+use crate::utils::byte_view::AlignedBuffer;
 
 pub struct PageReadGuard<'a> {
 	lock: &'a RawRwLock,
@@ -90,7 +89,7 @@ pub struct PageBuffer {
 	meta: Box<[PageMeta]>,
 	freelist: Mutex<Vec<usize>>,
 	last_filled: AtomicUsize,
-	pages: UnsafeCell<NonNull<u8>>,
+	pages: UnsafeCell<AlignedBuffer>,
 }
 
 impl PageBuffer {
@@ -98,9 +97,6 @@ impl PageBuffer {
 
 	pub fn new(page_size: usize, length: usize) -> Self {
 		let (buf_layout, page_size_padded) = Self::page_buffer_layout(page_size, length);
-		let Some(pages) = (unsafe { NonNull::new(alloc(buf_layout)) }) else {
-			handle_alloc_error(buf_layout);
-		};
 
 		Self {
 			length,
@@ -109,7 +105,7 @@ impl PageBuffer {
 			meta: iter::repeat_with(PageMeta::default).take(length).collect(),
 			freelist: Mutex::new(Vec::new()),
 			last_filled: AtomicUsize::new(0),
-			pages: UnsafeCell::new(pages),
+			pages: UnsafeCell::new(AlignedBuffer::with_layout(buf_layout)),
 		}
 	}
 
@@ -150,7 +146,7 @@ impl PageBuffer {
 		meta.lock.lock_shared();
 		Some(PageReadGuard {
 			lock: &meta.lock,
-			page: unsafe { slice::from_raw_parts(self.get_page_ptr(index), self.page_size) },
+			page: unsafe { &(*self.pages.get())[self.range_of_page(index)] },
 		})
 	}
 
@@ -162,36 +158,25 @@ impl PageBuffer {
 		meta.lock.lock_exclusive();
 		Some(PageWriteGuard {
 			lock: &meta.lock,
-			page: unsafe { slice::from_raw_parts_mut(self.get_page_ptr(index), self.page_size) },
+			page: unsafe { &mut (*self.pages.get())[self.range_of_page(index)] },
 		})
 	}
 
-	unsafe fn get_page_ptr(&self, index: usize) -> *mut u8 {
+	fn range_of_page(&self, index: usize) -> Range<usize> {
 		if index >= self.length {
 			panic!(
 				"Page buffer index {index} out of bounds for length {}",
 				self.length
 			);
 		}
-		(*self.pages.get())
-			.as_ptr()
-			.add(index * self.page_size_padded)
+		let start = index * self.page_size_padded;
+		let end = start + self.page_size;
+		start..end
 	}
 
 	fn page_buffer_layout(page_size: usize, length: usize) -> (Layout, usize) {
 		let page_layout = Layout::from_size_align(page_size, Self::PAGE_ALIGNMENT).unwrap();
 		page_layout.repeat(length).unwrap()
-	}
-}
-
-impl Drop for PageBuffer {
-	fn drop(&mut self) {
-		unsafe {
-			dealloc(
-				(*self.pages.get()).as_ptr(),
-				Self::page_buffer_layout(self.page_size, self.length).0,
-			)
-		}
 	}
 }
 

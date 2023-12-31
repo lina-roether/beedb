@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, io, mem::size_of};
+use std::{cell::UnsafeCell, io};
 
 use thiserror::Error;
 
@@ -6,7 +6,11 @@ use crate::{
 	consts::{SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC},
 	io::IoTarget,
 	pages::HeaderPage,
-	utils::{byte_order::ByteOrder, byte_view::ByteView, units::display_size},
+	utils::{
+		byte_order::ByteOrder,
+		byte_view::{AlignedBytes, ByteView},
+		units::display_size,
+	},
 };
 
 use super::lock::PageLocker;
@@ -60,8 +64,8 @@ pub struct SegmentFile<T: IoTarget> {
 
 impl<T: IoTarget> SegmentFile<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
-		let mut header_buf: [u8; size_of::<HeaderPage>()] = Default::default();
-		let header = HeaderPage::from_bytes_mut(&mut header_buf);
+		let mut header_buf: AlignedBytes<12> = Default::default();
+		let header = HeaderPage::from_bytes_mut(header_buf.as_mut());
 		*header = HeaderPage {
 			magic: SEGMENT_MAGIC,
 			format_version: SEGMENT_FORMAT_VERSION,
@@ -70,19 +74,19 @@ impl<T: IoTarget> SegmentFile<T> {
 			num_pages: 1,
 			freelist_trunk: None,
 		};
-		if target.write_at(&header_buf, 0)? != header_buf.len() {
+		if target.write_at(header_buf.as_ref(), 0)? != header_buf.len() {
 			return Err(InitError::IncompleteWrite);
 		}
 		Ok(())
 	}
 
 	pub fn load(target: T, params: LoadParams) -> Result<Self, LoadError> {
-		let mut buf: [u8; size_of::<HeaderPage>()] = Default::default();
-		let bytes_read = target.read_at(&mut buf, 0)?;
+		let mut buf: AlignedBytes<12> = Default::default();
+		let bytes_read = target.read_at(buf.as_mut(), 0)?;
 		if bytes_read != buf.len() {
 			return Err(LoadError::CorruptedHeader);
 		}
-		let header = HeaderPage::from_bytes(&buf);
+		let header = HeaderPage::from_bytes(buf.as_ref());
 		if header.magic != SEGMENT_MAGIC {
 			return Err(LoadError::NotASegmentFile);
 		}
@@ -144,13 +148,13 @@ impl<T: IoTarget> SegmentFile<T> {
 mod tests {
 	use std::{assert_matches::assert_matches, iter};
 
-	use crate::utils::units::KiB;
+	use crate::utils::{byte_view::AlignedBuffer, units::KiB};
 
 	use super::*;
 
 	#[test]
 	fn init_file() {
-		let mut file = Vec::new();
+		let mut file = AlignedBuffer::new(8);
 
 		SegmentFile::init(
 			&mut file,
@@ -171,7 +175,7 @@ mod tests {
 
 	#[test]
 	fn load_file() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		*header = HeaderPage {
 			magic: *b"ACNS",
@@ -195,7 +199,7 @@ mod tests {
 
 	#[test]
 	fn try_load_too_short_file() {
-		let file: Vec<u8> = iter::repeat(0).take(3).collect();
+		let file = AlignedBuffer::with_capacity(8, 3);
 
 		let result = SegmentFile::load(
 			file,
@@ -212,7 +216,7 @@ mod tests {
 
 	#[test]
 	fn try_load_file_with_wrong_magic() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		*header = HeaderPage {
 			magic: *b"ABCD",
@@ -238,7 +242,7 @@ mod tests {
 
 	#[test]
 	fn try_load_file_with_wrong_format_version() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		*header = HeaderPage {
 			magic: *b"ACNS",
@@ -266,7 +270,7 @@ mod tests {
 
 	#[test]
 	fn try_load_file_with_invalid_byte_order() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		*header = HeaderPage {
 			magic: *b"ACNS",
@@ -294,7 +298,7 @@ mod tests {
 
 	#[test]
 	fn try_load_file_with_wrong_byte_order() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		*header = HeaderPage {
 			magic: *b"ACNS",
@@ -325,7 +329,7 @@ mod tests {
 
 	#[test]
 	fn try_load_file_with_wrong_page_size() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		let header = HeaderPage::from_bytes_mut(&mut file);
 		*header = HeaderPage {
 			magic: *b"ACNS",
@@ -353,7 +357,7 @@ mod tests {
 
 	#[test]
 	fn read_page() {
-		let mut file: Vec<u8> = iter::repeat(0).take(2 * 16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 2 * 16 * KiB);
 		SegmentFile::init(
 			&mut file,
 			InitParams {
@@ -380,7 +384,7 @@ mod tests {
 
 	#[test]
 	fn write_page() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		SegmentFile::init(
 			&mut file,
 			InitParams {
@@ -397,7 +401,8 @@ mod tests {
 		)
 		.unwrap();
 
-		let buf: Box<[u8]> = iter::repeat(25).take(16 * KiB).collect();
+		let mut buf = AlignedBuffer::with_capacity(8, 16 * KiB);
+		buf.fill(25);
 		segment_file.write_page(&buf, 2).unwrap();
 
 		assert!(segment_file.target.get_mut()[32 * KiB..48 * KiB]
@@ -407,7 +412,7 @@ mod tests {
 
 	#[test]
 	fn read_nonexistent_page() {
-		let mut file: Vec<u8> = iter::repeat(0).take(16 * KiB).collect();
+		let mut file = AlignedBuffer::with_capacity(8, 16 * KiB);
 		SegmentFile::init(
 			&mut file,
 			InitParams {

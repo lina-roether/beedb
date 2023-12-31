@@ -227,7 +227,7 @@ mod tests {
 		disk::meta::StorageMeta,
 		utils::{
 			byte_order::ByteOrder,
-			byte_view::{AlignedBuffer, ByteView},
+			byte_view::{AlignedBytes, ByteView},
 			units::KiB,
 		},
 	};
@@ -235,6 +235,7 @@ mod tests {
 	use super::*;
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn init_dir() {
 		let dir = tempdir().unwrap();
 
@@ -274,9 +275,10 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn load() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBuffer<12> = Default::default();
+		let mut meta_data: AlignedBytes<12> = Default::default();
 		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
@@ -302,9 +304,10 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn try_load_with_missing_segment_file() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBuffer<12> = Default::default();
+		let mut meta_data: AlignedBytes<12> = Default::default();
 		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
@@ -324,9 +327,10 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn read_write_page() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBuffer<12> = Default::default();
+		let mut meta_data: AlignedBytes<12> = Default::default();
 		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
@@ -360,9 +364,10 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn create_new_segment() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBuffer<12> = Default::default();
+		let mut meta_data: AlignedBytes<12> = Default::default();
 		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
