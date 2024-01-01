@@ -176,6 +176,10 @@ impl AlignedBuffer {
 		Self::with_capacity(layout.align(), layout.size())
 	}
 
+	pub fn for_type<T>() -> Self {
+		Self::with_layout(Layout::new::<T>())
+	}
+
 	#[inline]
 	pub fn align(&self) -> usize {
 		self.layout.align()
