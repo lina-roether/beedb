@@ -61,6 +61,10 @@ impl Default for InitParams {
 	}
 }
 
+/*
+ * TODO: Maybe this should just mmap() the file?
+ */
+
 pub struct StorageMetaFile<F: IoTarget> {
 	buf: Box<AlignedBytes<12>>,
 	file: F,

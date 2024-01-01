@@ -13,6 +13,7 @@ mod index;
 mod io;
 mod manage;
 mod pages;
+mod transaction;
 mod utils;
 
 // Old stuff that is going to be removed int the new arch

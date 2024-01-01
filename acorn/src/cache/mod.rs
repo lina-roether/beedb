@@ -8,10 +8,7 @@ use std::{
 use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
 
-use self::{
-	buffer::{PageBuffer, PageReadGuard, PageWriteGuard},
-	manager::CacheManager,
-};
+use self::{buffer::PageBuffer, manager::CacheManager};
 
 use crate::{
 	disk::{self, DiskStorage},
@@ -20,6 +17,8 @@ use crate::{
 
 mod buffer;
 mod manager;
+
+pub use buffer::{PageReadGuard, PageWriteGuard};
 
 pub struct PageCache {
 	state: Mutex<CacheState>,
