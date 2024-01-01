@@ -1,20 +1,17 @@
 use std::{
 	collections::HashMap,
-	mem,
 	sync::atomic::{AtomicU64, Ordering},
 };
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use thiserror::Error;
 
-use crate::{index::PageId, transaction};
+use crate::index::PageId;
 
 #[repr(u8)]
 pub enum Operation {
 	Begin,
-	Update(PageId),
-	Create(PageId),
-	Delete(PageId),
+	Write(PageId),
 	Commit,
 }
 
@@ -44,7 +41,7 @@ impl TransactionManager {
 		}
 	}
 
-	pub fn begin(&self) -> u64 {
+	pub fn begin(&self) -> Result<u64, Error> {
 		let mut transaction_table = self.transaction_table.lock();
 		let tid = self.next_tid();
 		let begin_seq = self.next_seq();
@@ -55,8 +52,8 @@ impl TransactionManager {
 				tid,
 			},
 		);
-		self.operation_raw(&mut transaction_table, tid, Operation::Begin, &[], &[]);
-		tid
+		self.operation_raw(&mut transaction_table, tid, Operation::Begin, &[], &[])?;
+		Ok(tid)
 	}
 
 	pub fn operation(
@@ -81,9 +78,9 @@ impl TransactionManager {
 		&self,
 		transaction_table: &mut HashMap<u64, TransactionTableRow>,
 		tid: u64,
-		operation: Operation,
-		before: &[u8],
-		after: &[u8],
+		_operation: Operation,
+		_before: &[u8],
+		_after: &[u8],
 	) -> Result<(), Error> {
 		let seq = self.next_seq();
 		let Some(row) = transaction_table.get_mut(&tid) else {
@@ -109,4 +106,32 @@ impl TransactionManager {
 struct TransactionTableRow {
 	last_seq: u64,
 	tid: u64,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn simple_transaction() {
+		let tm = TransactionManager::new();
+		let tid = tm.begin().unwrap();
+		tm.operation(tid, Operation::Write(PageId::new(0, 1)), &[], &[])
+			.unwrap();
+		tm.commit(tid).unwrap();
+	}
+
+	#[test]
+	fn try_operation_on_invalid_tid() {
+		let tm = TransactionManager::new();
+		assert!(tm
+			.operation(69, Operation::Write(PageId::new(0, 1)), &[], &[])
+			.is_err());
+	}
+
+	#[test]
+	fn try_commit_invalid_tid() {
+		let tm = TransactionManager::new();
+		assert!(tm.commit(69).is_err());
+	}
 }
