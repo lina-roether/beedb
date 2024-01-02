@@ -1,19 +1,15 @@
+#[cfg(test)]
+use mockall::automock;
+
 use std::num::NonZeroU16;
 
-use crate::{
-	cache::{PageReadGuard, PageWriteGuard},
-	disk,
-	index::PageId,
-};
+use crate::{cache::PageReadGuard, index::PageId};
 
-use super::{
-	rw::WriteError,
-	segment_alloc,
-	transaction::{self, Operation},
-};
+use super::{err::Error, rw::PageWriteHandle, transaction::Operation};
 
+#[cfg_attr(test, automock)]
 pub trait TransactionManager {
-	fn begin(&self) -> Result<u64, transaction::Error>;
+	fn begin(&self) -> Result<u64, Error>;
 
 	fn operation(
 		&self,
@@ -21,26 +17,28 @@ pub trait TransactionManager {
 		operation: Operation,
 		before: &[u8],
 		after: &[u8],
-	) -> Result<(), transaction::Error>;
+	) -> Result<(), Error>;
 
-	fn commit(&self, tid: u64) -> Result<(), transaction::Error>;
+	fn commit(&self, tid: u64) -> Result<(), Error>;
+
+	fn assert_valid_tid(&self, tid: u64) -> Result<(), Error>;
 }
 
-pub trait PageRwManager {
-	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error>;
+#[allow(clippy::needless_lifetimes)]
+// #[cfg_attr(test, automock)]
+pub trait PageRwManager<TMgr>
+where
+	TMgr: TransactionManager,
+{
+	fn read_page<'a>(&'a self, page_id: PageId) -> Result<PageReadGuard<'a>, Error>;
 
-	fn write_page(
-		&self,
-		tid: u64,
-		page_id: PageId,
-		write_fn: impl FnOnce(&mut PageWriteGuard),
-	) -> Result<(), WriteError>;
+	fn write_page(&self, tid: u64, page_id: PageId) -> Result<PageWriteHandle<TMgr>, Error>;
 }
 
 pub trait SegmentAllocManager {
 	fn segment_num(&self) -> u32;
 
-	fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, segment_alloc::Error>;
+	fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error>;
 
-	fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), segment_alloc::Error>;
+	fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), Error>;
 }

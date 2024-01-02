@@ -4,11 +4,11 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use thiserror::Error;
+use static_assertions::assert_impl_all;
 
 use crate::index::PageId;
 
-use super::api;
+use super::{api, err::Error};
 
 pub use super::api::TransactionManager as _;
 
@@ -17,12 +17,6 @@ pub enum Operation {
 	Begin,
 	Write(PageId),
 	Commit,
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-	#[error("Transaction with id {0} doesn't exist")]
-	DoesntExist(u64),
 }
 
 /*
@@ -35,6 +29,8 @@ pub struct TransactionManager {
 	transaction_counter: AtomicU64,
 	transaction_table: Mutex<HashMap<u64, TransactionTableRow>>,
 }
+
+assert_impl_all!(TransactionManager: Send, Sync);
 
 impl TransactionManager {
 	pub fn new() -> Self {
@@ -55,7 +51,7 @@ impl TransactionManager {
 	) -> Result<(), Error> {
 		let seq = self.next_seq();
 		let Some(row) = transaction_table.get_mut(&tid) else {
-			return Err(Error::DoesntExist(tid));
+			return Err(Error::NoSuchTransaction(tid));
 		};
 		row.last_seq = seq;
 
@@ -105,6 +101,13 @@ impl api::TransactionManager for TransactionManager {
 		let mut transaction_table = self.transaction_table.lock();
 		self.operation_raw(&mut transaction_table, tid, Operation::Commit, &[], &[])?;
 		transaction_table.remove(&tid);
+		Ok(())
+	}
+
+	fn assert_valid_tid(&self, tid: u64) -> Result<(), Error> {
+		if !self.transaction_table.lock().contains_key(&tid) {
+			return Err(Error::NoSuchTransaction(tid));
+		}
 		Ok(())
 	}
 }

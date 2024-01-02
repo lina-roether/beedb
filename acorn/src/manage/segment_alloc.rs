@@ -1,56 +1,40 @@
-use std::{mem, num::NonZeroU16, sync::Arc};
+use std::{marker::PhantomData, mem, num::NonZeroU16, sync::Arc};
 
 use parking_lot::{lock_api::RawMutex as _, RawMutex};
 use static_assertions::assert_impl_all;
-use thiserror::Error;
 
 use crate::{
-	disk,
 	index::PageId,
 	pages::{FreelistPage, FreelistPageHeader, HeaderPage},
 	utils::byte_view::ByteView,
 };
 
 use super::{
-	api,
-	rw::{self, PageRwManager},
-	transaction::{self},
+	api::{self},
+	err::Error,
+	rw::PageRwManager,
+	transaction::TransactionManager,
 };
 
 pub use super::api::SegmentAllocManager as _;
 
-#[derive(Debug, Error)]
-pub enum Error {
-	#[error(transparent)]
-	Write(#[from] rw::WriteError),
-
-	#[error(transparent)]
-	Disk(#[from] disk::Error),
-
-	#[error(transparent)]
-	Transaction(#[from] transaction::Error),
-
-	#[error("The freelist of segment {0} is corrupted")]
-	CorruptedFreelist(u32),
-
-	#[error("The header page of segment {0} is corrupted")]
-	CorruptedHeader(u32),
-}
-
-pub struct SegmentAllocManager<RwMgr = PageRwManager>
+pub struct SegmentAllocManager<TMgr = TransactionManager, RwMgr = PageRwManager>
 where
-	RwMgr: api::PageRwManager,
+	TMgr: api::TransactionManager,
+	RwMgr: api::PageRwManager<TMgr>,
 {
 	segment_num: u32,
 	rw_mgr: Arc<RwMgr>,
 	alloc_lock: RawMutex,
+	_marker: PhantomData<TMgr>,
 }
 
 assert_impl_all!(SegmentAllocManager: Send, Sync);
 
-impl<RwMgr> SegmentAllocManager<RwMgr>
+impl<TMgr, RwMgr> SegmentAllocManager<TMgr, RwMgr>
 where
-	RwMgr: api::PageRwManager,
+	TMgr: api::TransactionManager,
+	RwMgr: api::PageRwManager<TMgr>,
 {
 	const MAX_NUM_PAGES: u16 = u16::MAX;
 
@@ -59,6 +43,7 @@ where
 			segment_num,
 			rw_mgr,
 			alloc_lock: RawMutex::INIT,
+			_marker: PhantomData,
 		}
 	}
 
@@ -73,14 +58,14 @@ where
 		}
 
 		let Some(new_page) = NonZeroU16::new(header_page.num_pages) else {
-			return Err(Error::CorruptedHeader(self.segment_num));
+			return Err(Error::CorruptedSegment(self.segment_num));
 		};
-		mem::forget(header_page_bytes);
+		mem::drop(header_page_bytes);
 
-		self.rw_mgr.write_page(tid, self.header_page_id(), |page| {
-			let header_page = HeaderPage::from_bytes_mut(page);
-			header_page.num_pages += 1;
-		})?;
+		let mut header_page_bytes = self.rw_mgr.write_page(tid, self.header_page_id())?;
+		let header_page = HeaderPage::from_bytes_mut(&mut header_page_bytes);
+		header_page.num_pages += 1;
+		mem::drop(header_page_bytes);
 
 		unsafe { self.alloc_lock.unlock() }
 		Ok(Some(new_page))
@@ -105,32 +90,30 @@ where
 
 		let last_free = trunk_page.header.length as usize - 1;
 		let Some(popped_page) = trunk_page.items[last_free] else {
-			return Err(Error::CorruptedFreelist(self.segment_num));
+			return Err(Error::CorruptedSegment(self.segment_num));
 		};
 		mem::drop(trunk_page_bytes);
 
-		self.rw_mgr
-			.write_page(tid, self.page_id(trunk_page_num.get()), |page| {
-				let trunk_page = FreelistPage::from_bytes_mut(page);
-				trunk_page.header.length -= 1;
-				trunk_page.items[last_free] = None;
-			})?;
+		let mut trunk_page_bytes_mut = self
+			.rw_mgr
+			.write_page(tid, self.page_id(trunk_page_num.get()))?;
+
+		let trunk_page = FreelistPage::from_bytes_mut(&mut trunk_page_bytes_mut);
+		trunk_page.header.length -= 1;
+		trunk_page.items[last_free] = None;
+		mem::drop(trunk_page_bytes_mut);
 
 		unsafe { self.alloc_lock.unlock() }
 		Ok(Some(popped_page))
 	}
 
-	fn set_freelist_trunk(
-		&self,
-		tid: u64,
-		trunk: Option<NonZeroU16>,
-	) -> Result<(), rw::WriteError> {
-		self.rw_mgr.write_page(tid, self.header_page_id(), |page| {
-			HeaderPage::from_bytes_mut(page).freelist_trunk = trunk;
-		})
+	fn set_freelist_trunk(&self, tid: u64, trunk: Option<NonZeroU16>) -> Result<(), Error> {
+		let mut trunk_page_bytes = self.rw_mgr.write_page(tid, self.header_page_id())?;
+		HeaderPage::from_bytes_mut(&mut trunk_page_bytes).freelist_trunk = trunk;
+		Ok(())
 	}
 
-	fn freelist_trunk(&self) -> Result<Option<NonZeroU16>, disk::Error> {
+	fn freelist_trunk(&self) -> Result<Option<NonZeroU16>, Error> {
 		let header_page = self.rw_mgr.read_page(self.header_page_id())?;
 		Ok(HeaderPage::from_bytes(&header_page).freelist_trunk)
 	}
@@ -146,9 +129,10 @@ where
 	}
 }
 
-impl<RwMgr> SegmentAllocManager<RwMgr>
+impl<TMgr, RwMgr> SegmentAllocManager<TMgr, RwMgr>
 where
-	RwMgr: api::PageRwManager,
+	TMgr: api::TransactionManager,
+	RwMgr: api::PageRwManager<TMgr>,
 {
 	#[inline]
 	pub fn segment_num(&self) -> u32 {
@@ -176,24 +160,24 @@ where
 			let has_free_space = trunk_page.header.length < trunk_page.items.len() as u16;
 			mem::drop(trunk_page_bytes);
 			if has_free_space {
-				self.rw_mgr
-					.write_page(tid, self.page_id(trunk_page_num.get()), |page| {
-						let trunk_page = FreelistPage::from_bytes_mut(page);
-						trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
-						trunk_page.header.length += 1;
-					})?;
+				let mut trunk_page_bytes_mut = self
+					.rw_mgr
+					.write_page(tid, self.page_id(trunk_page_num.get()))?;
+
+				let trunk_page = FreelistPage::from_bytes_mut(&mut trunk_page_bytes_mut);
+				trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
+				trunk_page.header.length += 1;
 			}
 		};
 
-		self.rw_mgr
-			.write_page(tid, self.page_id(page_num.get()), |page| {
-				let new_trunk = FreelistPage::from_bytes_mut(page);
-				new_trunk.header = FreelistPageHeader {
-					next: trunk_page_num,
-					length: 0,
-				};
-				new_trunk.items.fill(None);
-			})?;
+		let mut new_trunk_bytes = self.rw_mgr.write_page(tid, self.page_id(page_num.get()))?;
+		let new_trunk = FreelistPage::from_bytes_mut(&mut new_trunk_bytes);
+		new_trunk.header = FreelistPageHeader {
+			next: trunk_page_num,
+			length: 0,
+		};
+		new_trunk.items.fill(None);
+		mem::drop(new_trunk_bytes);
 
 		self.set_freelist_trunk(tid, Some(page_num))?;
 
