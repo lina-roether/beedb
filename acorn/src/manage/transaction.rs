@@ -8,6 +8,10 @@ use thiserror::Error;
 
 use crate::index::PageId;
 
+use super::api;
+
+pub use super::api::TransactionManager as _;
+
 #[repr(u8)]
 pub enum Operation {
 	Begin,
@@ -41,39 +45,6 @@ impl TransactionManager {
 		}
 	}
 
-	pub fn begin(&self) -> Result<u64, Error> {
-		let mut transaction_table = self.transaction_table.lock();
-		let tid = self.next_tid();
-		let begin_seq = self.next_seq();
-		transaction_table.insert(
-			tid,
-			TransactionTableRow {
-				last_seq: begin_seq,
-				tid,
-			},
-		);
-		self.operation_raw(&mut transaction_table, tid, Operation::Begin, &[], &[])?;
-		Ok(tid)
-	}
-
-	pub fn operation(
-		&self,
-		tid: u64,
-		operation: Operation,
-		before: &[u8],
-		after: &[u8],
-	) -> Result<(), Error> {
-		let mut transaction_table = self.transaction_table.lock();
-		self.operation_raw(&mut transaction_table, tid, operation, before, after)
-	}
-
-	pub fn commit(&self, tid: u64) -> Result<(), Error> {
-		let mut transaction_table = self.transaction_table.lock();
-		self.operation_raw(&mut transaction_table, tid, Operation::Commit, &[], &[])?;
-		transaction_table.remove(&tid);
-		Ok(())
-	}
-
 	fn operation_raw(
 		&self,
 		transaction_table: &mut HashMap<u64, TransactionTableRow>,
@@ -100,6 +71,41 @@ impl TransactionManager {
 	#[inline]
 	fn next_tid(&self) -> u64 {
 		self.transaction_counter.fetch_add(1, Ordering::SeqCst)
+	}
+}
+
+impl api::TransactionManager for TransactionManager {
+	fn begin(&self) -> Result<u64, Error> {
+		let mut transaction_table = self.transaction_table.lock();
+		let tid = self.next_tid();
+		let begin_seq = self.next_seq();
+		transaction_table.insert(
+			tid,
+			TransactionTableRow {
+				last_seq: begin_seq,
+				tid,
+			},
+		);
+		self.operation_raw(&mut transaction_table, tid, Operation::Begin, &[], &[])?;
+		Ok(tid)
+	}
+
+	fn operation(
+		&self,
+		tid: u64,
+		operation: Operation,
+		before: &[u8],
+		after: &[u8],
+	) -> Result<(), Error> {
+		let mut transaction_table = self.transaction_table.lock();
+		self.operation_raw(&mut transaction_table, tid, operation, before, after)
+	}
+
+	fn commit(&self, tid: u64) -> Result<(), Error> {
+		let mut transaction_table = self.transaction_table.lock();
+		self.operation_raw(&mut transaction_table, tid, Operation::Commit, &[], &[])?;
+		transaction_table.remove(&tid);
+		Ok(())
 	}
 }
 

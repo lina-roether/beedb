@@ -9,7 +9,12 @@ use crate::{
 	index::PageId,
 };
 
-use super::transaction::{self, Operation, TransactionManager};
+use super::{
+	api,
+	transaction::{self, Operation, TransactionManager},
+};
+
+pub use super::api::PageRwManager as _;
 
 pub struct Params {
 	pub cache_size: usize,
@@ -24,30 +29,37 @@ pub enum WriteError {
 	Transaction(#[from] transaction::Error),
 }
 
-pub struct PageRwManager {
+pub struct PageRwManager<TMgr = TransactionManager>
+where
+	TMgr: api::TransactionManager,
+{
 	cache: PageCache,
-	transaction_mgr: Arc<TransactionManager>,
+	transaction_mgr: Arc<TMgr>,
 }
 
 assert_impl_all!(PageRwManager: Send, Sync);
 
-impl PageRwManager {
-	pub fn new(
-		storage: Arc<DiskStorage>,
-		transaction: Arc<TransactionManager>,
-		params: Params,
-	) -> Self {
+impl<TMgr> PageRwManager<TMgr>
+where
+	TMgr: api::TransactionManager,
+{
+	pub fn new(storage: Arc<DiskStorage>, transaction_mgr: Arc<TMgr>, params: Params) -> Self {
 		Self {
 			cache: PageCache::new(storage, params.cache_size),
-			transaction_mgr: transaction,
+			transaction_mgr,
 		}
 	}
+}
 
-	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
+impl<TMgr> api::PageRwManager for PageRwManager<TMgr>
+where
+	TMgr: api::TransactionManager,
+{
+	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
 		self.cache.read_page(page_id)
 	}
 
-	pub fn write_page(
+	fn write_page(
 		&self,
 		tid: u64,
 		page_id: PageId,

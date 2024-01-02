@@ -5,16 +5,19 @@ use static_assertions::assert_impl_all;
 use thiserror::Error;
 
 use crate::{
-	disk::{self, DiskStorage},
+	disk,
 	index::PageId,
 	pages::{FreelistPage, FreelistPageHeader, HeaderPage},
 	utils::byte_view::ByteView,
 };
 
 use super::{
+	api,
 	rw::{self, PageRwManager},
 	transaction::{self},
 };
+
+pub use super::api::SegmentAllocManager as _;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -34,76 +37,29 @@ pub enum Error {
 	CorruptedHeader(u32),
 }
 
-pub struct SegmentAllocManager {
+pub struct SegmentAllocManager<RwMgr = PageRwManager>
+where
+	RwMgr: api::PageRwManager,
+{
 	segment_num: u32,
-	disk: Arc<DiskStorage>,
-	rw_mgr: Arc<PageRwManager>,
+	rw_mgr: Arc<RwMgr>,
 	alloc_lock: RawMutex,
 }
 
 assert_impl_all!(SegmentAllocManager: Send, Sync);
 
-impl SegmentAllocManager {
+impl<RwMgr> SegmentAllocManager<RwMgr>
+where
+	RwMgr: api::PageRwManager,
+{
 	const MAX_NUM_PAGES: u16 = u16::MAX;
 
-	pub fn new(disk: Arc<DiskStorage>, rw_mgr: Arc<PageRwManager>, segment_num: u32) -> Self {
+	pub fn new(rw_mgr: Arc<RwMgr>, segment_num: u32) -> Self {
 		Self {
 			segment_num,
-			disk,
 			rw_mgr,
 			alloc_lock: RawMutex::INIT,
 		}
-	}
-
-	#[inline]
-	pub fn segment_num(&self) -> u32 {
-		self.segment_num
-	}
-
-	pub fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
-		if let Some(free_page) = self.pop_free_page(tid)? {
-			return Ok(Some(free_page));
-		}
-		if let Some(new_page) = self.create_new_page(tid)? {
-			return Ok(Some(new_page));
-		}
-		Ok(None)
-	}
-
-	pub fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), Error> {
-		self.alloc_lock.lock();
-
-		let trunk_page_num = self.freelist_trunk()?;
-
-		if let Some(trunk_page_num) = trunk_page_num {
-			let trunk_page_bytes = self.rw_mgr.read_page(self.page_id(trunk_page_num.get()))?;
-			let trunk_page = FreelistPage::from_bytes(&trunk_page_bytes);
-			let has_free_space = trunk_page.header.length < trunk_page.items.len() as u16;
-			mem::drop(trunk_page_bytes);
-			if has_free_space {
-				self.rw_mgr
-					.write_page(tid, self.page_id(trunk_page_num.get()), |page| {
-						let trunk_page = FreelistPage::from_bytes_mut(page);
-						trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
-						trunk_page.header.length += 1;
-					})?;
-			}
-		};
-
-		self.rw_mgr
-			.write_page(tid, self.page_id(page_num.get()), |page| {
-				let new_trunk = FreelistPage::from_bytes_mut(page);
-				new_trunk.header = FreelistPageHeader {
-					next: trunk_page_num,
-					length: 0,
-				};
-				new_trunk.items.fill(None);
-			})?;
-
-		self.set_freelist_trunk(tid, Some(page_num))?;
-
-		unsafe { self.alloc_lock.unlock() }
-		todo!()
 	}
 
 	fn create_new_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
@@ -187,5 +143,61 @@ impl SegmentAllocManager {
 	#[inline]
 	fn page_id(&self, page_num: u16) -> PageId {
 		PageId::new(self.segment_num, page_num)
+	}
+}
+
+impl<RwMgr> SegmentAllocManager<RwMgr>
+where
+	RwMgr: api::PageRwManager,
+{
+	#[inline]
+	pub fn segment_num(&self) -> u32 {
+		self.segment_num
+	}
+
+	pub fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
+		if let Some(free_page) = self.pop_free_page(tid)? {
+			return Ok(Some(free_page));
+		}
+		if let Some(new_page) = self.create_new_page(tid)? {
+			return Ok(Some(new_page));
+		}
+		Ok(None)
+	}
+
+	pub fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), Error> {
+		self.alloc_lock.lock();
+
+		let trunk_page_num = self.freelist_trunk()?;
+
+		if let Some(trunk_page_num) = trunk_page_num {
+			let trunk_page_bytes = self.rw_mgr.read_page(self.page_id(trunk_page_num.get()))?;
+			let trunk_page = FreelistPage::from_bytes(&trunk_page_bytes);
+			let has_free_space = trunk_page.header.length < trunk_page.items.len() as u16;
+			mem::drop(trunk_page_bytes);
+			if has_free_space {
+				self.rw_mgr
+					.write_page(tid, self.page_id(trunk_page_num.get()), |page| {
+						let trunk_page = FreelistPage::from_bytes_mut(page);
+						trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
+						trunk_page.header.length += 1;
+					})?;
+			}
+		};
+
+		self.rw_mgr
+			.write_page(tid, self.page_id(page_num.get()), |page| {
+				let new_trunk = FreelistPage::from_bytes_mut(page);
+				new_trunk.header = FreelistPageHeader {
+					next: trunk_page_num,
+					length: 0,
+				};
+				new_trunk.items.fill(None);
+			})?;
+
+		self.set_freelist_trunk(tid, Some(page_num))?;
+
+		unsafe { self.alloc_lock.unlock() }
+		Ok(())
 	}
 }
