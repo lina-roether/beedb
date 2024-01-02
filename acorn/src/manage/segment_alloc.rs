@@ -20,7 +20,7 @@ pub use super::api::SegmentAllocManager as _;
 
 pub struct SegmentAllocManager<TMgr = TransactionManager, RwMgr = PageRwManager>
 where
-	TMgr: api::TransactionManager,
+	TMgr: api::TransactionManager + 'static,
 	RwMgr: api::PageRwManager<TMgr>,
 {
 	segment_num: u32,

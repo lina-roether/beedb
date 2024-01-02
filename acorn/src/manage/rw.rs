@@ -47,7 +47,7 @@ where
 
 impl<TMgr> api::PageRwManager<TMgr> for PageRwManager<TMgr>
 where
-	TMgr: api::TransactionManager,
+	TMgr: api::TransactionManager + 'static,
 {
 	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, Error> {
 		Ok(self.cache.read_page(page_id)?)

@@ -25,14 +25,18 @@ pub trait TransactionManager {
 }
 
 #[allow(clippy::needless_lifetimes)]
-// #[cfg_attr(test, automock)]
+#[cfg_attr(test, automock)]
 pub trait PageRwManager<TMgr>
 where
-	TMgr: TransactionManager,
+	TMgr: TransactionManager + 'static,
 {
 	fn read_page<'a>(&'a self, page_id: PageId) -> Result<PageReadGuard<'a>, Error>;
 
-	fn write_page(&self, tid: u64, page_id: PageId) -> Result<PageWriteHandle<TMgr>, Error>;
+	fn write_page<'a>(
+		&'a self,
+		tid: u64,
+		page_id: PageId,
+	) -> Result<PageWriteHandle<'a, TMgr>, Error>;
 }
 
 pub trait SegmentAllocManager {
