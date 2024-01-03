@@ -10,6 +10,7 @@ use crate::index::PageId;
 
 use super::{api, err::Error};
 
+#[allow(unused_imports)]
 pub use super::api::TransactionManager as _;
 
 #[repr(u8)]

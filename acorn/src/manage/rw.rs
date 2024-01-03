@@ -37,7 +37,7 @@ impl<TMgr> PageRwManager<TMgr>
 where
 	TMgr: api::TransactionManager,
 {
-	pub fn new(storage: Arc<DiskStorage>, transaction_mgr: Arc<TMgr>, params: Params) -> Self {
+	pub fn new(storage: DiskStorage, transaction_mgr: Arc<TMgr>, params: Params) -> Self {
 		Self {
 			cache: PageCache::new(storage, params.cache_size),
 			transaction_mgr,

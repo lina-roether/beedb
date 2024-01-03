@@ -1,8 +1,6 @@
 use std::{
 	collections::{HashMap, HashSet},
 	mem,
-	sync::Arc,
-	usize,
 };
 
 use parking_lot::Mutex;
@@ -23,13 +21,13 @@ pub use buffer::{PageReadGuard, PageWriteGuard};
 pub struct PageCache {
 	state: Mutex<CacheState>,
 	buffer: PageBuffer,
-	storage: Arc<DiskStorage>,
+	storage: DiskStorage,
 }
 
 assert_impl_all!(PageCache: Send, Sync);
 
 impl PageCache {
-	pub fn new(storage: Arc<DiskStorage>, length: usize) -> Self {
+	pub fn new(storage: DiskStorage, length: usize) -> Self {
 		Self {
 			state: Mutex::new(CacheState {
 				manager: CacheManager::new(length),
@@ -128,10 +126,9 @@ mod tests {
 	fn simple_read_write() {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
-		let storage = Arc::new(DiskStorage::load(dir.path().into()).unwrap());
-		let cache = PageCache::new(Arc::clone(&storage), 128);
-
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
 		let segment = storage.new_segment().unwrap();
+		let cache = PageCache::new(storage, 128);
 
 		{
 			let mut page_1 = cache.write_page(PageId::new(segment, 1)).unwrap();
