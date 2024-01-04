@@ -9,5 +9,4 @@ static_assertions = "1.1.0"
 thiserror = "1.0.50"
 
 [dev-dependencies]
-mockall = { version = "0.12.1", features = ["nightly"] }
 tempfile = "3.9.0"

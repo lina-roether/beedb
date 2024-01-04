@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem, num::NonZeroU16, sync::Arc};
+use std::{mem, num::NonZeroU16, sync::Arc};
 
 use parking_lot::{lock_api::RawMutex as _, RawMutex};
 use static_assertions::assert_impl_all;
@@ -9,42 +9,76 @@ use crate::{
 	utils::byte_view::ByteView,
 };
 
-use super::{
-	api::{self},
-	err::Error,
-	rw::PageRwManager,
-	transaction::TransactionManager,
-};
+use super::{err::Error, rw::PageRwManager};
 
-pub use super::api::SegmentAllocManager as _;
-
-pub struct SegmentAllocManager<TMgr = TransactionManager, RwMgr = PageRwManager>
-where
-	TMgr: api::TransactionManager + 'static,
-	RwMgr: api::PageRwManager<TMgr>,
-{
+pub struct SegmentAllocManager {
 	segment_num: u32,
-	rw_mgr: Arc<RwMgr>,
+	rw_mgr: Arc<PageRwManager>,
 	alloc_lock: RawMutex,
-	_marker: PhantomData<TMgr>,
 }
 
 assert_impl_all!(SegmentAllocManager: Send, Sync);
 
-impl<TMgr, RwMgr> SegmentAllocManager<TMgr, RwMgr>
-where
-	TMgr: api::TransactionManager,
-	RwMgr: api::PageRwManager<TMgr>,
-{
+impl SegmentAllocManager {
 	const MAX_NUM_PAGES: u16 = u16::MAX;
 
-	pub fn new(rw_mgr: Arc<RwMgr>, segment_num: u32) -> Self {
+	pub fn new(rw_mgr: Arc<PageRwManager>, segment_num: u32) -> Self {
 		Self {
 			segment_num,
 			rw_mgr,
 			alloc_lock: RawMutex::INIT,
-			_marker: PhantomData,
 		}
+	}
+
+	#[inline]
+	pub fn segment_num(&self) -> u32 {
+		self.segment_num
+	}
+
+	pub fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
+		if let Some(free_page) = self.pop_free_page(tid)? {
+			return Ok(Some(free_page));
+		}
+		if let Some(new_page) = self.create_new_page(tid)? {
+			return Ok(Some(new_page));
+		}
+		Ok(None)
+	}
+
+	pub fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), Error> {
+		self.alloc_lock.lock();
+
+		let trunk_page_num = self.freelist_trunk()?;
+
+		if let Some(trunk_page_num) = trunk_page_num {
+			let trunk_page_bytes = self.rw_mgr.read_page(self.page_id(trunk_page_num.get()))?;
+			let trunk_page = FreelistPage::from_bytes(&trunk_page_bytes);
+			let has_free_space = trunk_page.header.length < trunk_page.items.len() as u16;
+			mem::drop(trunk_page_bytes);
+			if has_free_space {
+				let mut trunk_page_bytes_mut = self
+					.rw_mgr
+					.write_page(tid, self.page_id(trunk_page_num.get()))?;
+
+				let trunk_page = FreelistPage::from_bytes_mut(&mut trunk_page_bytes_mut);
+				trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
+				trunk_page.header.length += 1;
+			}
+		};
+
+		let mut new_trunk_bytes = self.rw_mgr.write_page(tid, self.page_id(page_num.get()))?;
+		let new_trunk = FreelistPage::from_bytes_mut(&mut new_trunk_bytes);
+		new_trunk.header = FreelistPageHeader {
+			next: trunk_page_num,
+			length: 0,
+		};
+		new_trunk.items.fill(None);
+		mem::drop(new_trunk_bytes);
+
+		self.set_freelist_trunk(tid, Some(page_num))?;
+
+		unsafe { self.alloc_lock.unlock() }
+		Ok(())
 	}
 
 	fn create_new_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
@@ -126,62 +160,5 @@ where
 	#[inline]
 	fn page_id(&self, page_num: u16) -> PageId {
 		PageId::new(self.segment_num, page_num)
-	}
-}
-
-impl<TMgr, RwMgr> SegmentAllocManager<TMgr, RwMgr>
-where
-	TMgr: api::TransactionManager,
-	RwMgr: api::PageRwManager<TMgr>,
-{
-	#[inline]
-	pub fn segment_num(&self) -> u32 {
-		self.segment_num
-	}
-
-	pub fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
-		if let Some(free_page) = self.pop_free_page(tid)? {
-			return Ok(Some(free_page));
-		}
-		if let Some(new_page) = self.create_new_page(tid)? {
-			return Ok(Some(new_page));
-		}
-		Ok(None)
-	}
-
-	pub fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), Error> {
-		self.alloc_lock.lock();
-
-		let trunk_page_num = self.freelist_trunk()?;
-
-		if let Some(trunk_page_num) = trunk_page_num {
-			let trunk_page_bytes = self.rw_mgr.read_page(self.page_id(trunk_page_num.get()))?;
-			let trunk_page = FreelistPage::from_bytes(&trunk_page_bytes);
-			let has_free_space = trunk_page.header.length < trunk_page.items.len() as u16;
-			mem::drop(trunk_page_bytes);
-			if has_free_space {
-				let mut trunk_page_bytes_mut = self
-					.rw_mgr
-					.write_page(tid, self.page_id(trunk_page_num.get()))?;
-
-				let trunk_page = FreelistPage::from_bytes_mut(&mut trunk_page_bytes_mut);
-				trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
-				trunk_page.header.length += 1;
-			}
-		};
-
-		let mut new_trunk_bytes = self.rw_mgr.write_page(tid, self.page_id(page_num.get()))?;
-		let new_trunk = FreelistPage::from_bytes_mut(&mut new_trunk_bytes);
-		new_trunk.header = FreelistPageHeader {
-			next: trunk_page_num,
-			length: 0,
-		};
-		new_trunk.items.fill(None);
-		mem::drop(new_trunk_bytes);
-
-		self.set_freelist_trunk(tid, Some(page_num))?;
-
-		unsafe { self.alloc_lock.unlock() }
-		Ok(())
 	}
 }

@@ -6,52 +6,35 @@ use std::{
 use static_assertions::assert_impl_all;
 
 use crate::{
-	cache::{self, PageCache, PageReadGuard, PageWriteGuard},
+	cache::{PageCache, PageReadGuard, PageWriteGuard},
 	index::PageId,
 };
 
 use super::{
-	api,
 	err::Error,
 	transaction::{Operation, TransactionManager},
 };
 
-pub use super::api::PageRwManager as _;
-
-pub struct PageRwManager<PC = PageCache, TMgr = TransactionManager>
-where
-	PC: cache::api::PageCache,
-	TMgr: api::TransactionManager,
-{
-	cache: PC,
-	transaction_mgr: Arc<TMgr>,
+pub struct PageRwManager {
+	cache: PageCache,
+	transaction_mgr: Arc<TransactionManager>,
 }
 
 assert_impl_all!(PageRwManager: Send, Sync);
 
-impl<PC, TMgr> PageRwManager<PC, TMgr>
-where
-	PC: cache::api::PageCache,
-	TMgr: api::TransactionManager,
-{
-	pub fn new(cache: PC, transaction_mgr: Arc<TMgr>) -> Self {
+impl PageRwManager {
+	pub fn new(cache: PageCache, transaction_mgr: Arc<TransactionManager>) -> Self {
 		Self {
 			cache,
 			transaction_mgr,
 		}
 	}
-}
 
-impl<PC, TMgr> api::PageRwManager<TMgr> for PageRwManager<PC, TMgr>
-where
-	PC: cache::api::PageCache,
-	TMgr: api::TransactionManager + 'static,
-{
-	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, Error> {
+	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, Error> {
 		Ok(self.cache.read_page(page_id)?)
 	}
 
-	fn write_page(&self, tid: u64, page_id: PageId) -> Result<PageWriteHandle<TMgr>, Error> {
+	pub fn write_page(&self, tid: u64, page_id: PageId) -> Result<PageWriteHandle, Error> {
 		self.transaction_mgr.assert_valid_tid(tid)?;
 		let page = self.cache.write_page(page_id)?;
 		let mut before: Vec<u8> = Vec::with_capacity(page.len());
@@ -60,28 +43,22 @@ where
 		Ok(PageWriteHandle {
 			tid,
 			page_id,
-			transaction_mgr: &*self.transaction_mgr,
+			transaction_mgr: &self.transaction_mgr,
 			before: before.into_boxed_slice(),
 			guard: page,
 		})
 	}
 }
 
-pub struct PageWriteHandle<'a, TMgr = TransactionManager>
-where
-	TMgr: api::TransactionManager,
-{
+pub struct PageWriteHandle<'a> {
 	tid: u64,
 	page_id: PageId,
 	before: Box<[u8]>,
-	transaction_mgr: &'a TMgr,
+	transaction_mgr: &'a TransactionManager,
 	guard: PageWriteGuard<'a>,
 }
 
-impl<'a, TMgr> Drop for PageWriteHandle<'a, TMgr>
-where
-	TMgr: api::TransactionManager,
-{
+impl<'a> Drop for PageWriteHandle<'a> {
 	fn drop(&mut self) {
 		self.transaction_mgr
 			.operation(
@@ -94,10 +71,7 @@ where
 	}
 }
 
-impl<'a, TMgr> Deref for PageWriteHandle<'a, TMgr>
-where
-	TMgr: api::TransactionManager,
-{
+impl<'a> Deref for PageWriteHandle<'a> {
 	type Target = [u8];
 
 	#[inline]
@@ -106,30 +80,21 @@ where
 	}
 }
 
-impl<'a, TMgr> DerefMut for PageWriteHandle<'a, TMgr>
-where
-	TMgr: api::TransactionManager,
-{
+impl<'a> DerefMut for PageWriteHandle<'a> {
 	#[inline]
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		&mut self.guard
 	}
 }
 
-impl<'a, TMgr> AsRef<[u8]> for PageWriteHandle<'a, TMgr>
-where
-	TMgr: api::TransactionManager,
-{
+impl<'a> AsRef<[u8]> for PageWriteHandle<'a> {
 	#[inline]
 	fn as_ref(&self) -> &[u8] {
 		self
 	}
 }
 
-impl<'a, TMgr> AsMut<[u8]> for PageWriteHandle<'a, TMgr>
-where
-	TMgr: api::TransactionManager,
-{
+impl<'a> AsMut<[u8]> for PageWriteHandle<'a> {
 	#[inline]
 	fn as_mut(&mut self) -> &mut [u8] {
 		self

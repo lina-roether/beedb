@@ -8,10 +8,7 @@ use static_assertions::assert_impl_all;
 
 use crate::index::PageId;
 
-use super::{api, err::Error};
-
-#[allow(unused_imports)]
-pub use super::api::TransactionManager as _;
+use super::err::Error;
 
 #[repr(u8)]
 pub enum Operation {
@@ -60,19 +57,7 @@ impl TransactionManager {
 		Ok(())
 	}
 
-	#[inline]
-	fn next_seq(&self) -> u64 {
-		self.sequence_counter.fetch_add(1, Ordering::SeqCst)
-	}
-
-	#[inline]
-	fn next_tid(&self) -> u64 {
-		self.transaction_counter.fetch_add(1, Ordering::SeqCst)
-	}
-}
-
-impl api::TransactionManager for TransactionManager {
-	fn begin(&self) -> Result<u64, Error> {
+	pub fn begin(&self) -> Result<u64, Error> {
 		let mut transaction_table = self.transaction_table.lock();
 		let tid = self.next_tid();
 		let begin_seq = self.next_seq();
@@ -87,7 +72,7 @@ impl api::TransactionManager for TransactionManager {
 		Ok(tid)
 	}
 
-	fn operation(
+	pub fn operation(
 		&self,
 		tid: u64,
 		operation: Operation,
@@ -98,18 +83,28 @@ impl api::TransactionManager for TransactionManager {
 		self.operation_raw(&mut transaction_table, tid, operation, before, after)
 	}
 
-	fn commit(&self, tid: u64) -> Result<(), Error> {
+	pub fn commit(&self, tid: u64) -> Result<(), Error> {
 		let mut transaction_table = self.transaction_table.lock();
 		self.operation_raw(&mut transaction_table, tid, Operation::Commit, &[], &[])?;
 		transaction_table.remove(&tid);
 		Ok(())
 	}
 
-	fn assert_valid_tid(&self, tid: u64) -> Result<(), Error> {
+	pub fn assert_valid_tid(&self, tid: u64) -> Result<(), Error> {
 		if !self.transaction_table.lock().contains_key(&tid) {
 			return Err(Error::NoSuchTransaction(tid));
 		}
 		Ok(())
+	}
+
+	#[inline]
+	fn next_seq(&self) -> u64 {
+		self.sequence_counter.fetch_add(1, Ordering::SeqCst)
+	}
+
+	#[inline]
+	fn next_tid(&self) -> u64 {
+		self.transaction_counter.fetch_add(1, Ordering::SeqCst)
 	}
 }
 
