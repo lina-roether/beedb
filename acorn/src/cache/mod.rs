@@ -13,9 +13,11 @@ use crate::{
 	index::PageId,
 };
 
+pub mod api;
 mod buffer;
 mod manager;
 
+pub use api::PageCache as _;
 pub use buffer::{PageReadGuard, PageWriteGuard};
 
 pub struct PageCache {
@@ -37,32 +39,6 @@ impl PageCache {
 			buffer: PageBuffer::new(storage.page_size().into(), length),
 			storage,
 		}
-	}
-
-	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
-		let index = self.access(page_id, false)?;
-		Ok(self.buffer.read_page(index).unwrap())
-	}
-
-	pub fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, disk::Error> {
-		let index = self.access(page_id, true)?;
-		Ok(self.buffer.write_page(index).unwrap())
-	}
-
-	#[inline]
-	pub fn num_dirty(&self) -> usize {
-		self.state.lock().dirty.len()
-	}
-
-	pub fn flush(&self) -> Result<(), disk::Error> {
-		let mut state = self.state.lock();
-		for dirty_page in state.dirty.iter().copied() {
-			let index = *state.map.get(&dirty_page).unwrap();
-			let page = self.buffer.read_page(index).unwrap();
-			self.storage.write_page(&page, dirty_page)?;
-		}
-		state.dirty.clear();
-		Ok(())
 	}
 
 	fn access(&self, page_id: PageId, dirty: bool) -> Result<usize, disk::Error> {
@@ -106,6 +82,34 @@ impl PageCache {
 		state.map.insert(page_id, index);
 
 		Ok(index)
+	}
+}
+
+impl api::PageCache for PageCache {
+	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
+		let index = self.access(page_id, false)?;
+		Ok(self.buffer.read_page(index).unwrap())
+	}
+
+	fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, disk::Error> {
+		let index = self.access(page_id, true)?;
+		Ok(self.buffer.write_page(index).unwrap())
+	}
+
+	#[inline]
+	fn num_dirty(&self) -> usize {
+		self.state.lock().dirty.len()
+	}
+
+	fn flush(&self) -> Result<(), disk::Error> {
+		let mut state = self.state.lock();
+		for dirty_page in state.dirty.iter().copied() {
+			let index = *state.map.get(&dirty_page).unwrap();
+			let page = self.buffer.read_page(index).unwrap();
+			self.storage.write_page(&page, dirty_page)?;
+		}
+		state.dirty.clear();
+		Ok(())
 	}
 }
 

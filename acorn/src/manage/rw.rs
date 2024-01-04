@@ -6,8 +6,7 @@ use std::{
 use static_assertions::assert_impl_all;
 
 use crate::{
-	cache::{PageCache, PageReadGuard, PageWriteGuard},
-	disk::DiskStorage,
+	cache::{self, PageCache, PageReadGuard, PageWriteGuard},
 	index::PageId,
 };
 
@@ -19,34 +18,33 @@ use super::{
 
 pub use super::api::PageRwManager as _;
 
-pub struct Params {
-	pub cache_size: usize,
-}
-
-pub struct PageRwManager<TMgr = TransactionManager>
+pub struct PageRwManager<PC = PageCache, TMgr = TransactionManager>
 where
+	PC: cache::api::PageCache,
 	TMgr: api::TransactionManager,
 {
-	cache: PageCache,
+	cache: PC,
 	transaction_mgr: Arc<TMgr>,
 }
 
 assert_impl_all!(PageRwManager: Send, Sync);
 
-impl<TMgr> PageRwManager<TMgr>
+impl<PC, TMgr> PageRwManager<PC, TMgr>
 where
+	PC: cache::api::PageCache,
 	TMgr: api::TransactionManager,
 {
-	pub fn new(storage: DiskStorage, transaction_mgr: Arc<TMgr>, params: Params) -> Self {
+	pub fn new(cache: PC, transaction_mgr: Arc<TMgr>) -> Self {
 		Self {
-			cache: PageCache::new(storage, params.cache_size),
+			cache,
 			transaction_mgr,
 		}
 	}
 }
 
-impl<TMgr> api::PageRwManager<TMgr> for PageRwManager<TMgr>
+impl<PC, TMgr> api::PageRwManager<TMgr> for PageRwManager<PC, TMgr>
 where
+	PC: cache::api::PageCache,
 	TMgr: api::TransactionManager + 'static,
 {
 	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, Error> {
