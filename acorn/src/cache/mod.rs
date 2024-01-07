@@ -127,16 +127,15 @@ mod tests {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
 		let storage = DiskStorage::load(dir.path().into()).unwrap();
-		let segment = storage.new_segment().unwrap();
 		let cache = PageCache::new(storage, 128);
 
 		{
-			let mut page_1 = cache.write_page(PageId::new(segment, 1)).unwrap();
+			let mut page_1 = cache.write_page(PageId::new(0, 1)).unwrap();
 			page_1.fill(69);
 		}
 
 		{
-			let mut page_2 = cache.write_page(PageId::new(segment, 2)).unwrap();
+			let mut page_2 = cache.write_page(PageId::new(0, 2)).unwrap();
 			page_2.fill(25);
 		}
 
@@ -144,8 +143,8 @@ mod tests {
 		cache.flush().unwrap();
 		assert_eq!(cache.num_dirty(), 0);
 
-		let page_1 = cache.read_page(PageId::new(segment, 1)).unwrap();
-		let page_2 = cache.read_page(PageId::new(segment, 2)).unwrap();
+		let page_1 = cache.read_page(PageId::new(0, 1)).unwrap();
+		let page_2 = cache.read_page(PageId::new(0, 2)).unwrap();
 
 		assert!(page_1.iter().all(|b| *b == 69));
 		assert!(page_2.iter().all(|b| *b == 25));

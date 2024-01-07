@@ -19,6 +19,12 @@ impl StorageDir {
 		Self { path }
 	}
 
+	pub fn segment_file_exists(&self, segment_num: u32) -> bool {
+		self.path
+			.join(Self::segment_file_name(segment_num))
+			.exists()
+	}
+
 	pub fn open_segment_file(&self, segment_num: u32, create: bool) -> Result<File, io::Error> {
 		OpenOptions::new()
 			.read(true)

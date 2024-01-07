@@ -108,7 +108,7 @@ impl<F: IoTarget> StorageMetaFile<F> {
 			format_version: META_FORMAT_VERSION,
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size_exponent,
-			num_segments: 0,
+			segment_num_limit: 0,
 		};
 
 		file.set_len(0)?;
@@ -140,7 +140,7 @@ pub struct StorageMeta {
 	pub format_version: u8,
 	pub byte_order: u8,
 	pub page_size_exponent: u8,
-	pub num_segments: u32,
+	pub segment_num_limit: u32,
 }
 
 impl StorageMeta {
@@ -177,7 +177,7 @@ mod tests {
 		assert_eq!(meta.byte_order, ByteOrder::NATIVE as u8);
 		assert_eq!(meta.page_size_exponent, 14);
 		assert_eq!(meta.page_size(), 16 * KiB as u16);
-		assert_eq!(meta.num_segments, 420);
+		assert_eq!(meta.segment_num_limit, 420);
 	}
 
 	#[test]
@@ -207,7 +207,7 @@ mod tests {
 
 		let mut meta_file = StorageMetaFile::load(data).unwrap();
 		let meta = meta_file.get_mut();
-		meta.num_segments = 69;
+		meta.segment_num_limit = 69;
 
 		assert_eq!(meta_file.file[8..12], 420_u32.to_ne_bytes());
 

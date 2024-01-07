@@ -73,9 +73,6 @@ pub enum Error {
 	#[error("Failed to initialize new segment: {0}")]
 	InitSegmentFailed(segment::InitError),
 
-	#[error("Segment {0} doesn't exist")]
-	NoSuchSegment(u32),
-
 	#[error("Failed to read page {0}: {1}")]
 	PageReadFailed(PageId, io::Error),
 
@@ -138,15 +135,11 @@ impl DiskStorage {
 		self.page_size
 	}
 
-	#[inline]
-	pub fn num_segments(&self) -> u32 {
-		self.meta.read().get().num_segments
-	}
-
 	pub fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error> {
 		let segment_files = self.segment_files.read();
 		let Some(segment_file) = segment_files.get(page_id.segment_num as usize) else {
-			return Err(Error::NoSuchSegment(page_id.segment_num));
+			buf.fill(0);
+			return Ok(());
 		};
 		segment_file
 			.read_page(buf, page_id.page_num)
@@ -155,20 +148,30 @@ impl DiskStorage {
 	}
 
 	pub fn write_page(&self, buf: &[u8], page_id: PageId) -> Result<(), Error> {
+		self.ensure_segment_exists(page_id.segment_num)?;
+
 		let segment_files = self.segment_files.read();
-		let Some(segment_file) = segment_files.get(page_id.segment_num as usize) else {
-			return Err(Error::NoSuchSegment(page_id.segment_num));
-		};
+		let segment_file = segment_files
+			.get(page_id.segment_num as usize)
+			.expect("This segment file should be open, but apparently isn't");
+
 		segment_file
 			.write_page(buf, page_id.page_num)
 			.map_err(|err| Error::PageWriteFailed(page_id, err))?;
 		Ok(())
 	}
 
-	pub fn new_segment(&self) -> Result<u32, Error> {
+	fn ensure_segment_exists(&self, segment_num: u32) -> Result<(), Error> {
+		if !self.dir.segment_file_exists(segment_num) {
+			self.create_segment(segment_num)
+		} else {
+			Ok(())
+		}
+	}
+
+	fn create_segment(&self, segment_num: u32) -> Result<(), Error> {
 		let mut meta_file = self.meta.write();
 		let meta = meta_file.get_mut();
-		let segment_num = meta.num_segments;
 		let mut file = self
 			.dir
 			.open_segment_file(segment_num, true)
@@ -180,11 +183,11 @@ impl DiskStorage {
 			},
 		)
 		.map_err(Error::InitSegmentFailed)?;
-		meta.num_segments += 1;
+		meta.segment_num_limit = u32::max(meta.segment_num_limit, segment_num + 1);
 		meta_file.flush().map_err(Error::MetaWriteFailed)?;
 		mem::drop(meta_file);
 		self.sync_loaded_segment_files()?;
-		Ok(segment_num)
+		Ok(())
 	}
 
 	fn sync_loaded_segment_files(&self) -> Result<(), Error> {
@@ -192,12 +195,16 @@ impl DiskStorage {
 		let meta = meta_file.get();
 		let mut segment_files = self.segment_files.write();
 
-		if segment_files.len() >= meta.num_segments as usize {
-			segment_files.truncate(meta.num_segments as usize);
+		if segment_files.len() >= meta.segment_num_limit as usize {
+			segment_files.truncate(meta.segment_num_limit as usize);
 			return Ok(());
 		}
 
-		for segment_num in (segment_files.len() as u32)..meta.num_segments {
+		for segment_num in (segment_files.len() as u32)..meta.segment_num_limit {
+			if !self.dir.segment_file_exists(segment_num) {
+				continue;
+			}
+
 			let file = self
 				.dir
 				.open_segment_file(segment_num, false)
@@ -252,7 +259,7 @@ mod tests {
 
 		let meta_bytes = fs::read(dir.path().join("storage.acnm")).unwrap();
 		let meta = StorageMeta::from_bytes(&meta_bytes);
-		assert_eq!(meta.num_segments, 0);
+		assert_eq!(meta.segment_num_limit, 0);
 		assert_eq!(meta.page_size_exponent, 14);
 		assert_eq!(meta.magic, *b"ACNM");
 		assert_eq!(meta.format_version, 1);
@@ -287,7 +294,7 @@ mod tests {
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
-		meta.num_segments = 1;
+		meta.segment_num_limit = 1;
 		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
 
 		let mut segment_file = OpenOptions::new()
@@ -308,29 +315,6 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore)]
-	fn try_load_with_missing_segment_file() {
-		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBytes<12> = Default::default();
-		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
-		meta.magic = *b"ACNM";
-		meta.format_version = 1;
-		meta.byte_order = ByteOrder::NATIVE as u8;
-		meta.page_size_exponent = 14;
-		meta.num_segments = 1;
-		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
-
-		let result = DiskStorage::load(dir.path().into());
-
-		match result {
-			Ok(..) => panic!("Should not succeed"),
-			Err(err) => {
-				assert_matches!(err, LoadError::Err(Error::OpenSegmentFailed(segment, ..)) if segment == 0)
-			}
-		}
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore)]
 	fn read_write_page() {
 		let dir = tempdir().unwrap();
 		let mut meta_data: AlignedBytes<12> = Default::default();
@@ -339,7 +323,7 @@ mod tests {
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
-		meta.num_segments = 1;
+		meta.segment_num_limit = 1;
 		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
 
 		let mut segment_file = OpenOptions::new()
@@ -368,7 +352,7 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore)]
-	fn create_new_segment() {
+	fn read_from_nonexistent_segment() {
 		let dir = tempdir().unwrap();
 		let mut meta_data: AlignedBytes<12> = Default::default();
 		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
@@ -376,28 +360,43 @@ mod tests {
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
-		meta.num_segments = 0;
+		meta.segment_num_limit = 0;
 		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
 
 		let storage = DiskStorage::load(dir.path().into()).unwrap();
-		assert_eq!(storage.new_segment().unwrap(), 0);
-		assert_eq!(storage.new_segment().unwrap(), 1);
+		let page_id = PageId::new(0, 1);
 
-		// Should be able to load created segments
-		SegmentFile::load(
-			File::open(dir.path().join("0.acns")).unwrap(),
-			segment::LoadParams {
-				page_size: storage.page_size(),
-			},
-		)
-		.unwrap();
+		let mut dest_buf: Box<[u8]> = iter::repeat(0xaa)
+			.take(storage.page_size().into())
+			.collect();
+		storage.read_page(&mut dest_buf, page_id).unwrap();
 
-		SegmentFile::load(
-			File::open(dir.path().join("1.acns")).unwrap(),
-			segment::LoadParams {
-				page_size: storage.page_size(),
-			},
-		)
-		.unwrap();
+		assert!(dest_buf.iter().all(|b| *b == 0));
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore)]
+	fn write_to_nonexistent_segment() {
+		let dir = tempdir().unwrap();
+		let mut meta_data: AlignedBytes<12> = Default::default();
+		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
+		meta.magic = *b"ACNM";
+		meta.format_version = 1;
+		meta.byte_order = ByteOrder::NATIVE as u8;
+		meta.page_size_exponent = 14;
+		meta.segment_num_limit = 0;
+		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
+
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let page_id = PageId::new(0, 1);
+
+		let source_buf: Box<[u8]> = iter::repeat(25).take(storage.page_size().into()).collect();
+		storage.write_page(&source_buf, page_id).unwrap();
+
+		let mut dest_buf: Box<[u8]> = iter::repeat(0).take(storage.page_size().into()).collect();
+		storage.read_page(&mut dest_buf, page_id).unwrap();
+
+		assert_eq!(dest_buf, source_buf);
+		assert!(dir.path().join("0.acns").exists())
 	}
 }
