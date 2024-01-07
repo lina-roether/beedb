@@ -32,10 +32,10 @@ pub enum InitError {
 	NotEmpty(PathBuf),
 
 	#[error("Couldn't create the storage meta file: {0}")]
-	CreateMetaFailed(io::Error),
+	CreateMeta(io::Error),
 
 	#[error("Failed to initialize storage meta: {0}")]
-	InitMetaFailed(#[from] meta::InitError),
+	InitMeta(#[from] meta::InitError),
 }
 
 #[derive(Debug, Error)]
@@ -47,10 +47,10 @@ pub enum LoadError {
 	NotADirectory(PathBuf),
 
 	#[error("Failed to open the storage meta file: {0}")]
-	OpenMetaFailed(io::Error),
+	OpenMeta(io::Error),
 
 	#[error("Failed to load the storage metadata: {0}")]
-	LoadMetaFailed(#[from] meta::LoadError),
+	LoadMeta(#[from] meta::LoadError),
 
 	#[error(transparent)]
 	Err(#[from] Error),
@@ -59,25 +59,25 @@ pub enum LoadError {
 #[derive(Debug, Error)]
 pub enum Error {
 	#[error("Failed to update storage metadata: {0}")]
-	MetaWriteFailed(io::Error),
+	MetaWrite(io::Error),
 
 	#[error("Failed to open file for segment {0}: {1}")]
-	OpenSegmentFailed(u32, io::Error),
+	OpenSegment(u32, io::Error),
 
 	#[error("Failed to load segment {0}: {1}")]
-	LoadSegmentFailed(u32, segment::LoadError),
+	LoadSegment(u32, segment::LoadError),
 
 	#[error("Failed to create a new segment file: {0}")]
-	CreateSegmentFailed(io::Error),
+	CreateSegment(io::Error),
 
 	#[error("Failed to initialize new segment: {0}")]
-	InitSegmentFailed(segment::InitError),
+	InitSegment(segment::InitError),
 
 	#[error("Failed to read page {0}: {1}")]
-	PageReadFailed(PageId, io::Error),
+	PageRead(PageId, io::Error),
 
 	#[error("Failed to write to page {0}: {1}")]
-	PageWriteFailed(PageId, io::Error),
+	PageWrite(PageId, io::Error),
 }
 
 pub struct DiskStorage {
@@ -101,9 +101,7 @@ impl DiskStorage {
 			return Err(InitError::NotEmpty(path.as_ref().into()));
 		}
 		let dir = StorageDir::new(path.as_ref().into());
-		let mut meta_file = dir
-			.open_meta_file(true)
-			.map_err(InitError::CreateMetaFailed)?;
+		let mut meta_file = dir.open_meta_file(true).map_err(InitError::CreateMeta)?;
 		StorageMetaFile::init(&mut meta_file, params)?;
 		Ok(())
 	}
@@ -116,10 +114,8 @@ impl DiskStorage {
 			return Err(LoadError::NotADirectory(path));
 		}
 		let dir = StorageDir::new(path);
-		let meta_file = dir
-			.open_meta_file(false)
-			.map_err(LoadError::OpenMetaFailed)?;
-		let meta = StorageMetaFile::load(meta_file).map_err(LoadError::LoadMetaFailed)?;
+		let meta_file = dir.open_meta_file(false).map_err(LoadError::OpenMeta)?;
+		let meta = StorageMetaFile::load(meta_file).map_err(LoadError::LoadMeta)?;
 		let disk_storage = DiskStorage {
 			page_size: meta.get().page_size(),
 			meta: RwLock::new(meta),
@@ -143,7 +139,7 @@ impl DiskStorage {
 		};
 		segment_file
 			.read_page(buf, page_id.page_num)
-			.map_err(|err| Error::PageReadFailed(page_id, err))?;
+			.map_err(|err| Error::PageRead(page_id, err))?;
 		Ok(())
 	}
 
@@ -157,7 +153,7 @@ impl DiskStorage {
 
 		segment_file
 			.write_page(buf, page_id.page_num)
-			.map_err(|err| Error::PageWriteFailed(page_id, err))?;
+			.map_err(|err| Error::PageWrite(page_id, err))?;
 		Ok(())
 	}
 
@@ -175,16 +171,16 @@ impl DiskStorage {
 		let mut file = self
 			.dir
 			.open_segment_file(segment_num, true)
-			.map_err(Error::CreateSegmentFailed)?;
+			.map_err(Error::CreateSegment)?;
 		SegmentFile::init(
 			&mut file,
 			segment::InitParams {
 				page_size: self.page_size(),
 			},
 		)
-		.map_err(Error::InitSegmentFailed)?;
+		.map_err(Error::InitSegment)?;
 		meta.segment_num_limit = u32::max(meta.segment_num_limit, segment_num + 1);
-		meta_file.flush().map_err(Error::MetaWriteFailed)?;
+		meta_file.flush().map_err(Error::MetaWrite)?;
 		mem::drop(meta_file);
 		self.sync_loaded_segment_files()?;
 		Ok(())
@@ -208,14 +204,14 @@ impl DiskStorage {
 			let file = self
 				.dir
 				.open_segment_file(segment_num, false)
-				.map_err(|err| Error::OpenSegmentFailed(segment_num, err))?;
+				.map_err(|err| Error::OpenSegment(segment_num, err))?;
 			let segment = SegmentFile::load(
 				file,
 				segment::LoadParams {
 					page_size: meta.page_size(),
 				},
 			)
-			.map_err(|err| Error::LoadSegmentFailed(segment_num, err))?;
+			.map_err(|err| Error::LoadSegment(segment_num, err))?;
 			segment_files.push(segment);
 		}
 
