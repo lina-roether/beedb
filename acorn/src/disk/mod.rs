@@ -1,6 +1,6 @@
 use std::{
 	fs::File,
-	io, mem,
+	io, iter,
 	path::{Path, PathBuf},
 	usize,
 };
@@ -82,9 +82,8 @@ pub enum Error {
 
 pub struct DiskStorage {
 	page_size: u16,
-	meta: RwLock<StorageMetaFile<File>>,
 	dir: StorageDir,
-	segment_files: RwLock<Vec<SegmentFile<File>>>,
+	state: RwLock<DiskStorageState>,
 }
 
 assert_impl_all!(DiskStorage: Send, Sync);
@@ -118,11 +117,13 @@ impl DiskStorage {
 		let meta = StorageMetaFile::load(meta_file).map_err(LoadError::LoadMeta)?;
 		let disk_storage = DiskStorage {
 			page_size: meta.get().page_size(),
-			meta: RwLock::new(meta),
 			dir,
-			segment_files: RwLock::new(Vec::new()),
+			state: RwLock::new(DiskStorageState {
+				meta,
+				segment_files: Vec::new(),
+			}),
 		};
-		disk_storage.sync_loaded_segment_files()?;
+		disk_storage.load_all_segment_files()?;
 		Ok(disk_storage)
 	}
 
@@ -132,8 +133,8 @@ impl DiskStorage {
 	}
 
 	pub fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error> {
-		let segment_files = self.segment_files.read();
-		let Some(segment_file) = segment_files.get(page_id.segment_num as usize) else {
+		let state = self.state.read();
+		let Some(segment_file) = state.get_loaded_segment(page_id.segment_num) else {
 			buf.fill(0);
 			return Ok(());
 		};
@@ -146,9 +147,9 @@ impl DiskStorage {
 	pub fn write_page(&self, buf: &[u8], page_id: PageId) -> Result<(), Error> {
 		self.ensure_segment_exists(page_id.segment_num)?;
 
-		let segment_files = self.segment_files.read();
-		let segment_file = segment_files
-			.get(page_id.segment_num as usize)
+		let state = self.state.read();
+		let segment_file = state
+			.get_loaded_segment(page_id.segment_num)
 			.expect("This segment file should be open, but apparently isn't");
 
 		segment_file
@@ -166,8 +167,7 @@ impl DiskStorage {
 	}
 
 	fn create_segment(&self, segment_num: u32) -> Result<(), Error> {
-		let mut meta_file = self.meta.write();
-		let meta = meta_file.get_mut();
+		let mut state = self.state.write();
 		let mut file = self
 			.dir
 			.open_segment_file(segment_num, true)
@@ -179,42 +179,75 @@ impl DiskStorage {
 			},
 		)
 		.map_err(Error::InitSegment)?;
-		meta.segment_num_limit = u32::max(meta.segment_num_limit, segment_num + 1);
-		meta_file.flush().map_err(Error::MetaWrite)?;
-		mem::drop(meta_file);
-		self.sync_loaded_segment_files()?;
+		let segment = self.open_segment(segment_num)?;
+		state.insert_loaded_segment(segment_num, segment)?;
 		Ok(())
 	}
 
-	fn sync_loaded_segment_files(&self) -> Result<(), Error> {
-		let meta_file = self.meta.read();
-		let meta = meta_file.get();
-		let mut segment_files = self.segment_files.write();
+	fn load_all_segment_files(&self) -> Result<(), Error> {
+		let mut state = self.state.write();
+		state.clear_segments();
 
-		if segment_files.len() >= meta.segment_num_limit as usize {
-			segment_files.truncate(meta.segment_num_limit as usize);
-			return Ok(());
-		}
-
-		for segment_num in (segment_files.len() as u32)..meta.segment_num_limit {
+		for segment_num in 0..state.meta.get().segment_num_limit {
 			if !self.dir.segment_file_exists(segment_num) {
 				continue;
 			}
 
-			let file = self
-				.dir
-				.open_segment_file(segment_num, false)
-				.map_err(|err| Error::OpenSegment(segment_num, err))?;
-			let segment = SegmentFile::load(
-				file,
-				segment::LoadParams {
-					page_size: meta.page_size(),
-				},
-			)
-			.map_err(|err| Error::LoadSegment(segment_num, err))?;
-			segment_files.push(segment);
+			let segment = self.open_segment(segment_num)?;
+			state.insert_loaded_segment(segment_num, segment)?;
 		}
 
+		Ok(())
+	}
+
+	fn open_segment(&self, segment_num: u32) -> Result<SegmentFile<File>, Error> {
+		let file = self
+			.dir
+			.open_segment_file(segment_num, false)
+			.map_err(|err| Error::OpenSegment(segment_num, err))?;
+		SegmentFile::load(
+			file,
+			segment::LoadParams {
+				page_size: self.page_size,
+			},
+		)
+		.map_err(|err| Error::LoadSegment(segment_num, err))
+	}
+}
+
+struct DiskStorageState {
+	meta: StorageMetaFile<File>,
+	segment_files: Vec<Option<SegmentFile<File>>>,
+}
+
+impl DiskStorageState {
+	fn flush_meta(&mut self) -> Result<(), Error> {
+		self.meta.flush().map_err(Error::MetaWrite)
+	}
+
+	fn clear_segments(&mut self) {
+		self.segment_files.clear();
+	}
+
+	fn get_loaded_segment(&self, segment_num: u32) -> Option<&SegmentFile<File>> {
+		self.segment_files.get(segment_num as usize)?.as_ref()
+	}
+
+	fn insert_loaded_segment(
+		&mut self,
+		segment_num: u32,
+		segment: SegmentFile<File>,
+	) -> Result<(), Error> {
+		if self.segment_files.len() <= segment_num as usize {
+			let extend_by = self.segment_files.len() - segment_num as usize + 1;
+			self.segment_files
+				.extend(iter::repeat_with(|| None).take(extend_by));
+		}
+		if segment_num >= self.meta.get().segment_num_limit {
+			self.meta.get_mut().segment_num_limit = segment_num + 1;
+			self.flush_meta()?;
+		}
+		self.segment_files[segment_num as usize] = Some(segment);
 		Ok(())
 	}
 }
