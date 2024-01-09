@@ -1,3 +1,4 @@
+mod alloc;
 mod err;
 mod rw;
 mod segment_alloc;
