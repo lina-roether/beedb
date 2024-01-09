@@ -14,9 +14,3 @@ mod io;
 mod manage;
 mod pages;
 mod utils;
-
-// Old stuff that is going to be removed int the new arch
-#[cfg(old_stuff)]
-mod segment;
-#[cfg(old_stuff)]
-mod storage;
