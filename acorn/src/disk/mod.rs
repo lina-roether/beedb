@@ -116,7 +116,7 @@ impl DiskStorage {
 		let meta_file = dir.open_meta_file(false).map_err(LoadError::OpenMeta)?;
 		let meta = StorageMetaFile::load(meta_file).map_err(LoadError::LoadMeta)?;
 		let disk_storage = DiskStorage {
-			page_size: meta.get().page_size(),
+			page_size: meta.page_size(),
 			dir,
 			state: RwLock::new(DiskStorageState {
 				meta,
@@ -188,7 +188,7 @@ impl DiskStorage {
 		let mut state = self.state.write();
 		state.clear_segments();
 
-		for segment_num in 0..state.meta.get().segment_num_limit {
+		for segment_num in 0..state.meta.segment_num_limit {
 			if !self.dir.segment_file_exists(segment_num) {
 				continue;
 			}
@@ -238,8 +238,8 @@ impl DiskStorageState {
 		segment_num: u32,
 		segment: SegmentFile<File>,
 	) -> Result<(), Error> {
-		if segment_num >= self.meta.get().segment_num_limit {
-			self.meta.get_mut().segment_num_limit = segment_num + 1;
+		if segment_num >= self.meta.segment_num_limit {
+			self.meta.segment_num_limit = segment_num + 1;
 			self.flush_meta()?;
 		}
 		self.segment_files.insert(segment_num as usize, segment);
@@ -255,15 +255,12 @@ mod tests {
 		iter,
 	};
 
+	use byte_view::{ByteView, ViewBuf};
 	use tempfile::tempdir;
 
 	use crate::{
 		disk::meta::StorageMeta,
-		utils::{
-			byte_order::ByteOrder,
-			byte_view::{AlignedBytes, ByteView},
-			units::KiB,
-		},
+		utils::{byte_order::ByteOrder, units::KiB},
 	};
 
 	use super::*;
@@ -312,14 +309,13 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn load() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBytes<12> = Default::default();
-		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
+		let mut meta: ViewBuf<StorageMeta> = ViewBuf::new();
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
 		meta.segment_num_limit = 1;
-		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
+		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
 
 		let mut segment_file = OpenOptions::new()
 			.read(true)
@@ -341,14 +337,13 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn read_write_page() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBytes<12> = Default::default();
-		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
+		let mut meta: ViewBuf<StorageMeta> = ViewBuf::new();
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
 		meta.segment_num_limit = 1;
-		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
+		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
 
 		let mut segment_file = OpenOptions::new()
 			.read(true)
@@ -378,14 +373,13 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn read_from_nonexistent_segment() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBytes<12> = Default::default();
-		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
+		let mut meta: ViewBuf<StorageMeta> = ViewBuf::new();
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
 		meta.segment_num_limit = 0;
-		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
+		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
 
 		let storage = DiskStorage::load(dir.path().into()).unwrap();
 		let page_id = PageId::new(0, 1);
@@ -402,14 +396,13 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn write_to_nonexistent_segment() {
 		let dir = tempdir().unwrap();
-		let mut meta_data: AlignedBytes<12> = Default::default();
-		let meta = StorageMeta::from_bytes_mut(meta_data.as_mut());
+		let mut meta: ViewBuf<StorageMeta> = ViewBuf::new();
 		meta.magic = *b"ACNM";
 		meta.format_version = 1;
 		meta.byte_order = ByteOrder::NATIVE as u8;
 		meta.page_size_exponent = 14;
 		meta.segment_num_limit = 0;
-		fs::write(dir.path().join("storage.acnm"), meta_data).unwrap();
+		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
 
 		let storage = DiskStorage::load(dir.path().into()).unwrap();
 		let page_id = PageId::new(0, 1);

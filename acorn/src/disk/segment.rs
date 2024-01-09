@@ -1,5 +1,6 @@
 use std::{cell::UnsafeCell, fs::File, io};
 
+use byte_view::ViewBuf;
 use static_assertions::assert_impl_all;
 use thiserror::Error;
 
@@ -7,11 +8,7 @@ use crate::{
 	consts::{SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC},
 	io::IoTarget,
 	pages::HeaderPage,
-	utils::{
-		byte_order::ByteOrder,
-		byte_view::{AlignedBytes, ByteView},
-		units::display_size,
-	},
+	utils::{byte_order::ByteOrder, units::display_size},
 };
 
 use super::lock::PageLocker;
@@ -72,8 +69,7 @@ assert_impl_all!(SegmentFile<File>: Send, Sync);
 
 impl<T: IoTarget> SegmentFile<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
-		let mut header_buf: AlignedBytes<14> = Default::default();
-		let header = HeaderPage::from_bytes_mut(header_buf.as_mut());
+		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
 		*header = HeaderPage {
 			magic: SEGMENT_MAGIC,
 			format_version: SEGMENT_FORMAT_VERSION,
@@ -83,19 +79,18 @@ impl<T: IoTarget> SegmentFile<T> {
 			free_pages: 0,
 			freelist_trunk: None,
 		};
-		if target.write_at(header_buf.as_ref(), 0)? != header_buf.len() {
+		if target.write_at(header.as_bytes(), 0)? != header.size() {
 			return Err(InitError::IncompleteWrite);
 		}
 		Ok(())
 	}
 
 	pub fn load(target: T, params: LoadParams) -> Result<Self, LoadError> {
-		let mut buf: AlignedBytes<14> = Default::default();
-		let bytes_read = target.read_at(buf.as_mut(), 0)?;
-		if bytes_read != buf.len() {
+		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
+		let bytes_read = target.read_at(header.as_bytes_mut(), 0)?;
+		if bytes_read != header.size() {
 			return Err(LoadError::CorruptedHeader);
 		}
-		let header = HeaderPage::from_bytes(buf.as_ref());
 		if header.magic != SEGMENT_MAGIC {
 			return Err(LoadError::NotASegmentFile);
 		}
@@ -156,6 +151,8 @@ impl<T: IoTarget> SegmentFile<T> {
 #[cfg(test)]
 mod tests {
 	use std::{assert_matches::assert_matches, iter};
+
+	use byte_view::ByteView;
 
 	use crate::utils::{byte_view::AlignedBuffer, units::KiB};
 

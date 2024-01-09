@@ -1,12 +1,12 @@
 use std::{mem, num::NonZeroU16, sync::Arc};
 
+use byte_view::ByteView;
 use parking_lot::{lock_api::RawMutex as _, RawMutex};
 use static_assertions::assert_impl_all;
 
 use crate::{
 	index::PageId,
-	pages::{FreelistPage, FreelistPageHeader, HeaderPage},
-	utils::byte_view::ByteView,
+	pages::{FreelistPage, HeaderPage},
 };
 
 use super::{err::Error, rw::PageRwManager};
@@ -53,7 +53,7 @@ impl SegmentAllocManager {
 		if let Some(trunk_page_num) = trunk_page_num {
 			let trunk_page_bytes = self.rw_mgr.read_page(self.page_id(trunk_page_num.get()))?;
 			let trunk_page = FreelistPage::from_bytes(&trunk_page_bytes);
-			let has_free_space = trunk_page.header.length < trunk_page.items.len() as u16;
+			let has_free_space = trunk_page.length < trunk_page.items.len() as u16;
 			mem::drop(trunk_page_bytes);
 			if has_free_space {
 				let mut trunk_page_bytes_mut = self
@@ -61,17 +61,15 @@ impl SegmentAllocManager {
 					.write_page(tid, self.page_id(trunk_page_num.get()))?;
 
 				let trunk_page = FreelistPage::from_bytes_mut(&mut trunk_page_bytes_mut);
-				trunk_page.items[trunk_page.header.length as usize] = Some(page_num);
-				trunk_page.header.length += 1;
+				trunk_page.items[trunk_page.length as usize] = Some(page_num);
+				trunk_page.length += 1;
 			}
 		};
 
 		let mut new_trunk_bytes = self.rw_mgr.write_page(tid, self.page_id(page_num.get()))?;
 		let new_trunk = FreelistPage::from_bytes_mut(&mut new_trunk_bytes);
-		new_trunk.header = FreelistPageHeader {
-			next: trunk_page_num,
-			length: 0,
-		};
+		new_trunk.next = trunk_page_num;
+		new_trunk.length = 0;
 		new_trunk.items.fill(None);
 		mem::drop(new_trunk_bytes);
 
@@ -115,14 +113,14 @@ impl SegmentAllocManager {
 		let trunk_page_bytes = self.rw_mgr.read_page(self.page_id(trunk_page_num.get()))?;
 		let trunk_page = FreelistPage::from_bytes(&trunk_page_bytes);
 
-		if trunk_page.header.length == 0 {
-			let new_trunk = trunk_page.header.next;
+		if trunk_page.length == 0 {
+			let new_trunk = trunk_page.next;
 			mem::drop(trunk_page_bytes);
 			self.set_freelist_trunk(tid, new_trunk)?;
 			return Ok(Some(trunk_page_num));
 		}
 
-		let last_free = trunk_page.header.length as usize - 1;
+		let last_free = trunk_page.length as usize - 1;
 		let Some(popped_page) = trunk_page.items[last_free] else {
 			return Err(Error::CorruptedSegment(self.segment_num));
 		};
@@ -133,7 +131,7 @@ impl SegmentAllocManager {
 			.write_page(tid, self.page_id(trunk_page_num.get()))?;
 
 		let trunk_page = FreelistPage::from_bytes_mut(&mut trunk_page_bytes_mut);
-		trunk_page.header.length -= 1;
+		trunk_page.length -= 1;
 		trunk_page.items[last_free] = None;
 		mem::drop(trunk_page_bytes_mut);
 

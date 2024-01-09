@@ -1,8 +1,9 @@
 use std::{
 	io::{self},
-	mem::size_of,
+	ops::{Deref, DerefMut},
 };
 
+use byte_view::{ByteView, ViewBuf};
 use thiserror::Error;
 
 use crate::{
@@ -11,10 +12,7 @@ use crate::{
 		META_MAGIC, PAGE_SIZE_RANGE,
 	},
 	io::IoTarget,
-	utils::{
-		byte_order::ByteOrder,
-		byte_view::{AlignedBytes, ByteView},
-	},
+	utils::byte_order::ByteOrder,
 };
 
 #[derive(Debug, Error)]
@@ -66,21 +64,20 @@ impl Default for InitParams {
  */
 
 pub struct StorageMetaFile<F: IoTarget> {
-	buf: Box<AlignedBytes<12>>,
+	meta: ViewBuf<StorageMeta>,
 	file: F,
 }
 
 impl<F: IoTarget> StorageMetaFile<F> {
 	pub fn load(file: F) -> Result<Self, LoadError> {
-		let mut buf: [u8; size_of::<StorageMeta>()] = Default::default();
-		if file.read_at(&mut buf, 0)? != buf.len() {
+		let mut meta_data: ViewBuf<StorageMeta> = ViewBuf::new();
+		if file.read_at(meta_data.as_bytes_mut(), 0)? != meta_data.size() {
 			return Err(LoadError::NotAMetaFile);
 		}
-		let meta_file = Self {
-			buf: Box::new(AlignedBytes::from(buf)),
+		let meta = Self {
+			meta: meta_data,
 			file,
 		};
-		let meta = meta_file.get();
 		if meta.magic != META_MAGIC {
 			return Err(LoadError::NotAMetaFile);
 		}
@@ -94,15 +91,14 @@ impl<F: IoTarget> StorageMetaFile<F> {
 			return Err(LoadError::ByteOrderMismatch(byte_order));
 		}
 		validate_page_size(meta.page_size())?;
-		Ok(meta_file)
+		Ok(meta)
 	}
 
 	pub fn init(file: &mut F, params: InitParams) -> Result<(), InitError> {
 		validate_page_size(params.page_size)?;
 		let page_size_exponent = params.page_size.ilog2() as u8;
 
-		let mut buf: AlignedBytes<12> = Default::default();
-		let meta = StorageMeta::from_bytes_mut(buf.as_mut());
+		let mut meta: ViewBuf<StorageMeta> = ViewBuf::new();
 		*meta = StorageMeta {
 			magic: META_MAGIC,
 			format_version: META_FORMAT_VERSION,
@@ -112,28 +108,33 @@ impl<F: IoTarget> StorageMetaFile<F> {
 		};
 
 		file.set_len(0)?;
-		file.write_at(buf.as_ref(), 0)?;
+		file.write_at(meta.as_bytes(), 0)?;
 
 		Ok(())
-	}
-
-	#[inline]
-	pub fn get(&self) -> &StorageMeta {
-		StorageMeta::from_bytes(&**self.buf)
-	}
-
-	#[inline]
-	pub fn get_mut(&mut self) -> &mut StorageMeta {
-		StorageMeta::from_bytes_mut(&mut **self.buf)
 	}
 
 	pub fn flush(&mut self) -> Result<(), io::Error> {
 		self.file.set_len(0)?;
-		self.file.write_at(&**self.buf, 0)?;
+		self.file.write_at(self.meta.as_bytes(), 0)?;
 		Ok(())
 	}
 }
 
+impl<T: IoTarget> Deref for StorageMetaFile<T> {
+	type Target = StorageMeta;
+
+	fn deref(&self) -> &Self::Target {
+		&self.meta
+	}
+}
+
+impl<T: IoTarget> DerefMut for StorageMetaFile<T> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.meta
+	}
+}
+
+#[derive(ByteView)]
 #[repr(C)]
 pub struct StorageMeta {
 	pub magic: [u8; 4],
@@ -152,11 +153,10 @@ impl StorageMeta {
 	}
 }
 
-// Safety: No fields in StorageMeta have internal invariants
-unsafe impl ByteView for StorageMeta {}
-
 #[cfg(test)]
 mod tests {
+	use std::mem::size_of;
+
 	use crate::utils::{byte_view::AlignedBuffer, units::KiB};
 
 	use super::*;
@@ -171,8 +171,7 @@ mod tests {
 		data[7] = 0;
 		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
-		let meta_file = StorageMetaFile::load(data).unwrap();
-		let meta = meta_file.get();
+		let meta = StorageMetaFile::load(data).unwrap();
 		assert_eq!(meta.format_version, 1);
 		assert_eq!(meta.byte_order, ByteOrder::NATIVE as u8);
 		assert_eq!(meta.page_size_exponent, 14);
@@ -190,8 +189,7 @@ mod tests {
 		data[7] = 0;
 		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
-		let meta_file = StorageMetaFile::load(data).unwrap();
-		let meta = meta_file.get();
+		let meta = StorageMetaFile::load(data).unwrap();
 		assert_eq!(meta.page_size(), 32 * KiB as u16); // Should be the maximum
 	}
 
@@ -205,14 +203,13 @@ mod tests {
 		data[7] = 0;
 		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
-		let mut meta_file = StorageMetaFile::load(data).unwrap();
-		let meta = meta_file.get_mut();
+		let mut meta = StorageMetaFile::load(data).unwrap();
 		meta.segment_num_limit = 69;
 
-		assert_eq!(meta_file.file[8..12], 420_u32.to_ne_bytes());
+		assert_eq!(meta.file[8..12], 420_u32.to_ne_bytes());
 
-		meta_file.flush().unwrap();
+		meta.flush().unwrap();
 
-		assert_eq!(meta_file.file[8..12], 69_u32.to_ne_bytes());
+		assert_eq!(meta.file[8..12], 69_u32.to_ne_bytes());
 	}
 }

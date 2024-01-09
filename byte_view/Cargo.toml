@@ -1,0 +1,12 @@
+[package]
+name = "byte_view"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["derive"]
+derive = ["dep:byte_view_macros"]
+
+[dependencies]
+byte_view_macros = { path = "../byte_view_macros", optional = true }
+thiserror = "1.0.56"
