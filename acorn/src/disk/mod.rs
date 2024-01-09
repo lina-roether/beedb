@@ -1,6 +1,6 @@
 use std::{
 	fs::File,
-	io, iter,
+	io,
 	path::{Path, PathBuf},
 	usize,
 };
@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use static_assertions::assert_impl_all;
 use thiserror::Error;
 
-use crate::index::PageId;
+use crate::{index::PageId, utils::array_set::ArrayMap};
 
 use self::{dir::StorageDir, meta::StorageMetaFile, segment::SegmentFile};
 
@@ -120,7 +120,7 @@ impl DiskStorage {
 			dir,
 			state: RwLock::new(DiskStorageState {
 				meta,
-				segment_files: Vec::new(),
+				segment_files: ArrayMap::new(),
 			}),
 		};
 		disk_storage.load_all_segment_files()?;
@@ -217,7 +217,7 @@ impl DiskStorage {
 
 struct DiskStorageState {
 	meta: StorageMetaFile<File>,
-	segment_files: Vec<Option<SegmentFile<File>>>,
+	segment_files: ArrayMap<SegmentFile<File>>,
 }
 
 impl DiskStorageState {
@@ -230,7 +230,7 @@ impl DiskStorageState {
 	}
 
 	fn get_loaded_segment(&self, segment_num: u32) -> Option<&SegmentFile<File>> {
-		self.segment_files.get(segment_num as usize)?.as_ref()
+		self.segment_files.get(segment_num as usize)
 	}
 
 	fn insert_loaded_segment(
@@ -238,16 +238,11 @@ impl DiskStorageState {
 		segment_num: u32,
 		segment: SegmentFile<File>,
 	) -> Result<(), Error> {
-		if self.segment_files.len() <= segment_num as usize {
-			let extend_by = self.segment_files.len() - segment_num as usize + 1;
-			self.segment_files
-				.extend(iter::repeat_with(|| None).take(extend_by));
-		}
 		if segment_num >= self.meta.get().segment_num_limit {
 			self.meta.get_mut().segment_num_limit = segment_num + 1;
 			self.flush_meta()?;
 		}
-		self.segment_files[segment_num as usize] = Some(segment);
+		self.segment_files.insert(segment_num as usize, segment);
 		Ok(())
 	}
 }
