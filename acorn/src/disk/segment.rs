@@ -72,7 +72,7 @@ assert_impl_all!(SegmentFile<File>: Send, Sync);
 
 impl<T: IoTarget> SegmentFile<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {
-		let mut header_buf: AlignedBytes<12> = Default::default();
+		let mut header_buf: AlignedBytes<14> = Default::default();
 		let header = HeaderPage::from_bytes_mut(header_buf.as_mut());
 		*header = HeaderPage {
 			magic: SEGMENT_MAGIC,
@@ -80,6 +80,7 @@ impl<T: IoTarget> SegmentFile<T> {
 			page_size: params.page_size,
 			byte_order: ByteOrder::NATIVE as u8,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 		if target.write_at(header_buf.as_ref(), 0)? != header_buf.len() {
@@ -89,7 +90,7 @@ impl<T: IoTarget> SegmentFile<T> {
 	}
 
 	pub fn load(target: T, params: LoadParams) -> Result<Self, LoadError> {
-		let mut buf: AlignedBytes<12> = Default::default();
+		let mut buf: AlignedBytes<14> = Default::default();
 		let bytes_read = target.read_at(buf.as_mut(), 0)?;
 		if bytes_read != buf.len() {
 			return Err(LoadError::CorruptedHeader);
@@ -191,6 +192,7 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -232,6 +234,7 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -258,6 +261,7 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -286,6 +290,7 @@ mod tests {
 			byte_order: 3,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -317,6 +322,7 @@ mod tests {
 			} as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -345,6 +351,7 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 15 * KiB as u16,
 			num_pages: 1,
+			free_pages: 0,
 			freelist_trunk: None,
 		};
 
