@@ -9,11 +9,12 @@ use thiserror::Error;
 use crate::ByteView;
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum BufError {
 	#[error("Requested buffer size {size} is too small; type requires at least {min}")]
 	TooSmall { size: usize, min: usize },
 }
 
+#[derive(Debug)]
 pub struct ViewBuf<T: ?Sized + ByteView> {
 	size: usize,
 	bytes: NonNull<u8>,
@@ -31,9 +32,9 @@ impl<T: ?Sized + ByteView> ViewBuf<T> {
 		unsafe { Self::new_with_size_unchecked(T::MIN_SIZE) }
 	}
 
-	pub fn new_with_size(size: usize) -> Result<Self, Error> {
+	pub fn new_with_size(size: usize) -> Result<Self, BufError> {
 		if size < T::MIN_SIZE {
-			return Err(Error::TooSmall {
+			return Err(BufError::TooSmall {
 				size,
 				min: T::MIN_SIZE,
 			});
@@ -58,9 +59,9 @@ impl<T: ?Sized + ByteView> ViewBuf<T> {
 		}
 	}
 
-	pub fn resize(&mut self, new_size: usize) -> Result<(), Error> {
+	pub fn resize(&mut self, new_size: usize) -> Result<(), BufError> {
 		if new_size < T::MIN_SIZE {
-			return Err(Error::TooSmall {
+			return Err(BufError::TooSmall {
 				size: new_size,
 				min: T::MIN_SIZE,
 			});

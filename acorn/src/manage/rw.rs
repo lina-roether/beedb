@@ -3,6 +3,7 @@ use std::{
 	sync::Arc,
 };
 
+use byte_view::{ByteView, Bytes};
 use static_assertions::assert_impl_all;
 
 use crate::{
@@ -30,15 +31,22 @@ impl PageRwManager {
 		}
 	}
 
-	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, Error> {
+	pub fn read_page<T: ?Sized + ByteView>(
+		&self,
+		page_id: PageId,
+	) -> Result<PageReadGuard<T>, Error> {
 		Ok(self.cache.read_page(page_id)?)
 	}
 
-	pub fn write_page(&self, tid: u64, page_id: PageId) -> Result<PageWriteHandle, Error> {
+	pub fn write_page<T: ?Sized + ByteView>(
+		&self,
+		tid: u64,
+		page_id: PageId,
+	) -> Result<PageWriteHandle<T>, Error> {
 		self.transaction_mgr.assert_valid_tid(tid)?;
-		let page = self.cache.write_page(page_id)?;
+		let page = self.cache.write_page::<T>(page_id)?;
 		let mut before: Vec<u8> = Vec::with_capacity(page.len());
-		page.clone_into(&mut before);
+		page.as_bytes().clone_into(&mut before);
 
 		Ok(PageWriteHandle {
 			tid,
@@ -50,29 +58,29 @@ impl PageRwManager {
 	}
 }
 
-pub struct PageWriteHandle<'a> {
+pub struct PageWriteHandle<'a, T: ?Sized + ByteView> {
 	tid: u64,
 	page_id: PageId,
 	before: Box<[u8]>,
 	transaction_mgr: &'a TransactionManager,
-	guard: PageWriteGuard<'a>,
+	guard: PageWriteGuard<'a, T>,
 }
 
-impl<'a> Drop for PageWriteHandle<'a> {
+impl<'a, T: ?Sized + ByteView> Drop for PageWriteHandle<'a, T> {
 	fn drop(&mut self) {
 		self.transaction_mgr
 			.operation(
 				self.tid,
 				Operation::Write(self.page_id),
 				&self.before,
-				&self.guard,
+				self.guard.as_bytes(),
 			)
 			.unwrap();
 	}
 }
 
-impl<'a> Deref for PageWriteHandle<'a> {
-	type Target = [u8];
+impl<'a, T: ?Sized + ByteView> Deref for PageWriteHandle<'a, T> {
+	type Target = Bytes<T>;
 
 	#[inline]
 	fn deref(&self) -> &Self::Target {
@@ -80,23 +88,23 @@ impl<'a> Deref for PageWriteHandle<'a> {
 	}
 }
 
-impl<'a> DerefMut for PageWriteHandle<'a> {
+impl<'a, T: ?Sized + ByteView> DerefMut for PageWriteHandle<'a, T> {
 	#[inline]
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		&mut self.guard
 	}
 }
 
-impl<'a> AsRef<[u8]> for PageWriteHandle<'a> {
+impl<'a, T: ?Sized + ByteView> AsRef<Bytes<T>> for PageWriteHandle<'a, T> {
 	#[inline]
-	fn as_ref(&self) -> &[u8] {
+	fn as_ref(&self) -> &Bytes<T> {
 		self
 	}
 }
 
-impl<'a> AsMut<[u8]> for PageWriteHandle<'a> {
+impl<'a, T: ?Sized + ByteView> AsMut<Bytes<T>> for PageWriteHandle<'a, T> {
 	#[inline]
-	fn as_mut(&mut self) -> &mut [u8] {
+	fn as_mut(&mut self) -> &mut Bytes<T> {
 		self
 	}
 }

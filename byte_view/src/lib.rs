@@ -2,10 +2,12 @@
 #![feature(ptr_metadata)]
 
 mod buf;
+mod bytes;
 mod transmute;
 mod view;
 
 pub use buf::*;
+pub use bytes::*;
 pub use transmute::*;
 pub use view::*;
 
