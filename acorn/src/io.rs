@@ -6,7 +6,7 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 
-use crate::utils::byte_view::AlignedBuffer;
+use crate::utils::aligned_buf::AlignedBuffer;
 
 pub trait IoTarget {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;

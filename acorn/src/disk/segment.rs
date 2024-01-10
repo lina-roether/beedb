@@ -154,7 +154,7 @@ mod tests {
 
 	use byte_view::ByteView;
 
-	use crate::utils::{byte_view::AlignedBuffer, units::KiB};
+	use crate::utils::{aligned_buf::AlignedBuffer, units::KiB};
 
 	use super::*;
 

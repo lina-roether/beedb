@@ -9,7 +9,7 @@ use std::{
 use parking_lot::{lock_api::RawRwLock as _, Mutex, RawRwLock};
 use static_assertions::assert_impl_all;
 
-use crate::utils::byte_view::AlignedBuffer;
+use crate::utils::aligned_buf::AlignedBuffer;
 
 pub struct PageReadGuard<'a> {
 	lock: &'a RawRwLock,
