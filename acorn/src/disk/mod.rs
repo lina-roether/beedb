@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use static_assertions::assert_impl_all;
 use thiserror::Error;
 
-use crate::{index::PageId, utils::array_set::ArrayMap};
+use crate::{index::PageId, utils::array_map::ArrayMap};
 
 use self::{dir::StorageDir, meta::StorageMetaFile, segment::SegmentFile};
 
@@ -83,7 +83,7 @@ pub enum Error {
 pub struct DiskStorage {
 	page_size: u16,
 	dir: StorageDir,
-	state: RwLock<DiskStorageState>,
+	state: RwLock<State>,
 }
 
 assert_impl_all!(DiskStorage: Send, Sync);
@@ -118,7 +118,7 @@ impl DiskStorage {
 		let disk_storage = DiskStorage {
 			page_size: meta.page_size(),
 			dir,
-			state: RwLock::new(DiskStorageState {
+			state: RwLock::new(State {
 				meta,
 				segment_files: ArrayMap::new(),
 			}),
@@ -130,6 +130,10 @@ impl DiskStorage {
 	#[inline]
 	pub fn page_size(&self) -> u16 {
 		self.page_size
+	}
+
+	pub fn segments(&self) -> Box<[u32]> {
+		self.state.read().iter_loaded_segments().collect()
 	}
 
 	pub fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error> {
@@ -215,12 +219,16 @@ impl DiskStorage {
 	}
 }
 
-struct DiskStorageState {
+struct State {
 	meta: StorageMetaFile<File>,
 	segment_files: ArrayMap<SegmentFile<File>>,
 }
 
-impl DiskStorageState {
+impl State {
+	fn iter_loaded_segments(&self) -> impl Iterator<Item = u32> + '_ {
+		self.segment_files.iter().map(|(k, _)| k as u32)
+	}
+
 	fn flush_meta(&mut self) -> Result<(), Error> {
 		self.meta.flush().map_err(Error::MetaWrite)
 	}
