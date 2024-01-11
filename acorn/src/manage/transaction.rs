@@ -10,6 +10,7 @@ use crate::index::PageId;
 
 use super::err::Error;
 
+#[derive(Debug)]
 #[repr(u8)]
 pub enum Operation {
 	Begin,
@@ -80,6 +81,7 @@ impl TransactionManager {
 		after: &[u8],
 	) -> Result<(), Error> {
 		let mut transaction_table = self.transaction_table.lock();
+		dbg!((tid, &operation, &transaction_table));
 		self.operation_raw(&mut transaction_table, tid, operation, before, after)
 	}
 
@@ -108,6 +110,7 @@ impl TransactionManager {
 	}
 }
 
+#[derive(Debug)]
 struct TransactionTableRow {
 	last_seq: u64,
 	tid: u64,

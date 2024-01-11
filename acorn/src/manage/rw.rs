@@ -17,14 +17,14 @@ use super::{
 };
 
 pub struct PageRwManager {
-	cache: PageCache,
+	cache: Arc<PageCache>,
 	transaction_mgr: Arc<TransactionManager>,
 }
 
 assert_impl_all!(PageRwManager: Send, Sync);
 
 impl PageRwManager {
-	pub fn new(cache: PageCache, transaction_mgr: Arc<TransactionManager>) -> Self {
+	pub fn new(cache: Arc<PageCache>, transaction_mgr: Arc<TransactionManager>) -> Self {
 		Self {
 			cache,
 			transaction_mgr,
@@ -106,5 +106,56 @@ impl<'a, T: ?Sized + ByteView> AsMut<Bytes<T>> for PageWriteHandle<'a, T> {
 	#[inline]
 	fn as_mut(&mut self) -> &mut Bytes<T> {
 		self
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::mem;
+
+	use tempfile::tempdir;
+
+	use crate::disk::{self, DiskStorage};
+
+	use super::*;
+
+	#[test]
+	fn read_page() {
+		let dir = tempdir().unwrap();
+		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let cache = Arc::new(PageCache::new(storage, 100));
+		let transaction_mgr = Arc::new(TransactionManager::new());
+		let rw_mgr = PageRwManager::new(Arc::clone(&cache), transaction_mgr);
+
+		let mut page = cache.write_page::<[u8]>(PageId::new(69, 420)).unwrap();
+		page.fill(25);
+		mem::drop(page);
+
+		let page = rw_mgr.read_page::<[u8]>(PageId::new(69, 420)).unwrap();
+		assert!(page.as_bytes().iter().all(|b| *b == 25));
+	}
+
+	#[test]
+	fn write_page() {
+		let dir = tempdir().unwrap();
+		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let cache = Arc::new(PageCache::new(storage, 100));
+		let transaction_mgr = Arc::new(TransactionManager::new());
+		let rw_mgr = PageRwManager::new(Arc::clone(&cache), Arc::clone(&transaction_mgr));
+
+		let tid = transaction_mgr.begin().unwrap();
+
+		let mut page = rw_mgr
+			.write_page::<[u8]>(tid, PageId::new(69, 420))
+			.unwrap();
+		page.fill(25);
+		mem::drop(page);
+
+		transaction_mgr.commit(tid).unwrap();
+
+		let result_page = cache.read_page::<[u8]>(PageId::new(69, 420)).unwrap();
+		assert!(result_page.as_bytes().iter().all(|b| *b == 25));
 	}
 }

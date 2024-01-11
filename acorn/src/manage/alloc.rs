@@ -1,25 +1,32 @@
+use std::sync::Arc;
+
 use parking_lot::RwLock;
 
-use crate::utils::array_map::ArrayMap;
+use crate::{index::PageId, utils::array_map::ArrayMap};
 
-use super::segment_alloc::SegmentAllocManager;
+use super::{rw::PageRwManager, segment_alloc::SegmentAllocManager};
 
 pub struct AllocManager {
-	state: RwLock<State>,
+	segments: RwLock<ArrayMap<SegmentAllocManager>>,
+	free_stack: RwLock<Vec<u32>>,
+	rw_mgr: Arc<PageRwManager>,
 }
 
 impl AllocManager {
-	pub fn new() -> Self {
+	pub fn new(rw_mgr: Arc<PageRwManager>) -> Self {
 		Self {
-			state: RwLock::new(State {
-				segments: ArrayMap::new(),
-				free_stack: Vec::new(),
-			}),
+			segments: RwLock::new(ArrayMap::new()),
+			free_stack: RwLock::new(Vec::new()),
+			rw_mgr,
 		}
 	}
-}
 
-struct State {
-	segments: ArrayMap<SegmentAllocManager>,
-	free_stack: Vec<u32>,
+	pub fn alloc_page(&self) -> PageId {
+		todo!()
+	}
+
+	fn peek_free_stack(&self) -> Option<u32> {
+		let free_stack = self.free_stack.read();
+		free_stack.last().copied()
+	}
 }
