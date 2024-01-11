@@ -2,7 +2,7 @@ use std::num::NonZeroU16;
 
 use byte_view::ByteView;
 
-#[derive(ByteView)]
+#[derive(Debug, ByteView)]
 #[dynamically_sized]
 #[repr(C)]
 pub struct FreelistPage {

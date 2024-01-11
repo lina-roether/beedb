@@ -81,7 +81,6 @@ impl TransactionManager {
 		after: &[u8],
 	) -> Result<(), Error> {
 		let mut transaction_table = self.transaction_table.lock();
-		dbg!((tid, &operation, &transaction_table));
 		self.operation_raw(&mut transaction_table, tid, operation, before, after)
 	}
 

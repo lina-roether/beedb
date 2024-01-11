@@ -137,11 +137,12 @@ impl DiskStorage {
 	}
 
 	pub fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error> {
+		self.ensure_segment_exists(page_id.segment_num)?;
+
 		let state = self.state.read();
-		let Some(segment_file) = state.get_loaded_segment(page_id.segment_num) else {
-			buf.fill(0);
-			return Ok(());
-		};
+		let segment_file = state
+			.get_loaded_segment(page_id.segment_num)
+			.expect("Segment should have been opened for reading");
 		segment_file
 			.read_page(buf, page_id.page_num)
 			.map_err(|err| Error::PageRead(page_id, err))?;
@@ -154,8 +155,7 @@ impl DiskStorage {
 		let state = self.state.read();
 		let segment_file = state
 			.get_loaded_segment(page_id.segment_num)
-			.expect("This segment file should be open, but apparently isn't");
-
+			.expect("Segment should have been opened for writing");
 		segment_file
 			.write_page(buf, page_id.page_num)
 			.map_err(|err| Error::PageWrite(page_id, err))?;
@@ -267,6 +267,7 @@ mod tests {
 	use tempfile::tempdir;
 
 	use crate::{
+		consts::SEGMENT_MAGIC,
 		disk::meta::StorageMeta,
 		utils::{byte_order::ByteOrder, units::KiB},
 	};
@@ -396,8 +397,29 @@ mod tests {
 			.take(storage.page_size().into())
 			.collect();
 		storage.read_page(&mut dest_buf, page_id).unwrap();
+	}
 
-		assert!(dest_buf.iter().all(|b| *b == 0));
+	#[test]
+	#[cfg_attr(miri, ignore)]
+	fn segment_is_initialized_on_read() {
+		let dir = tempdir().unwrap();
+		let mut meta: ViewBuf<StorageMeta> = ViewBuf::new();
+		meta.magic = *b"ACNM";
+		meta.format_version = 1;
+		meta.byte_order = ByteOrder::NATIVE as u8;
+		meta.page_size_exponent = 14;
+		meta.segment_num_limit = 0;
+		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
+
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let page_id = PageId::new(0, 0);
+
+		let mut dest_buf: Box<[u8]> = iter::repeat(0xaa)
+			.take(storage.page_size().into())
+			.collect();
+		storage.read_page(&mut dest_buf, page_id).unwrap();
+
+		assert!(dest_buf.starts_with(&SEGMENT_MAGIC));
 	}
 
 	#[test]

@@ -1,6 +1,5 @@
 use std::{mem, num::NonZeroU16, sync::Arc};
 
-use parking_lot::{lock_api::RawMutex as _, RawMutex};
 use static_assertions::assert_impl_all;
 
 use crate::{
@@ -17,7 +16,6 @@ use super::{
 pub struct SegmentAllocManager {
 	segment_num: u32,
 	rw_mgr: Arc<PageRwManager>,
-	alloc_lock: RawMutex,
 }
 
 assert_impl_all!(SegmentAllocManager: Send, Sync);
@@ -29,7 +27,6 @@ impl SegmentAllocManager {
 		Self {
 			segment_num,
 			rw_mgr,
-			alloc_lock: RawMutex::INIT,
 		}
 	}
 
@@ -39,21 +36,20 @@ impl SegmentAllocManager {
 	}
 
 	pub fn alloc_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
-		if let Some(free_page) = self.pop_free_page(tid)? {
+		let mut header_page = self.write_header_page(tid)?;
+		if let Some(free_page) = self.pop_free_page(tid, &mut header_page)? {
 			return Ok(Some(free_page));
 		}
-		if let Some(new_page) = self.create_new_page(tid)? {
+		if let Some(new_page) = self.create_new_page(&mut header_page)? {
 			return Ok(Some(new_page));
 		}
 		Ok(None)
 	}
 
 	pub fn free_page(&self, tid: u64, page_num: NonZeroU16) -> Result<(), Error> {
-		self.alloc_lock.lock();
+		let mut header_page = self.write_header_page(tid)?;
 
-		let trunk_page_num = self.freelist_trunk()?;
-
-		if let Some(trunk_page_num) = trunk_page_num {
+		if let Some(trunk_page_num) = header_page.freelist_trunk {
 			let trunk_page = self.read_freelist_page(trunk_page_num)?;
 			let has_free_space = trunk_page.length < trunk_page.items.len() as u16;
 			mem::drop(trunk_page);
@@ -63,54 +59,50 @@ impl SegmentAllocManager {
 				let index = trunk_page.length as usize;
 				trunk_page.items[index] = Some(page_num);
 				trunk_page.length += 1;
+				return Ok(());
 			}
 		};
 
 		let mut new_trunk = self.write_freelist_page(tid, page_num)?;
-		new_trunk.next = trunk_page_num;
+		new_trunk.next = header_page.freelist_trunk;
 		new_trunk.length = 0;
 		new_trunk.items.fill(None);
-		mem::drop(new_trunk);
 
-		self.set_freelist_trunk(tid, Some(page_num))?;
+		header_page.freelist_trunk = Some(page_num);
 
-		unsafe { self.alloc_lock.unlock() }
 		Ok(())
 	}
 
-	fn create_new_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
-		self.alloc_lock.lock();
-
-		let header_page = self.read_header_page()?;
+	fn create_new_page(
+		&self,
+		header_page: &mut PageWriteHandle<HeaderPage>,
+	) -> Result<Option<NonZeroU16>, Error> {
 		if header_page.num_pages == Self::MAX_NUM_PAGES {
 			return Ok(None);
 		}
+
 		let Some(new_page) = NonZeroU16::new(header_page.num_pages) else {
 			return Err(Error::CorruptedSegment(self.segment_num));
 		};
-		mem::drop(header_page);
 
-		let mut header_page = self.write_header_page(tid)?;
 		header_page.num_pages += 1;
-		mem::drop(header_page);
-
-		unsafe { self.alloc_lock.unlock() }
 		Ok(Some(new_page))
 	}
 
-	fn pop_free_page(&self, tid: u64) -> Result<Option<NonZeroU16>, Error> {
-		self.alloc_lock.lock();
-
-		let Some(trunk_page_num) = self.freelist_trunk()? else {
+	fn pop_free_page(
+		&self,
+		tid: u64,
+		header_page: &mut PageWriteHandle<HeaderPage>,
+	) -> Result<Option<NonZeroU16>, Error> {
+		let Some(trunk_page_num) = header_page.freelist_trunk else {
 			return Ok(None);
 		};
 
-		let trunk_page = self.read_freelist_page(trunk_page_num)?;
+		let mut trunk_page = self.write_freelist_page(tid, trunk_page_num)?;
 
 		if trunk_page.length == 0 {
 			let new_trunk = trunk_page.next;
-			mem::drop(trunk_page);
-			self.set_freelist_trunk(tid, new_trunk)?;
+			header_page.freelist_trunk = new_trunk;
 			return Ok(Some(trunk_page_num));
 		}
 
@@ -118,24 +110,11 @@ impl SegmentAllocManager {
 		let Some(popped_page) = trunk_page.items[last_free] else {
 			return Err(Error::CorruptedSegment(self.segment_num));
 		};
-		mem::drop(trunk_page);
 
-		let mut trunk_page = self.write_freelist_page(tid, trunk_page_num)?;
 		trunk_page.length -= 1;
 		trunk_page.items[last_free] = None;
-		mem::drop(trunk_page);
 
-		unsafe { self.alloc_lock.unlock() }
 		Ok(Some(popped_page))
-	}
-
-	fn set_freelist_trunk(&self, tid: u64, trunk: Option<NonZeroU16>) -> Result<(), Error> {
-		self.write_header_page(tid)?.freelist_trunk = trunk;
-		Ok(())
-	}
-
-	fn freelist_trunk(&self) -> Result<Option<NonZeroU16>, Error> {
-		Ok(self.read_header_page()?.freelist_trunk)
 	}
 
 	fn read_header_page(&self) -> Result<PageReadGuard<HeaderPage>, Error> {
@@ -169,5 +148,62 @@ impl SegmentAllocManager {
 	#[inline]
 	fn page_id(&self, page_num: u16) -> PageId {
 		PageId::new(self.segment_num, page_num)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use tempfile::tempdir;
+
+	use crate::{
+		cache::PageCache,
+		disk::{self, DiskStorage},
+		manage::transaction::TransactionManager,
+	};
+
+	use super::*;
+
+	#[test]
+	#[cfg_attr(miri, ignore)]
+	fn alloc_page() {
+		let dir = tempdir().unwrap();
+		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let cache = Arc::new(PageCache::new(storage, 100));
+		let transaction_mgr = Arc::new(TransactionManager::new());
+		let rw_mgr = Arc::new(PageRwManager::new(
+			Arc::clone(&cache),
+			Arc::clone(&transaction_mgr),
+		));
+		let alloc_mgr = SegmentAllocManager::new(Arc::clone(&rw_mgr), 0);
+
+		let tid = transaction_mgr.begin().unwrap();
+		let page = alloc_mgr.alloc_page(tid).unwrap().unwrap();
+		transaction_mgr.commit(tid).unwrap();
+
+		assert_eq!(page, NonZeroU16::new(1).unwrap());
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore)]
+	fn alloc_and_free_page() {
+		let dir = tempdir().unwrap();
+		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let cache = Arc::new(PageCache::new(storage, 100));
+		let transaction_mgr = Arc::new(TransactionManager::new());
+		let rw_mgr = Arc::new(PageRwManager::new(
+			Arc::clone(&cache),
+			Arc::clone(&transaction_mgr),
+		));
+		let alloc_mgr = SegmentAllocManager::new(Arc::clone(&rw_mgr), 0);
+
+		let tid = transaction_mgr.begin().unwrap();
+		let page = alloc_mgr.alloc_page(tid).unwrap().unwrap();
+		transaction_mgr.commit(tid).unwrap();
+
+		let tid = transaction_mgr.begin().unwrap();
+		alloc_mgr.free_page(tid, page).unwrap();
+		transaction_mgr.commit(tid).unwrap();
 	}
 }

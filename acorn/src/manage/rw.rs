@@ -120,6 +120,7 @@ mod tests {
 	use super::*;
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn read_page() {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
@@ -137,6 +138,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg_attr(miri, ignore)]
 	fn write_page() {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();

@@ -2,7 +2,7 @@ use std::num::NonZeroU16;
 
 use byte_view::ByteView;
 
-#[derive(ByteView)]
+#[derive(Debug, ByteView)]
 #[repr(C)]
 pub struct HeaderPage {
 	pub magic: [u8; 4],
