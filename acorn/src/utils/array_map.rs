@@ -1,4 +1,4 @@
-use std::{iter, slice};
+use std::iter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayMap<T> {
@@ -26,11 +26,11 @@ impl<T> ArrayMap<T> {
 	}
 
 	pub fn iter(&self) -> Iter<T> {
-		self.slots.iter().flatten()
+		Iter::new(&self.slots)
 	}
 
 	pub fn iter_mut(&mut self) -> IterMut<T> {
-		self.slots.iter_mut().flatten()
+		IterMut::new(&mut self.slots)
 	}
 
 	pub fn clear(&mut self) {
