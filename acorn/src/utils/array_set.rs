@@ -52,11 +52,64 @@ impl<T> Default for ArrayMap<T> {
 	}
 }
 
-pub type Iter<'a, T> = iter::Flatten<slice::Iter<'a, Option<T>>>;
-pub type IterMut<'a, T> = iter::Flatten<slice::IterMut<'a, Option<T>>>;
+pub struct Iter<'a, T> {
+	key: usize,
+	slots: &'a [Option<T>],
+}
+
+impl<'a, T> Iter<'a, T> {
+	fn new(slots: &'a [Option<T>]) -> Self {
+		Self { key: 0, slots }
+	}
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+	type Item = (usize, &'a T);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let item = loop {
+			if self.key == self.slots.len() {
+				return None;
+			}
+			if let Some(item) = self.slots[self.key].as_ref() {
+				break item;
+			}
+			self.key += 1;
+		};
+		Some((self.key, item))
+	}
+}
+
+pub struct IterMut<'a, T> {
+	key: usize,
+	slots: &'a mut [Option<T>],
+}
+
+impl<'a, T> IterMut<'a, T> {
+	fn new(slots: &'a mut [Option<T>]) -> Self {
+		Self { key: 0, slots }
+	}
+}
+
+impl<'a, T> Iterator for IterMut<'a, T> {
+	type Item = (usize, &'a mut T);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let item = loop {
+			if self.key == self.slots.len() {
+				return None;
+			}
+			if let Some(item) = self.slots[self.key].as_mut() {
+				break item;
+			}
+			self.key += 1;
+		};
+		Some((self.key, item))
+	}
+}
 
 impl<'a, T> IntoIterator for &'a ArrayMap<T> {
-	type Item = &'a T;
+	type Item = (usize, &'a T);
 	type IntoIter = Iter<'a, T>;
 
 	fn into_iter(self) -> Self::IntoIter {
@@ -65,7 +118,7 @@ impl<'a, T> IntoIterator for &'a ArrayMap<T> {
 }
 
 impl<'a, T> IntoIterator for &'a mut ArrayMap<T> {
-	type Item = &'a mut T;
+	type Item = (usize, &'a mut T);
 	type IntoIter = IterMut<'a, T>;
 
 	fn into_iter(self) -> Self::IntoIter {
