@@ -41,8 +41,10 @@ impl AllocManager {
 	}
 
 	fn alloc_search(&self, tid: u64) -> Result<PageId, Error> {
+		let mut free_stack = self.free_stack.write();
 		for segment_num in 0_u32.. {
 			if let Some(page_id) = self.try_alloc_in_segment(tid, segment_num)? {
+				free_stack.push(segment_num);
 				return Ok(page_id);
 			}
 		}
@@ -99,6 +101,7 @@ impl AllocManager {
 #[cfg(test)]
 mod tests {
 	use tempfile::tempdir;
+	use test::Bencher;
 
 	use crate::{
 		cache::PageCache,
@@ -127,6 +130,26 @@ mod tests {
 		transaction_mgr.commit(tid).unwrap();
 
 		assert_eq!(page_id, PageId::new(0, 1));
+	}
+
+	#[bench]
+	fn bench_alloc_page(b: &mut Bencher) {
+		let dir = tempdir().unwrap();
+		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let cache = Arc::new(PageCache::new(storage, 100));
+		let transaction_mgr = Arc::new(TransactionManager::new());
+		let rw_mgr = Arc::new(PageRwManager::new(
+			Arc::clone(&cache),
+			Arc::clone(&transaction_mgr),
+		));
+		let alloc_mgr = AllocManager::new(Arc::clone(&rw_mgr));
+
+		let tid = transaction_mgr.begin().unwrap();
+
+		b.iter(|| alloc_mgr.alloc_page(tid).unwrap());
+
+		transaction_mgr.commit(tid).unwrap();
 	}
 
 	#[test]

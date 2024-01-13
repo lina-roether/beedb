@@ -4,7 +4,11 @@
 #![feature(cfg_match)]
 #![feature(ptr_metadata)]
 #![feature(pointer_is_aligned)]
+#![feature(test)]
 #![allow(dead_code)]
+
+#[cfg(test)]
+extern crate test;
 
 mod cache;
 mod consts;
