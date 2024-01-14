@@ -1,6 +1,8 @@
 use std::{
+	fs::{File, OpenOptions},
 	io::{self},
 	ops::{Deref, DerefMut},
+	path::Path,
 };
 
 use byte_view::{ByteView, ViewBuf};
@@ -63,12 +65,24 @@ impl Default for InitParams {
  * TODO: Maybe this should just mmap() the file?
  */
 
-pub struct StorageMetaFile<F: IoTarget> {
+pub struct StorageMetaBuf<F: IoTarget> {
 	meta: ViewBuf<StorageMeta>,
 	file: F,
 }
 
-impl<F: IoTarget> StorageMetaFile<F> {
+impl StorageMetaBuf<File> {
+	pub fn init_file(path: impl AsRef<Path>, params: InitParams) -> Result<(), InitError> {
+		let mut file = OpenOptions::new().write(true).create(true).open(path)?;
+		Self::init(&mut file, params)
+	}
+
+	pub fn load_file(path: impl AsRef<Path>) -> Result<Self, LoadError> {
+		let file = OpenOptions::new().read(true).write(true).open(path)?;
+		Self::load(file)
+	}
+}
+
+impl<F: IoTarget> StorageMetaBuf<F> {
 	pub fn load(file: F) -> Result<Self, LoadError> {
 		let mut meta_data: ViewBuf<StorageMeta> = ViewBuf::new();
 		if file.read_at(meta_data.as_bytes_mut(), 0)? != meta_data.size() {
@@ -120,7 +134,7 @@ impl<F: IoTarget> StorageMetaFile<F> {
 	}
 }
 
-impl<T: IoTarget> Deref for StorageMetaFile<T> {
+impl<T: IoTarget> Deref for StorageMetaBuf<T> {
 	type Target = StorageMeta;
 
 	fn deref(&self) -> &Self::Target {
@@ -128,7 +142,7 @@ impl<T: IoTarget> Deref for StorageMetaFile<T> {
 	}
 }
 
-impl<T: IoTarget> DerefMut for StorageMetaFile<T> {
+impl<T: IoTarget> DerefMut for StorageMetaBuf<T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		&mut self.meta
 	}
@@ -171,7 +185,7 @@ mod tests {
 		data[7] = 0;
 		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
-		let meta = StorageMetaFile::load(data).unwrap();
+		let meta = StorageMetaBuf::load(data).unwrap();
 		assert_eq!(meta.format_version, 1);
 		assert_eq!(meta.byte_order, ByteOrder::NATIVE as u8);
 		assert_eq!(meta.page_size_exponent, 14);
@@ -189,7 +203,7 @@ mod tests {
 		data[7] = 0;
 		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
-		let meta = StorageMetaFile::load(data).unwrap();
+		let meta = StorageMetaBuf::load(data).unwrap();
 		assert_eq!(meta.page_size(), 32 * KiB as u16); // Should be the maximum
 	}
 
@@ -203,7 +217,7 @@ mod tests {
 		data[7] = 0;
 		data[8..12].copy_from_slice(&420_u32.to_ne_bytes());
 
-		let mut meta = StorageMetaFile::load(data).unwrap();
+		let mut meta = StorageMetaBuf::load(data).unwrap();
 		meta.segment_num_limit = 69;
 
 		assert_eq!(meta.file[8..12], 420_u32.to_ne_bytes());

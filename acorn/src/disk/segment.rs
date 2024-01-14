@@ -1,4 +1,9 @@
-use std::{cell::UnsafeCell, fs::File, io};
+use std::{
+	cell::UnsafeCell,
+	fs::{File, OpenOptions},
+	io,
+	path::Path,
+};
 
 use byte_view::ViewBuf;
 use static_assertions::assert_impl_all;
@@ -66,6 +71,18 @@ pub struct SegmentFile<T: IoTarget> {
 unsafe impl<T: IoTarget> Sync for SegmentFile<T> {}
 
 assert_impl_all!(SegmentFile<File>: Send, Sync);
+
+impl SegmentFile<File> {
+	pub fn init_file(path: impl AsRef<Path>, params: InitParams) -> Result<(), InitError> {
+		let mut file = OpenOptions::new().write(true).create(true).open(path)?;
+		Self::init(&mut file, params)
+	}
+
+	pub fn load_file(path: impl AsRef<Path>, params: LoadParams) -> Result<Self, LoadError> {
+		let file = OpenOptions::new().read(true).write(true).open(path)?;
+		Self::load(file, params)
+	}
+}
 
 impl<T: IoTarget> SegmentFile<T> {
 	pub fn init(target: &mut T, params: InitParams) -> Result<(), InitError> {

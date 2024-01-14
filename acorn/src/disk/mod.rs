@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{index::PageId, utils::array_map::ArrayMap};
 
-use self::{dir::StorageDir, meta::StorageMetaFile, segment::SegmentFile};
+use self::{dir::StorageDir, meta::StorageMetaBuf, segment::SegmentFile};
 
 mod dir;
 mod lock;
@@ -30,9 +30,6 @@ pub enum InitError {
 
 	#[error("The directory {} is not empty", _0.display())]
 	NotEmpty(PathBuf),
-
-	#[error("Couldn't create the storage meta file: {0}")]
-	CreateMeta(io::Error),
 
 	#[error("Failed to initialize storage meta: {0}")]
 	InitMeta(#[from] meta::InitError),
@@ -67,9 +64,6 @@ pub enum Error {
 	#[error("Failed to load segment {0}: {1}")]
 	LoadSegment(u32, segment::LoadError),
 
-	#[error("Failed to create a new segment file: {0}")]
-	CreateSegment(io::Error),
-
 	#[error("Failed to initialize new segment: {0}")]
 	InitSegment(segment::InitError),
 
@@ -100,8 +94,7 @@ impl DiskStorage {
 			return Err(InitError::NotEmpty(path.as_ref().into()));
 		}
 		let dir = StorageDir::new(path.as_ref().into());
-		let mut meta_file = dir.open_meta_file(true).map_err(InitError::CreateMeta)?;
-		StorageMetaFile::init(&mut meta_file, params)?;
+		StorageMetaBuf::init_file(dir.meta_file(), params)?;
 		Ok(())
 	}
 
@@ -113,8 +106,7 @@ impl DiskStorage {
 			return Err(LoadError::NotADirectory(path));
 		}
 		let dir = StorageDir::new(path);
-		let meta_file = dir.open_meta_file(false).map_err(LoadError::OpenMeta)?;
-		let meta = StorageMetaFile::load(meta_file).map_err(LoadError::LoadMeta)?;
+		let meta = StorageMetaBuf::load_file(dir.meta_file()).map_err(LoadError::LoadMeta)?;
 		let disk_storage = DiskStorage {
 			page_size: meta.page_size(),
 			dir,
@@ -163,7 +155,7 @@ impl DiskStorage {
 	}
 
 	fn ensure_segment_exists(&self, segment_num: u32) -> Result<(), Error> {
-		if !self.dir.segment_file_exists(segment_num) {
+		if !self.dir.segment_file(segment_num).exists() {
 			self.create_segment(segment_num)
 		} else {
 			Ok(())
@@ -172,12 +164,8 @@ impl DiskStorage {
 
 	fn create_segment(&self, segment_num: u32) -> Result<(), Error> {
 		let mut state = self.state.write();
-		let mut file = self
-			.dir
-			.open_segment_file(segment_num, true)
-			.map_err(Error::CreateSegment)?;
-		SegmentFile::init(
-			&mut file,
+		SegmentFile::init_file(
+			self.dir.segment_file(segment_num),
 			segment::InitParams {
 				page_size: self.page_size(),
 			},
@@ -193,7 +181,7 @@ impl DiskStorage {
 		state.clear_segments();
 
 		for segment_num in 0..state.meta.segment_num_limit {
-			if !self.dir.segment_file_exists(segment_num) {
+			if !self.dir.segment_file(segment_num).exists() {
 				continue;
 			}
 
@@ -205,12 +193,8 @@ impl DiskStorage {
 	}
 
 	fn open_segment(&self, segment_num: u32) -> Result<SegmentFile<File>, Error> {
-		let file = self
-			.dir
-			.open_segment_file(segment_num, false)
-			.map_err(|err| Error::OpenSegment(segment_num, err))?;
-		SegmentFile::load(
-			file,
+		SegmentFile::load_file(
+			self.dir.segment_file(segment_num),
 			segment::LoadParams {
 				page_size: self.page_size,
 			},
@@ -220,7 +204,7 @@ impl DiskStorage {
 }
 
 struct State {
-	meta: StorageMetaFile<File>,
+	meta: StorageMetaBuf<File>,
 	segment_files: ArrayMap<SegmentFile<File>>,
 }
 
@@ -259,7 +243,7 @@ impl State {
 mod tests {
 	use std::{
 		assert_matches::assert_matches,
-		fs::{self, OpenOptions},
+		fs::{self},
 		iter,
 	};
 
@@ -326,14 +310,8 @@ mod tests {
 		meta.segment_num_limit = 1;
 		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
 
-		let mut segment_file = OpenOptions::new()
-			.read(true)
-			.write(true)
-			.create(true)
-			.open(dir.path().join("0.acns"))
-			.unwrap();
-		SegmentFile::init(
-			&mut segment_file,
+		SegmentFile::init_file(
+			dir.path().join("0.acns"),
 			segment::InitParams { page_size: 1 << 14 },
 		)
 		.unwrap();
@@ -354,14 +332,8 @@ mod tests {
 		meta.segment_num_limit = 1;
 		fs::write(dir.path().join("storage.acnm"), meta.as_bytes()).unwrap();
 
-		let mut segment_file = OpenOptions::new()
-			.read(true)
-			.write(true)
-			.create(true)
-			.open(dir.path().join("0.acns"))
-			.unwrap();
-		SegmentFile::init(
-			&mut segment_file,
+		SegmentFile::init_file(
+			dir.path().join("0.acns"),
 			segment::InitParams { page_size: 1 << 14 },
 		)
 		.unwrap();
