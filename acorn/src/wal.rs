@@ -124,7 +124,7 @@ impl<T: Seek + Read + Write> Wal<T> {
 	}
 
 	pub fn log_write(&mut self, page_id: PageId, data: &[u8]) {
-		self.buf.extend(page_id.as_bytes());
+		self.buf.extend(ViewBuf::from(page_id).as_bytes());
 		self.buf.extend(data);
 	}
 
@@ -231,10 +231,10 @@ mod tests {
 		assert_eq!(
 			&data[size_of::<WalHeader>()..],
 			&[
-				PageId::new(0, 10).as_bytes(),
-				[10; 8],
-				PageId::new(0, 12).as_bytes(),
-				[15; 8]
+				ViewBuf::from(PageId::new(0, 10)).as_bytes(),
+				&[10; 8],
+				ViewBuf::from(PageId::new(0, 12)).as_bytes(),
+				&[15; 8]
 			]
 			.concat()
 		);
