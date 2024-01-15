@@ -5,7 +5,7 @@ use std::{
 	path::Path,
 };
 
-use byte_view::{to_bytes, ByteView, ViewBuf};
+use byte_view::{ByteView, ViewBuf};
 use thiserror::Error;
 
 use crate::{
@@ -124,7 +124,7 @@ impl<T: Seek + Read + Write> Wal<T> {
 	}
 
 	pub fn log_write(&mut self, page_id: PageId, data: &[u8]) {
-		self.buf.extend(to_bytes(&page_id));
+		self.buf.extend(page_id.as_bytes());
 		self.buf.extend(data);
 	}
 
@@ -170,5 +170,36 @@ mod tests {
 			page_size: 1024,
 		};
 		assert_eq!(WalHeader::from_bytes(&buf), &*expected);
+	}
+
+	#[test]
+	fn load_wal_file() {
+		let mut file = Cursor::new(Vec::<u8>::new());
+		Wal::init(&mut file, InitParams { page_size: 1024 }).unwrap();
+
+		Wal::load(file, LoadParams { page_size: 1024 }).unwrap();
+	}
+
+	#[test]
+	fn log_writes() {
+		let mut data: Vec<u8> = Vec::new();
+		let mut file = Cursor::new(&mut data);
+		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
+
+		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
+		wal.log_write(PageId::new(0, 10), &[10; 8]);
+		wal.log_write(PageId::new(0, 12), &[15; 8]);
+		wal.commit().unwrap();
+
+		assert_eq!(
+			&data[size_of::<WalHeader>()..],
+			&[
+				PageId::new(0, 10).as_bytes(),
+				[10; 8],
+				PageId::new(0, 12).as_bytes(),
+				[15; 8]
+			]
+			.concat()
+		);
 	}
 }

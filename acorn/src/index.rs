@@ -1,4 +1,5 @@
 use core::fmt;
+use std::mem::size_of;
 
 use byte_view::ByteView;
 
@@ -15,6 +16,13 @@ impl PageId {
 			segment_num,
 			page_num,
 		}
+	}
+
+	pub fn as_bytes(&self) -> [u8; size_of::<Self>()] {
+		let mut bytes = [0; 8];
+		bytes[0..4].copy_from_slice(&self.segment_num.to_ne_bytes());
+		bytes[4..6].copy_from_slice(&self.page_num.to_ne_bytes());
+		bytes
 	}
 }
 
