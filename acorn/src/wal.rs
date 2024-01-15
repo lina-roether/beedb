@@ -1,6 +1,6 @@
 use std::{
 	fs::{File, OpenOptions},
-	io::{self, Read, Seek, SeekFrom, Write},
+	io::{self, BufReader, Read, Seek, SeekFrom, Write},
 	mem::size_of,
 	path::Path,
 };
@@ -134,6 +134,14 @@ impl<T: Seek + Read + Write> Wal<T> {
 		Ok(())
 	}
 
+	pub fn iter(&mut self) -> Result<Iter<T>, io::Error> {
+		self.file.seek(SeekFrom::Start(self.log_start))?;
+		Ok(Iter {
+			page_size: self.page_size,
+			file: BufReader::new(&mut self.file),
+		})
+	}
+
 	pub fn cancel(&mut self) {
 		self.buf.clear();
 	}
@@ -145,6 +153,35 @@ struct WalHeader {
 	log_start: u16,
 	page_size: u16,
 	byte_order: u8,
+}
+
+pub struct Iter<'a, T: Read> {
+	page_size: u16,
+	file: BufReader<&'a mut T>,
+}
+
+impl<'a, T: Read> Iterator for Iter<'a, T> {
+	type Item = Result<(PageId, Vec<u8>), io::Error>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let mut page_id_buf: ViewBuf<PageId> = ViewBuf::new();
+		let mut page_buf: Vec<u8> = vec![0; self.page_size as usize];
+
+		let bytes_read = match self.file.read(page_id_buf.as_bytes_mut()) {
+			Ok(bytes_read) => bytes_read,
+			Err(err) => return Some(Err(err)),
+		};
+		if bytes_read != page_id_buf.size() {
+			return None;
+		}
+
+		match self.file.read_exact(&mut page_buf) {
+			Ok(bytes_read) => bytes_read,
+			Err(err) => return Some(Err(err)),
+		};
+
+		Some(Ok((*page_id_buf, page_buf)))
+	}
 }
 
 #[cfg(test)]
@@ -201,5 +238,48 @@ mod tests {
 			]
 			.concat()
 		);
+	}
+
+	#[test]
+	fn dont_log_uncommitted_writes() {
+		let mut data: Vec<u8> = Vec::new();
+		let mut file = Cursor::new(&mut data);
+		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
+
+		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
+		wal.log_write(PageId::new(0, 10), &[10; 8]);
+		wal.log_write(PageId::new(0, 12), &[15; 8]);
+
+		assert!(data[size_of::<WalHeader>()..].is_empty());
+	}
+
+	#[test]
+	fn iter_logs() {
+		let mut data: Vec<u8> = Vec::new();
+		let mut file = Cursor::new(&mut data);
+		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
+
+		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
+		wal.log_write(PageId::new(0, 10), &[10; 8]);
+		wal.log_write(PageId::new(0, 12), &[15; 8]);
+		wal.commit().unwrap();
+
+		wal.log_write(PageId::new(0, 5), &[25; 8]);
+		wal.commit().unwrap();
+
+		let mut iter = wal.iter().unwrap();
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(PageId::new(0, 10), vec![10; 8])
+		);
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(PageId::new(0, 12), vec![15; 8])
+		);
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(PageId::new(0, 5), vec![25; 8])
+		);
+		assert!(iter.next().is_none());
 	}
 }
