@@ -52,11 +52,13 @@ impl<T: ?Sized + ByteView> ViewBuf<T> {
 			handle_alloc_error(layout);
 		};
 
-		Self {
+		let mut buf = Self {
 			size,
 			bytes,
 			marker: PhantomData,
-		}
+		};
+		buf.as_bytes_mut().fill(0);
+		buf
 	}
 
 	pub fn resize(&mut self, new_size: usize) -> Result<(), BufError> {
@@ -80,6 +82,10 @@ impl<T: ?Sized + ByteView> ViewBuf<T> {
 		else {
 			handle_alloc_error(Self::layout_for(new_size))
 		};
+		if new_size < self.size {
+			let new_bytes_start = self.size;
+			self.as_bytes_mut()[new_bytes_start..].fill(0);
+		}
 		self.size = new_size;
 		self.bytes = new_bytes;
 	}
@@ -148,6 +154,14 @@ impl<T: ?Sized + ByteView> AsMut<T> for ViewBuf<T> {
 	}
 }
 
+impl<T: ByteView> From<T> for ViewBuf<T> {
+	fn from(value: T) -> Self {
+		let mut buf = Self::new();
+		*buf = value;
+		buf
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::mem::size_of;
@@ -199,5 +213,12 @@ mod tests {
 		buf[2] = 3;
 
 		assert_eq!(*buf, [1, 2, 3]);
+	}
+
+	#[test]
+	fn init_to_zero() {
+		let buf: ViewBuf<u64> = ViewBuf::new();
+
+		assert_eq!(*buf, 0);
 	}
 }
