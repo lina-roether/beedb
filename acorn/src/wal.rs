@@ -50,6 +50,12 @@ pub struct LoadParams {
 	pub page_size: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, ByteView)]
+pub struct WalItemHeader {
+	pub seq: u64,
+	pub page_id: PageId,
+}
+
 pub struct Wal<T: Seek + Read + Write> {
 	log_start: u64,
 	page_size: u16,
@@ -123,8 +129,9 @@ impl<T: Seek + Read + Write> Wal<T> {
 		})
 	}
 
-	pub fn log_write(&mut self, page_id: PageId, data: &[u8]) {
-		self.buf.extend(ViewBuf::from(page_id).as_bytes());
+	pub fn log_write(&mut self, seq: u64, page_id: PageId, data: &[u8]) {
+		let header = ViewBuf::from(WalItemHeader { seq, page_id });
+		self.buf.extend(header.as_bytes());
 		self.buf.extend(data);
 	}
 
@@ -161,17 +168,17 @@ pub struct Iter<'a, T: Read> {
 }
 
 impl<'a, T: Read> Iterator for Iter<'a, T> {
-	type Item = Result<(PageId, Vec<u8>), io::Error>;
+	type Item = Result<(WalItemHeader, Vec<u8>), io::Error>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		let mut page_id_buf: ViewBuf<PageId> = ViewBuf::new();
+		let mut header_buf: ViewBuf<WalItemHeader> = ViewBuf::new();
 		let mut page_buf: Vec<u8> = vec![0; self.page_size as usize];
 
-		let bytes_read = match self.file.read(page_id_buf.as_bytes_mut()) {
+		let bytes_read = match self.file.read(header_buf.as_bytes_mut()) {
 			Ok(bytes_read) => bytes_read,
 			Err(err) => return Some(Err(err)),
 		};
-		if bytes_read != page_id_buf.size() {
+		if bytes_read != header_buf.size() {
 			return None;
 		}
 
@@ -180,7 +187,7 @@ impl<'a, T: Read> Iterator for Iter<'a, T> {
 			Err(err) => return Some(Err(err)),
 		};
 
-		Some(Ok((*page_id_buf, page_buf)))
+		Some(Ok((header_buf.clone(), page_buf)))
 	}
 }
 
@@ -218,22 +225,34 @@ mod tests {
 	}
 
 	#[test]
+	// Miri won't shut up about technically using uninitialized memory in this test; it really
+	// doesn't matter in this case though (it's complaining about the padding bytes in
+	// WalItemHeader being uninitialized)
+	#[cfg_attr(miri, ignore)]
 	fn log_writes() {
 		let mut data: Vec<u8> = Vec::new();
 		let mut file = Cursor::new(&mut data);
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.log_write(PageId::new(0, 10), &[10; 8]);
-		wal.log_write(PageId::new(0, 12), &[15; 8]);
+		wal.log_write(0, PageId::new(0, 10), &[10; 8]);
+		wal.log_write(1, PageId::new(0, 12), &[15; 8]);
 		wal.commit().unwrap();
 
 		assert_eq!(
 			&data[size_of::<WalHeader>()..],
 			&[
-				ViewBuf::from(PageId::new(0, 10)).as_bytes(),
+				ViewBuf::from(WalItemHeader {
+					seq: 0,
+					page_id: PageId::new(0, 10)
+				})
+				.as_bytes(),
 				&[10; 8],
-				ViewBuf::from(PageId::new(0, 12)).as_bytes(),
+				ViewBuf::from(WalItemHeader {
+					seq: 1,
+					page_id: PageId::new(0, 12)
+				})
+				.as_bytes(),
 				&[15; 8]
 			]
 			.concat()
@@ -247,8 +266,8 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.log_write(PageId::new(0, 10), &[10; 8]);
-		wal.log_write(PageId::new(0, 12), &[15; 8]);
+		wal.log_write(0, PageId::new(0, 10), &[10; 8]);
+		wal.log_write(1, PageId::new(0, 12), &[15; 8]);
 
 		assert!(data[size_of::<WalHeader>()..].is_empty());
 	}
@@ -260,25 +279,43 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.log_write(PageId::new(0, 10), &[10; 8]);
-		wal.log_write(PageId::new(0, 12), &[15; 8]);
+		wal.log_write(0, PageId::new(0, 10), &[10; 8]);
+		wal.log_write(2, PageId::new(0, 12), &[15; 8]);
 		wal.commit().unwrap();
 
-		wal.log_write(PageId::new(0, 5), &[25; 8]);
+		wal.log_write(1, PageId::new(0, 5), &[25; 8]);
 		wal.commit().unwrap();
 
 		let mut iter = wal.iter().unwrap();
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(PageId::new(0, 10), vec![10; 8])
+			(
+				WalItemHeader {
+					seq: 0,
+					page_id: PageId::new(0, 10)
+				},
+				vec![10; 8]
+			)
 		);
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(PageId::new(0, 12), vec![15; 8])
+			(
+				WalItemHeader {
+					seq: 2,
+					page_id: PageId::new(0, 12)
+				},
+				vec![15; 8]
+			)
 		);
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(PageId::new(0, 5), vec![25; 8])
+			(
+				WalItemHeader {
+					seq: 1,
+					page_id: PageId::new(0, 5)
+				},
+				vec![25; 8]
+			)
 		);
 		assert!(iter.next().is_none());
 	}
