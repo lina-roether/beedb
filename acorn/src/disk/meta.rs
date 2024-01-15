@@ -72,7 +72,11 @@ pub struct StorageMetaBuf<F: IoTarget> {
 
 impl StorageMetaBuf<File> {
 	pub fn init_file(path: impl AsRef<Path>, params: InitParams) -> Result<(), InitError> {
-		let mut file = OpenOptions::new().write(true).create(true).open(path)?;
+		let mut file = OpenOptions::new()
+			.write(true)
+			.truncate(true)
+			.create(true)
+			.open(path)?;
 		Self::init(&mut file, params)
 	}
 

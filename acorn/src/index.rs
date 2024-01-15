@@ -1,6 +1,8 @@
 use core::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use byte_view::ByteView;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ByteView)]
 pub struct PageId {
 	pub segment_num: u32,
 	pub page_num: u16,

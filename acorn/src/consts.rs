@@ -6,6 +6,7 @@ use crate::utils::units::*;
 
 pub const SEGMENT_MAGIC: [u8; 4] = *b"ACNS";
 pub const META_MAGIC: [u8; 4] = *b"ACNM";
+pub const WAL_MAGIC: [u8; 4] = *b"ACNL";
 pub const DEFAULT_PAGE_SIZE: u16 = 16 * KiB as u16;
 pub const PAGE_SIZE_RANGE: RangeInclusive<u16> = (512 * B as u16)..=(32 * KiB as u16);
 pub const SEGMENT_FORMAT_VERSION: u8 = 1;

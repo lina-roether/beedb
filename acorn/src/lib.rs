@@ -18,3 +18,5 @@ mod io;
 mod manage;
 mod pages;
 mod utils;
+mod wal;
+

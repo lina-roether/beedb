@@ -1,6 +1,7 @@
 use core::slice;
 use std::{
 	alloc::{alloc, dealloc, handle_alloc_error, realloc, Layout},
+	fmt::Debug,
 	ops::{Deref, DerefMut},
 	ptr::{self},
 };
@@ -115,6 +116,26 @@ impl AlignedBuffer {
 		self.layout = Layout::from_size_align(cap, self.align()).unwrap();
 	}
 }
+
+impl Debug for AlignedBuffer {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		(**self).fmt(f)
+	}
+}
+
+impl PartialEq for AlignedBuffer {
+	fn eq(&self, other: &Self) -> bool {
+		**self == **other
+	}
+}
+
+impl PartialEq<[u8]> for AlignedBuffer {
+	fn eq(&self, other: &[u8]) -> bool {
+		**self == *other
+	}
+}
+
+impl Eq for AlignedBuffer {}
 
 impl Deref for AlignedBuffer {
 	type Target = [u8];

@@ -1,4 +1,10 @@
-use std::ptr::{self, Pointee};
+use std::{
+	mem::size_of,
+	ptr::{self, Pointee},
+	slice,
+};
+
+use crate::ByteView;
 
 /// # Safety
 ///
@@ -39,4 +45,12 @@ pub unsafe fn transmute_unsized_mut<T: ?Sized>(
 	meta: <T as Pointee>::Metadata,
 ) -> &mut T {
 	&mut *ptr::from_raw_parts_mut(bytes.as_mut_ptr() as *mut (), meta)
+}
+
+pub fn to_bytes<T>(value: &T) -> &[u8] {
+	unsafe { slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) }
+}
+
+pub fn to_bytes_mut<T: ByteView>(value: &mut T) -> &mut [u8] {
+	unsafe { slice::from_raw_parts_mut(value as *mut T as *mut u8, size_of::<T>()) }
 }

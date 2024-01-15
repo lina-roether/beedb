@@ -133,6 +133,7 @@ mod tests {
 	}
 
 	#[bench]
+	#[cfg_attr(miri, ignore)]
 	fn bench_alloc_page(b: &mut Bencher) {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
