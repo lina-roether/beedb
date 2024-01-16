@@ -11,10 +11,7 @@ use crate::{
 	index::PageId,
 };
 
-use super::{
-	err::Error,
-	transaction::{Operation, TransactionManager},
-};
+use super::{err::Error, transaction::TransactionManager};
 
 pub struct PageRwManager {
 	cache: Arc<PageCache>,
@@ -43,16 +40,12 @@ impl PageRwManager {
 		tid: u64,
 		page_id: PageId,
 	) -> Result<PageWriteHandle<T>, Error> {
-		self.transaction_mgr.assert_valid_tid(tid)?;
 		let page = self.cache.write_page::<T>(page_id)?;
-		let mut before: Vec<u8> = Vec::with_capacity(page.len());
-		page.as_bytes().clone_into(&mut before);
 
 		Ok(PageWriteHandle {
 			tid,
 			page_id,
 			transaction_mgr: &self.transaction_mgr,
-			before: before.into_boxed_slice(),
 			guard: page,
 		})
 	}
@@ -61,7 +54,6 @@ impl PageRwManager {
 pub struct PageWriteHandle<'a, T: ?Sized + ByteView> {
 	tid: u64,
 	page_id: PageId,
-	before: Box<[u8]>,
 	transaction_mgr: &'a TransactionManager,
 	guard: PageWriteGuard<'a, T>,
 }
@@ -69,13 +61,7 @@ pub struct PageWriteHandle<'a, T: ?Sized + ByteView> {
 impl<'a, T: ?Sized + ByteView> Drop for PageWriteHandle<'a, T> {
 	fn drop(&mut self) {
 		self.transaction_mgr
-			.operation(
-				self.tid,
-				Operation::Write(self.page_id),
-				&self.before,
-				self.guard.as_bytes(),
-			)
-			.unwrap();
+			.track_write(self.tid, self.page_id, self.guard.as_bytes());
 	}
 }
 
@@ -111,11 +97,14 @@ impl<'a, T: ?Sized + ByteView> AsMut<Bytes<T>> for PageWriteHandle<'a, T> {
 
 #[cfg(test)]
 mod tests {
-	use std::mem;
+	use std::{fs, mem};
 
 	use tempfile::tempdir;
 
-	use crate::disk::{self, DiskStorage};
+	use crate::{
+		disk::{self, DiskStorage},
+		wal::{self, Wal},
+	};
 
 	use super::*;
 
@@ -123,10 +112,15 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn read_page() {
 		let dir = tempdir().unwrap();
-		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
-		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		fs::create_dir(dir.path().join("storage")).unwrap();
+		DiskStorage::init(dir.path().join("storage"), disk::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+
+		let storage = DiskStorage::load(dir.path().join("storage")).unwrap();
+		let wal =
+			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let transaction_mgr = Arc::new(TransactionManager::new());
+		let transaction_mgr = Arc::new(TransactionManager::new(wal));
 		let rw_mgr = PageRwManager::new(Arc::clone(&cache), transaction_mgr);
 
 		let mut page = cache.write_page::<[u8]>(PageId::new(69, 420)).unwrap();
@@ -142,12 +136,16 @@ mod tests {
 	fn write_page() {
 		let dir = tempdir().unwrap();
 		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+
 		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let wal =
+			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let transaction_mgr = Arc::new(TransactionManager::new());
+		let transaction_mgr = Arc::new(TransactionManager::new(wal));
 		let rw_mgr = PageRwManager::new(Arc::clone(&cache), Arc::clone(&transaction_mgr));
 
-		let tid = transaction_mgr.begin().unwrap();
+		let tid = transaction_mgr.begin();
 
 		let mut page = rw_mgr
 			.write_page::<[u8]>(tid, PageId::new(69, 420))

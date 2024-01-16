@@ -1,4 +1,5 @@
 use std::{
+	collections::HashMap,
 	fs::{File, OpenOptions},
 	io::{self, BufReader, Read, Seek, SeekFrom, Write},
 	mem::size_of,
@@ -9,7 +10,7 @@ use byte_view::{ByteView, ViewBuf};
 use thiserror::Error;
 
 use crate::{
-	consts::WAL_MAGIC,
+	consts::{DEFAULT_PAGE_SIZE, WAL_MAGIC},
 	index::PageId,
 	utils::{byte_order::ByteOrder, units::display_size},
 };
@@ -46,8 +47,24 @@ pub struct InitParams {
 	pub page_size: u16,
 }
 
+impl Default for InitParams {
+	fn default() -> Self {
+		Self {
+			page_size: DEFAULT_PAGE_SIZE,
+		}
+	}
+}
+
 pub struct LoadParams {
 	pub page_size: u16,
+}
+
+impl Default for LoadParams {
+	fn default() -> Self {
+		Self {
+			page_size: DEFAULT_PAGE_SIZE,
+		}
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, ByteView)]
@@ -59,7 +76,7 @@ pub struct WalItemHeader {
 pub struct Wal<T: Seek + Read + Write> {
 	log_start: u64,
 	page_size: u16,
-	buf: Vec<u8>,
+	buf_map: HashMap<u64, Vec<u8>>,
 	file: T,
 }
 
@@ -123,21 +140,25 @@ impl<T: Seek + Read + Write> Wal<T> {
 		file.seek(SeekFrom::Start(header.log_start as u64))?;
 		Ok(Self {
 			file,
-			buf: Vec::new(),
+			buf_map: HashMap::new(),
 			log_start: header.log_start as u64,
 			page_size: header.page_size,
 		})
 	}
 
-	pub fn log_write(&mut self, seq: u64, page_id: PageId, data: &[u8]) {
+	pub fn log_write(&mut self, tid: u64, seq: u64, page_id: PageId, data: &[u8]) {
 		let header = ViewBuf::from(WalItemHeader { seq, page_id });
-		self.buf.extend(header.as_bytes());
-		self.buf.extend(data);
+		let buf = self.buf_map.entry(tid).or_default();
+
+		buf.extend(header.as_bytes());
+		buf.extend(data);
 	}
 
-	pub fn commit(&mut self) -> Result<(), io::Error> {
-		self.file.write_all(&self.buf)?;
-		self.buf.clear();
+	pub fn commit(&mut self, tid: u64) -> Result<(), io::Error> {
+		let Some(buf) = self.buf_map.remove(&tid) else {
+			return Ok(());
+		};
+		self.file.write_all(&buf)?;
 		Ok(())
 	}
 
@@ -149,8 +170,8 @@ impl<T: Seek + Read + Write> Wal<T> {
 		})
 	}
 
-	pub fn cancel(&mut self) {
-		self.buf.clear();
+	pub fn cancel(&mut self, tid: u64) {
+		self.buf_map.remove(&tid);
 	}
 }
 
@@ -235,9 +256,9 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.log_write(0, PageId::new(0, 10), &[10; 8]);
-		wal.log_write(1, PageId::new(0, 12), &[15; 8]);
-		wal.commit().unwrap();
+		wal.log_write(0, 0, PageId::new(0, 10), &[10; 8]);
+		wal.log_write(0, 1, PageId::new(0, 12), &[15; 8]);
+		wal.commit(0).unwrap();
 
 		assert_eq!(
 			&data[size_of::<WalHeader>()..],
@@ -266,8 +287,9 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.log_write(0, PageId::new(0, 10), &[10; 8]);
-		wal.log_write(1, PageId::new(0, 12), &[15; 8]);
+		wal.log_write(0, 0, PageId::new(0, 10), &[10; 8]);
+		wal.log_write(0, 1, PageId::new(0, 12), &[15; 8]);
+		wal.commit(1).unwrap();
 
 		assert!(data[size_of::<WalHeader>()..].is_empty());
 	}
@@ -279,12 +301,12 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.log_write(0, PageId::new(0, 10), &[10; 8]);
-		wal.log_write(2, PageId::new(0, 12), &[15; 8]);
-		wal.commit().unwrap();
+		wal.log_write(0, 0, PageId::new(0, 10), &[10; 8]);
+		wal.log_write(0, 2, PageId::new(0, 12), &[15; 8]);
+		wal.log_write(1, 1, PageId::new(0, 5), &[25; 8]);
 
-		wal.log_write(1, PageId::new(0, 5), &[25; 8]);
-		wal.commit().unwrap();
+		wal.commit(0).unwrap();
+		wal.commit(1).unwrap();
 
 		let mut iter = wal.iter().unwrap();
 		assert_eq!(

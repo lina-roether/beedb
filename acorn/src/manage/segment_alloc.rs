@@ -153,12 +153,15 @@ impl SegmentAllocManager {
 
 #[cfg(test)]
 mod tests {
+	use std::fs;
+
 	use tempfile::tempdir;
 
 	use crate::{
 		cache::PageCache,
 		disk::{self, DiskStorage},
 		manage::transaction::TransactionManager,
+		wal::{self, Wal},
 	};
 
 	use super::*;
@@ -167,17 +170,22 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn alloc_page() {
 		let dir = tempdir().unwrap();
-		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
-		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		fs::create_dir(dir.path().join("storage")).unwrap();
+		DiskStorage::init(dir.path().join("storage"), disk::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+
+		let storage = DiskStorage::load(dir.path().join("storage")).unwrap();
+		let wal =
+			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let transaction_mgr = Arc::new(TransactionManager::new());
+		let transaction_mgr = Arc::new(TransactionManager::new(wal));
 		let rw_mgr = Arc::new(PageRwManager::new(
 			Arc::clone(&cache),
 			Arc::clone(&transaction_mgr),
 		));
 		let alloc_mgr = SegmentAllocManager::new(Arc::clone(&rw_mgr), 0);
 
-		let tid = transaction_mgr.begin().unwrap();
+		let tid = transaction_mgr.begin();
 		let page = alloc_mgr.alloc_page(tid).unwrap().unwrap();
 		transaction_mgr.commit(tid).unwrap();
 
@@ -188,21 +196,26 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn alloc_and_free_page() {
 		let dir = tempdir().unwrap();
-		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
-		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		fs::create_dir(dir.path().join("storage")).unwrap();
+		DiskStorage::init(dir.path().join("storage"), disk::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+
+		let storage = DiskStorage::load(dir.path().join("storage")).unwrap();
+		let wal =
+			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let transaction_mgr = Arc::new(TransactionManager::new());
+		let transaction_mgr = Arc::new(TransactionManager::new(wal));
 		let rw_mgr = Arc::new(PageRwManager::new(
 			Arc::clone(&cache),
 			Arc::clone(&transaction_mgr),
 		));
 		let alloc_mgr = SegmentAllocManager::new(Arc::clone(&rw_mgr), 0);
 
-		let tid = transaction_mgr.begin().unwrap();
+		let tid = transaction_mgr.begin();
 		let page = alloc_mgr.alloc_page(tid).unwrap().unwrap();
 		transaction_mgr.commit(tid).unwrap();
 
-		let tid = transaction_mgr.begin().unwrap();
+		let tid = transaction_mgr.begin();
 		alloc_mgr.free_page(tid, page).unwrap();
 		transaction_mgr.commit(tid).unwrap();
 	}
