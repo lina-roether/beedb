@@ -15,6 +15,9 @@ pub enum Error {
 	#[error(transparent)]
 	Disk(#[from] disk::Error),
 
+	#[error("Failed to read from WAL: {0}")]
+	WalRead(io::Error),
+
 	#[error("Failed to write to WAL: {0}")]
 	WalWrite(io::Error),
 }
