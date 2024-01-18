@@ -1,7 +1,4 @@
 use std::{
-	collections::HashMap,
-	fs::File,
-	io::{Read, Seek, Write},
 	ops::{Deref, DerefMut},
 	sync::Arc,
 };
@@ -12,7 +9,6 @@ use static_assertions::assert_impl_all;
 use crate::{
 	cache::{PageCache, PageReadGuard, PageWriteGuard},
 	index::PageId,
-	wal::Wal,
 };
 
 use super::{err::Error, transaction::TransactionManager};
@@ -52,24 +48,6 @@ impl PageRwManager {
 			transaction_mgr: &self.transaction_mgr,
 			guard: page,
 		})
-	}
-
-	pub fn recover_from(&self, wal: &mut Wal<File>) -> Result<(), Error> {
-		let mut seq_map: HashMap<PageId, u64> = HashMap::new();
-
-		for result in wal.iter().map_err(Error::WalRead)? {
-			let (header, buf) = result.map_err(Error::WalRead)?;
-			if let Some(last_seq) = seq_map.get(&header.page_id) {
-				if header.seq < *last_seq {
-					continue;
-				}
-			}
-			seq_map.insert(header.page_id, header.seq);
-			let mut page = self.cache.write_page::<[u8]>(header.page_id)?;
-			page.copy_from_slice(&buf);
-		}
-
-		todo!();
 	}
 }
 
