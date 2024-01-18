@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
 	consts::{DEFAULT_PAGE_SIZE, WAL_MAGIC},
-	index::PageId,
+	id::PageId,
 	utils::{byte_order::ByteOrder, units::display_size},
 };
 

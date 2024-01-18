@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use static_assertions::assert_impl_all;
 use thiserror::Error;
 
-use crate::{index::PageId, utils::array_map::ArrayMap};
+use crate::{id::PageId, utils::array_map::ArrayMap};
 
 use self::{dir::StorageDir, meta::StorageMetaBuf, segment::SegmentFile};
 

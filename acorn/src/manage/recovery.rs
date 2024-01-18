@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs::File};
 
-use crate::{cache::PageCache, index::PageId, wal::Wal};
+use crate::{cache::PageCache, id::PageId, wal::Wal};
 
 use super::err::Error;
 

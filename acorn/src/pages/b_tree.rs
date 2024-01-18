@@ -1,11 +1,11 @@
 use byte_view::ByteView;
 
-use crate::index::StorageIndex;
+use crate::id::ItemId;
 
 #[derive(Debug, ByteView)]
 #[repr(C)]
 pub struct BTreeNode<K: ByteView + Ord> {
-	pub pointer: StorageIndex,
+	pub pointer: ItemId,
 	pub key: K,
 }
 

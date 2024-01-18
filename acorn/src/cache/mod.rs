@@ -11,7 +11,7 @@ use self::{buffer::PageBuffer, manager::CacheManager};
 
 use crate::{
 	disk::{self, DiskStorage},
-	index::PageId,
+	id::PageId,
 };
 
 mod buffer;

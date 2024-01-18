@@ -6,7 +6,7 @@ use std::{
 use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
 
-use crate::{index::PageId, wal::Wal};
+use crate::{id::PageId, wal::Wal};
 
 use super::err::Error;
 
