@@ -143,6 +143,12 @@ fn implement_byte_view_for_unsized_type(
 
 	let assert_mod_name = Ident::new(&format!("__asertions_{}", name), Span::call_site());
 
+	let min_size: TokenStream = if sized_types.is_empty() {
+		"0".parse().unwrap()
+	} else {
+		quote! { #(std::mem::size_of::<#sized_types>())+*}
+	};
+
 	quote! {
 		mod #assert_mod_name {
 			use super::*;
@@ -157,7 +163,7 @@ fn implement_byte_view_for_unsized_type(
 
 		unsafe impl #gen_def ByteView for #name #gen_app #gen_where {
 			const ALIGN: usize = #total_alignment;
-			const MIN_SIZE: usize = #(std::mem::size_of::<#sized_types>())+*;
+			const MIN_SIZE: usize = #min_size;
 
 			unsafe fn from_bytes_unchecked(bytes: &[u8]) -> &Self {
 				byte_view::transmute_unsized(bytes, (bytes.len() - Self::MIN_SIZE) / std::mem::size_of::<#item_type>())
