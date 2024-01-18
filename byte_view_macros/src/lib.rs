@@ -78,9 +78,10 @@ fn implement_byte_view_for_sized_type(
 	let gen_app = generics_application(&generics);
 	let gen_where = generics.where_clause;
 
-	let assert_mod_name = Ident::new(&format!("__asertions_{}", name), Span::call_site());
+	let assert_mod_name = Ident::new(&format!("__assertions_{}", name), Span::call_site());
 
 	quote! {
+		#[allow(non_snake_case)]
 		mod #assert_mod_name {
 			use super::*;
 
@@ -141,7 +142,7 @@ fn implement_byte_view_for_unsized_type(
 	let gen_app = generics_application(&generics);
 	let gen_where = generics.where_clause;
 
-	let assert_mod_name = Ident::new(&format!("__asertions_{}", name), Span::call_site());
+	let assert_mod_name = Ident::new(&format!("__assertions_{}", name), Span::call_site());
 
 	let min_size: TokenStream = if sized_types.is_empty() {
 		"0".parse().unwrap()
@@ -150,6 +151,7 @@ fn implement_byte_view_for_unsized_type(
 	};
 
 	quote! {
+		#[allow(non_snake_case)]
 		mod #assert_mod_name {
 			use super::*;
 
