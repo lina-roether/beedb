@@ -2,7 +2,7 @@ use std::{mem, num::NonZeroU16, sync::Arc};
 
 use parking_lot::RwLock;
 
-use crate::{index::PageId, utils::array_map::ArrayMap};
+use crate::{id::PageId, utils::array_map::ArrayMap};
 
 use super::{err::Error, rw::PageRwManager, segment_alloc::SegmentAllocManager};
 

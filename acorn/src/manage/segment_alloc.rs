@@ -4,7 +4,7 @@ use static_assertions::assert_impl_all;
 
 use crate::{
 	cache::PageReadGuard,
-	index::PageId,
+	id::PageId,
 	pages::{FreelistPage, HeaderPage},
 };
 

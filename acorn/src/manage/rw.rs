@@ -8,7 +8,7 @@ use static_assertions::assert_impl_all;
 
 use crate::{
 	cache::{PageCache, PageReadGuard, PageWriteGuard},
-	index::PageId,
+	id::PageId,
 };
 
 use super::{err::Error, transaction::TransactionManager};

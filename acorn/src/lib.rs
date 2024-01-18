@@ -13,10 +13,9 @@ extern crate test;
 mod cache;
 mod consts;
 mod disk;
-mod index;
+mod id;
 mod io;
 mod manage;
 mod pages;
 mod utils;
 mod wal;
-

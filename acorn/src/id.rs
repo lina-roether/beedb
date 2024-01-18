@@ -24,14 +24,14 @@ impl fmt::Display for PageId {
 	}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StorageIndex {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ByteView)]
+pub struct ItemId {
 	pub segment_num: u32,
 	pub page_num: u16,
 	pub index: u16,
 }
 
-impl StorageIndex {
+impl ItemId {
 	#[inline]
 	pub fn new(page_id: PageId, index: u16) -> Self {
 		Self {
@@ -47,7 +47,7 @@ impl StorageIndex {
 	}
 }
 
-impl fmt::Display for StorageIndex {
+impl fmt::Display for ItemId {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}:{:04x}", self.page_id(), self.index)
 	}

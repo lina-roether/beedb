@@ -2,7 +2,7 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::disk;
+use crate::{disk, id::PageId};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -20,4 +20,7 @@ pub enum Error {
 
 	#[error("Failed to write to WAL: {0}")]
 	WalWrite(io::Error),
+
+	#[error("B-Tree index page {0} is corrupted")]
+	CorruptedBTreeIndex(PageId),
 }
