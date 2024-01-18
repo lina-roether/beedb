@@ -1,7 +1,7 @@
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use proc_macro_error::{abort, proc_macro_error};
-use quote::quote;
-use syn::{Data, DeriveInput, Type};
+use quote::{quote, ToTokens};
+use syn::{Data, DeriveInput, GenericParam, Generics, Type};
 
 #[proc_macro_derive(ByteView, attributes(dynamically_sized))]
 #[proc_macro_error]
@@ -23,34 +23,95 @@ pub fn derive_byte_view(item: proc_macro::TokenStream) -> proc_macro::TokenStrea
 		.iter()
 		.any(|attr| attr.path().is_ident("dynamically_sized"));
 
-	let assert = assert_byte_view(&types);
-
 	let impl_block = if is_dyn_sized {
-		implement_byte_view_for_unsized_type(input.ident, &types)
+		implement_byte_view_for_unsized_type(input.ident, input.generics, &types)
 	} else {
-		implement_byte_view_for_sized_type(input.ident)
+		implement_byte_view_for_sized_type(input.ident, input.generics, &types)
 	};
 
 	quote! {
-		#assert
 		#impl_block
 	}
 	.into()
 }
 
-fn assert_byte_view(types: &[Type]) -> TokenStream {
+fn generics_definition(generics: &Generics) -> TokenStream {
+	if generics.params.is_empty() {
+		return TokenStream::new();
+	}
+
+	let mut ts = TokenStream::new();
+	generics.lt_token.unwrap().to_tokens(&mut ts);
+	for param in &generics.params {
+		param.to_tokens(&mut ts);
+	}
+	generics.gt_token.unwrap().to_tokens(&mut ts);
+
+	ts
+}
+
+fn generics_application(generics: &Generics) -> TokenStream {
+	if generics.params.is_empty() {
+		return TokenStream::new();
+	}
+
+	let mut ts = TokenStream::new();
+	generics.lt_token.unwrap().to_tokens(&mut ts);
+	for param in &generics.params {
+		match param {
+			GenericParam::Const(p) => p.ident.to_tokens(&mut ts),
+			GenericParam::Type(p) => p.ident.to_tokens(&mut ts),
+			GenericParam::Lifetime(p) => p.to_tokens(&mut ts),
+		}
+	}
+	generics.gt_token.unwrap().to_tokens(&mut ts);
+
+	ts
+}
+
+fn implement_byte_view_for_sized_type(
+	name: Ident,
+	generics: Generics,
+	types: &[Type],
+) -> TokenStream {
+	let gen_def = generics_definition(&generics);
+	let gen_app = generics_application(&generics);
+	let gen_where = generics.where_clause;
+
+	let assert_mod_name = Ident::new(&format!("__asertions_{}", name), Span::call_site());
+
 	quote! {
-		#(byte_view::assert_byte_view!(#types);)*
+		mod #assert_mod_name {
+			use super::*;
+
+			impl #gen_def #name #gen_app #gen_where {
+				const fn __assertions() {
+					const fn assert_byte_view<T: ?Sized + ByteView>() {}
+					#(assert_byte_view::<#types>();)*
+				}
+			}
+		}
+
+		unsafe impl #gen_def ByteView for #name #gen_app #gen_where {
+			const ALIGN: usize = std::mem::align_of::<Self>();
+			const MIN_SIZE: usize = std::mem::size_of::<Self>();
+
+			unsafe fn from_bytes_unchecked(bytes: &[u8]) -> &Self {
+				byte_view::transmute(bytes)
+			}
+
+			unsafe fn from_bytes_mut_unchecked(bytes: &mut [u8]) -> &mut Self {
+				byte_view::transmute_mut(bytes)
+			}
+		}
 	}
 }
 
-fn implement_byte_view_for_sized_type(name: Ident) -> TokenStream {
-	quote! {
-		byte_view::unsafe_impl_byte_view_sized!(#name);
-	}
-}
-
-fn implement_byte_view_for_unsized_type(name: Ident, types: &[Type]) -> TokenStream {
+fn implement_byte_view_for_unsized_type(
+	name: Ident,
+	generics: Generics,
+	types: &[Type],
+) -> TokenStream {
 	if types.is_empty() {
 		panic!("Need at least one type");
 	}
@@ -76,8 +137,25 @@ fn implement_byte_view_for_unsized_type(name: Ident, types: &[Type]) -> TokenStr
 
 	let item_type = slice.elem.as_ref().clone();
 
+	let gen_def = generics_definition(&generics);
+	let gen_app = generics_application(&generics);
+	let gen_where = generics.where_clause;
+
+	let assert_mod_name = Ident::new(&format!("__asertions_{}", name), Span::call_site());
+
 	quote! {
-		unsafe impl ByteView for #name {
+		mod #assert_mod_name {
+			use super::*;
+
+			impl #gen_def #name #gen_app #gen_where {
+				const fn __assertions() {
+					const fn assert_byte_view<T: ?Sized + ByteView>() {}
+					#(assert_byte_view::<#types>();)*
+				}
+			}
+		}
+
+		unsafe impl #gen_def ByteView for #name #gen_app #gen_where {
 			const ALIGN: usize = #total_alignment;
 			const MIN_SIZE: usize = #(std::mem::size_of::<#sized_types>())+*;
 
