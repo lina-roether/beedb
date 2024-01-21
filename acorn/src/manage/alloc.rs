@@ -115,8 +115,10 @@ mod tests {
 
 	use crate::{
 		cache::PageCache,
+		consts::PAGE_SIZE_RANGE,
 		disk::{self, DiskStorage},
 		manage::transaction::TransactionManager,
+		utils::units::KiB,
 		wal::{self, Wal},
 	};
 
@@ -147,15 +149,24 @@ mod tests {
 	#[bench]
 	#[cfg_attr(miri, ignore)]
 	fn bench_alloc_page(b: &mut Bencher) {
+		let page_size = *PAGE_SIZE_RANGE.start();
+
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();
-		DiskStorage::init(dir.path().join("storage"), disk::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		DiskStorage::init(dir.path().join("storage"), disk::InitParams { page_size }).unwrap();
+		Wal::init_file(
+			dir.path().join("writes.acnl"),
+			wal::InitParams { page_size },
+		)
+		.unwrap();
 
 		let storage = DiskStorage::load(dir.path().join("storage")).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
+		let wal = Wal::load_file(
+			dir.path().join("writes.acnl"),
+			wal::LoadParams { page_size },
+		)
+		.unwrap();
+		let cache = Arc::new(PageCache::new(storage, 64 * 1024));
 		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
 		let alloc_mgr = AllocManager::new(Arc::clone(&tm));
 
