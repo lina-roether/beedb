@@ -43,7 +43,7 @@ impl TransactionManager {
 	}
 
 	pub fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<(), disk::Error> {
-		let page = self.cache.read_page::<[u8]>(page_id)?;
+		let page = self.cache.read_page(page_id)?;
 		debug_assert!(buf.len() <= page.len());
 
 		buf.copy_from_slice(&page[0..buf.len()]);
@@ -88,7 +88,7 @@ impl TransactionManager {
 					buffered_writes.push((page_id, after));
 
 					self.cache
-						.write_page::<[u8]>(page_id)
+						.write_page(page_id)
 						.unwrap_or_else(|err| Self::panic_recovery_failed(err))
 						.copy_from_slice(&before);
 				}
@@ -98,7 +98,7 @@ impl TransactionManager {
 					};
 					for (page_id, data) in buffered_writes {
 						self.cache
-							.write_page::<[u8]>(*page_id)
+							.write_page(*page_id)
 							.unwrap_or_else(|err| Self::panic_recovery_failed(err))
 							.copy_from_slice(data)
 					}
@@ -147,7 +147,7 @@ impl Transaction {
 		if let Some(data) = self.writes.get(&page_id) {
 			buf.copy_from_slice(data);
 		} else {
-			let page = self.cache.read_page::<[u8]>(page_id)?;
+			let page = self.cache.read_page(page_id)?;
 			buf.copy_from_slice(&page);
 		}
 
@@ -204,21 +204,21 @@ impl Transaction {
 	}
 
 	fn create_rollback_write(&self, page_id: PageId) -> Result<(PageId, Box<[u8]>), disk::Error> {
-		let page = self.cache.read_page::<[u8]>(page_id)?;
-		Ok((page_id, page.as_bytes().into()))
+		let page = self.cache.read_page(page_id)?;
+		Ok((page_id, page.as_ref().into()))
 	}
 
 	fn apply_write(&self, page_id: PageId, data: &[u8]) -> Result<(), disk::Error> {
-		let mut page = self.cache.write_page::<[u8]>(page_id)?;
+		let mut page = self.cache.write_page(page_id)?;
 		debug_assert!(data.len() <= page.len());
 
-		page.as_bytes_mut()[0..data.len()].copy_from_slice(data);
+		page[0..data.len()].copy_from_slice(data);
 		Ok(())
 	}
 
 	fn track_write(&self, tid: u64, page_id: PageId, data: &[u8]) -> Result<(), Error> {
 		let mut state = self.state.lock();
-		let page = self.cache.read_page::<[u8]>(page_id)?;
+		let page = self.cache.read_page(page_id)?;
 		let seq = state.next_seq();
 		state.wal.push_write(tid, seq, page_id, &page, data);
 		Ok(())
@@ -266,8 +266,8 @@ mod tests {
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
 
-		cache.write_page::<[u8]>(PageId::new(0, 1)).unwrap().fill(0);
-		cache.write_page::<[u8]>(PageId::new(0, 2)).unwrap().fill(0);
+		cache.write_page(PageId::new(0, 1)).unwrap().fill(0);
+		cache.write_page(PageId::new(0, 2)).unwrap().fill(0);
 
 		let tm = TransactionManager::new(cache, wal);
 		let mut t = tm.begin();

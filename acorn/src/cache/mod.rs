@@ -3,7 +3,6 @@ use std::{
 	mem,
 };
 
-use byte_view::ByteView;
 use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
 
@@ -40,18 +39,12 @@ impl PageCache {
 		}
 	}
 
-	pub fn read_page<T: ?Sized + ByteView>(
-		&self,
-		page_id: PageId,
-	) -> Result<PageReadGuard<T>, disk::Error> {
+	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
 		let index = self.access(page_id, false)?;
 		Ok(self.buffer.read_page(index).unwrap())
 	}
 
-	pub fn write_page<T: ?Sized + ByteView>(
-		&self,
-		page_id: PageId,
-	) -> Result<PageWriteGuard<T>, disk::Error> {
+	pub fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, disk::Error> {
 		let index = self.access(page_id, true)?;
 		Ok(self.buffer.write_page(index).unwrap())
 	}
@@ -137,12 +130,12 @@ mod tests {
 		let cache = PageCache::new(storage, 128);
 
 		{
-			let mut page_1 = cache.write_page::<[u8]>(PageId::new(0, 1)).unwrap();
+			let mut page_1 = cache.write_page(PageId::new(0, 1)).unwrap();
 			page_1.fill(69);
 		}
 
 		{
-			let mut page_2 = cache.write_page::<[u8]>(PageId::new(0, 2)).unwrap();
+			let mut page_2 = cache.write_page(PageId::new(0, 2)).unwrap();
 			page_2.fill(25);
 		}
 
@@ -150,8 +143,8 @@ mod tests {
 		cache.flush().unwrap();
 		assert_eq!(cache.num_dirty(), 0);
 
-		let page_1 = cache.read_page::<[u8]>(PageId::new(0, 1)).unwrap();
-		let page_2 = cache.read_page::<[u8]>(PageId::new(0, 2)).unwrap();
+		let page_1 = cache.read_page(PageId::new(0, 1)).unwrap();
+		let page_2 = cache.read_page(PageId::new(0, 2)).unwrap();
 
 		assert!(page_1.iter().all(|b| *b == 69));
 		assert!(page_2.iter().all(|b| *b == 25));

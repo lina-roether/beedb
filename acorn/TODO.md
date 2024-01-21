@@ -1,6 +1,5 @@
 # TODO
 
-- Remove type parameter from ReadPageGuard and WritePageGuard, they aren't really used
 - Move Wal into crate::disk::wal, and DiskStorage into crate::disk::storage
 - Unify the different defragmented error enums (Maybe a single disk::Error?)
 - What really needs to be an Arc<T>, and what doesn't?

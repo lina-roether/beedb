@@ -6,18 +6,17 @@ use std::{
 	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use byte_view::{ByteView, Bytes};
 use parking_lot::{lock_api::RawRwLock as _, Mutex, RawRwLock};
 use static_assertions::assert_impl_all;
 
 use crate::{consts::PAGE_ALIGNMENT, utils::aligned_buf::AlignedBuffer};
 
-pub struct PageReadGuard<'a, T: ?Sized + ByteView> {
+pub struct PageReadGuard<'a> {
 	lock: &'a RawRwLock,
-	page: &'a Bytes<T>,
+	page: &'a [u8],
 }
 
-impl<'a, T: ?Sized + ByteView> Drop for PageReadGuard<'a, T> {
+impl<'a> Drop for PageReadGuard<'a> {
 	fn drop(&mut self) {
 		unsafe {
 			self.lock.unlock_shared();
@@ -25,8 +24,8 @@ impl<'a, T: ?Sized + ByteView> Drop for PageReadGuard<'a, T> {
 	}
 }
 
-impl<'a, T: ?Sized + ByteView> Deref for PageReadGuard<'a, T> {
-	type Target = Bytes<T>;
+impl<'a> Deref for PageReadGuard<'a> {
+	type Target = [u8];
 
 	#[inline]
 	fn deref(&self) -> &Self::Target {
@@ -34,19 +33,19 @@ impl<'a, T: ?Sized + ByteView> Deref for PageReadGuard<'a, T> {
 	}
 }
 
-impl<'a, T: ?Sized + ByteView> AsRef<Bytes<T>> for PageReadGuard<'a, T> {
+impl<'a> AsRef<[u8]> for PageReadGuard<'a> {
 	#[inline]
-	fn as_ref(&self) -> &Bytes<T> {
+	fn as_ref(&self) -> &[u8] {
 		self
 	}
 }
 
-pub struct PageWriteGuard<'a, T: ?Sized + ByteView> {
+pub struct PageWriteGuard<'a> {
 	lock: &'a RawRwLock,
-	page: &'a mut Bytes<T>,
+	page: &'a mut [u8],
 }
 
-impl<'a, T: ?Sized + ByteView> Drop for PageWriteGuard<'a, T> {
+impl<'a> Drop for PageWriteGuard<'a> {
 	fn drop(&mut self) {
 		unsafe {
 			self.lock.unlock_exclusive();
@@ -54,8 +53,8 @@ impl<'a, T: ?Sized + ByteView> Drop for PageWriteGuard<'a, T> {
 	}
 }
 
-impl<'a, T: ?Sized + ByteView> Deref for PageWriteGuard<'a, T> {
-	type Target = Bytes<T>;
+impl<'a> Deref for PageWriteGuard<'a> {
+	type Target = [u8];
 
 	#[inline]
 	fn deref(&self) -> &Self::Target {
@@ -63,23 +62,23 @@ impl<'a, T: ?Sized + ByteView> Deref for PageWriteGuard<'a, T> {
 	}
 }
 
-impl<'a, T: ?Sized + ByteView> DerefMut for PageWriteGuard<'a, T> {
+impl<'a> DerefMut for PageWriteGuard<'a> {
 	#[inline]
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.page
 	}
 }
 
-impl<'a, T: ?Sized + ByteView> AsRef<Bytes<T>> for PageWriteGuard<'a, T> {
+impl<'a> AsRef<[u8]> for PageWriteGuard<'a> {
 	#[inline]
-	fn as_ref(&self) -> &Bytes<T> {
+	fn as_ref(&self) -> &[u8] {
 		self
 	}
 }
 
-impl<'a, T: ?Sized + ByteView> AsMut<Bytes<T>> for PageWriteGuard<'a, T> {
+impl<'a> AsMut<[u8]> for PageWriteGuard<'a> {
 	#[inline]
-	fn as_mut(&mut self) -> &mut Bytes<T> {
+	fn as_mut(&mut self) -> &mut [u8] {
 		self
 	}
 }
@@ -146,7 +145,7 @@ impl PageBuffer {
 		Some(allocated_idx)
 	}
 
-	pub fn read_page<T: ?Sized + ByteView>(&self, index: usize) -> Option<PageReadGuard<T>> {
+	pub fn read_page(&self, index: usize) -> Option<PageReadGuard> {
 		let meta = &self.meta[index];
 		if !meta.occupied.load(Ordering::Relaxed) {
 			return None;
@@ -154,11 +153,11 @@ impl PageBuffer {
 		meta.lock.lock_shared();
 		Some(PageReadGuard {
 			lock: &meta.lock,
-			page: Bytes::new(unsafe { &(*self.pages.get())[self.range_of_page(index)] }).unwrap(),
+			page: unsafe { &(*self.pages.get())[self.range_of_page(index)] },
 		})
 	}
 
-	pub fn write_page<T: ?Sized + ByteView>(&self, index: usize) -> Option<PageWriteGuard<T>> {
+	pub fn write_page(&self, index: usize) -> Option<PageWriteGuard> {
 		let meta = &self.meta[index];
 		if !meta.occupied.load(Ordering::Relaxed) {
 			return None;
@@ -166,8 +165,7 @@ impl PageBuffer {
 		meta.lock.lock_exclusive();
 		Some(PageWriteGuard {
 			lock: &meta.lock,
-			page: Bytes::new_mut(unsafe { &mut (*self.pages.get())[self.range_of_page(index)] })
-				.unwrap(),
+			page: unsafe { &mut (*self.pages.get())[self.range_of_page(index)] },
 		})
 	}
 
@@ -215,20 +213,20 @@ mod tests {
 		let idx_2 = buffer.allocate_page().unwrap();
 
 		{
-			let mut page_1 = buffer.write_page::<[u8]>(idx_1).unwrap();
+			let mut page_1 = buffer.write_page(idx_1).unwrap();
 			page_1.copy_from_slice(b"moin");
 		}
 
 		{
-			let mut page_2 = buffer.write_page::<[u8]>(idx_2).unwrap();
+			let mut page_2 = buffer.write_page(idx_2).unwrap();
 			page_2.copy_from_slice(b"tree");
 		}
 
-		let page_1 = buffer.read_page::<[u8]>(idx_1).unwrap();
-		let page_2 = buffer.read_page::<[u8]>(idx_2).unwrap();
+		let page_1 = buffer.read_page(idx_1).unwrap();
+		let page_2 = buffer.read_page(idx_2).unwrap();
 
-		assert_eq!(**page_1, *b"moin");
-		assert_eq!(**page_2, *b"tree");
+		assert_eq!(*page_1, *b"moin");
+		assert_eq!(*page_2, *b"tree");
 	}
 
 	#[test]
@@ -238,7 +236,7 @@ mod tests {
 		let idx = buffer.allocate_page().unwrap();
 		buffer.free_page(idx);
 
-		assert!(buffer.read_page::<[u8]>(idx).is_none());
+		assert!(buffer.read_page(idx).is_none());
 	}
 
 	#[test]
