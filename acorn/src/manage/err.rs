@@ -2,7 +2,7 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::{disk, id::PageId};
+use crate::{disk::storage, id::PageId};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -13,7 +13,7 @@ pub enum Error {
 	SizeLimitReached,
 
 	#[error(transparent)]
-	Disk(#[from] disk::Error),
+	Disk(#[from] storage::Error),
 
 	#[error("Failed to read from WAL: {0}")]
 	WalRead(io::Error),

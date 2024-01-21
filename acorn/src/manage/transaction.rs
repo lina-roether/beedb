@@ -15,7 +15,7 @@ use static_assertions::assert_impl_all;
 use crate::{
 	cache::PageCache,
 	consts::PAGE_ALIGNMENT,
-	disk,
+	disk::storage,
 	id::PageId,
 	utils::aligned_buf::AlignedBuffer,
 	wal::{self, Wal},
@@ -42,7 +42,7 @@ impl TransactionManager {
 		tm
 	}
 
-	pub fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<(), disk::Error> {
+	pub fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<(), storage::Error> {
 		let page = self.cache.read_page(page_id)?;
 		debug_assert!(buf.len() <= page.len());
 
@@ -143,7 +143,7 @@ pub struct Transaction {
 }
 
 impl Transaction {
-	pub fn read(&mut self, page_id: PageId, buf: &mut [u8]) -> Result<(), disk::Error> {
+	pub fn read(&mut self, page_id: PageId, buf: &mut [u8]) -> Result<(), storage::Error> {
 		if let Some(data) = self.writes.get(&page_id) {
 			buf.copy_from_slice(data);
 		} else {
@@ -168,7 +168,7 @@ impl Transaction {
 	pub fn commit(self) -> Result<(), Error> {
 		self.track_commit(self.tid)?;
 		let mut rollback_list: Vec<(PageId, Box<[u8]>)> = Vec::new();
-		let mut write_err: Option<disk::Error> = None;
+		let mut write_err: Option<storage::Error> = None;
 
 		// Try to write all the changes to the storage
 		for (page_id, buf) in &self.writes {
@@ -203,12 +203,15 @@ impl Transaction {
 		Ok(())
 	}
 
-	fn create_rollback_write(&self, page_id: PageId) -> Result<(PageId, Box<[u8]>), disk::Error> {
+	fn create_rollback_write(
+		&self,
+		page_id: PageId,
+	) -> Result<(PageId, Box<[u8]>), storage::Error> {
 		let page = self.cache.read_page(page_id)?;
 		Ok((page_id, page.as_ref().into()))
 	}
 
-	fn apply_write(&self, page_id: PageId, data: &[u8]) -> Result<(), disk::Error> {
+	fn apply_write(&self, page_id: PageId, data: &[u8]) -> Result<(), storage::Error> {
 		let mut page = self.cache.write_page(page_id)?;
 		debug_assert!(data.len() <= page.len());
 
@@ -246,9 +249,7 @@ mod tests {
 
 	use tempfile::tempdir;
 
-	use crate::{consts::DEFAULT_PAGE_SIZE, wal};
-
-	use self::disk::DiskStorage;
+	use crate::{consts::DEFAULT_PAGE_SIZE, disk::storage::Storage, wal};
 
 	use super::*;
 
@@ -258,10 +259,10 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn simple_transaction() {
 		let dir = tempdir().unwrap();
-		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
+		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
 		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
 
-		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		let storage = Storage::load(dir.path().into()).unwrap();
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));

@@ -9,7 +9,7 @@ use static_assertions::assert_impl_all;
 use self::{buffer::PageBuffer, manager::CacheManager};
 
 use crate::{
-	disk::{self, DiskStorage},
+	disk::storage::{self, Storage},
 	id::PageId,
 };
 
@@ -21,13 +21,13 @@ pub use buffer::{PageReadGuard, PageWriteGuard};
 pub struct PageCache {
 	state: Mutex<CacheState>,
 	buffer: PageBuffer,
-	storage: DiskStorage,
+	storage: Storage,
 }
 
 assert_impl_all!(PageCache: Send, Sync);
 
 impl PageCache {
-	pub fn new(storage: DiskStorage, length: usize) -> Self {
+	pub fn new(storage: Storage, length: usize) -> Self {
 		Self {
 			state: Mutex::new(CacheState {
 				manager: CacheManager::new(length),
@@ -39,12 +39,12 @@ impl PageCache {
 		}
 	}
 
-	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, disk::Error> {
+	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, storage::Error> {
 		let index = self.access(page_id, false)?;
 		Ok(self.buffer.read_page(index).unwrap())
 	}
 
-	pub fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, disk::Error> {
+	pub fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, storage::Error> {
 		let index = self.access(page_id, true)?;
 		Ok(self.buffer.write_page(index).unwrap())
 	}
@@ -54,7 +54,7 @@ impl PageCache {
 		self.state.lock().dirty.len()
 	}
 
-	pub fn flush(&self) -> Result<(), disk::Error> {
+	pub fn flush(&self) -> Result<(), storage::Error> {
 		let mut state = self.state.lock();
 		for dirty_page in state.dirty.iter().copied() {
 			let index = *state.map.get(&dirty_page).unwrap();
@@ -65,7 +65,7 @@ impl PageCache {
 		Ok(())
 	}
 
-	fn access(&self, page_id: PageId, dirty: bool) -> Result<usize, disk::Error> {
+	fn access(&self, page_id: PageId, dirty: bool) -> Result<usize, storage::Error> {
 		let mut state = self.state.lock();
 		state.manager.access(page_id);
 
@@ -125,8 +125,8 @@ mod tests {
 	#[cfg_attr(miri, ignore)]
 	fn simple_read_write() {
 		let dir = tempdir().unwrap();
-		DiskStorage::init(dir.path(), disk::InitParams::default()).unwrap();
-		let storage = DiskStorage::load(dir.path().into()).unwrap();
+		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
+		let storage = Storage::load(dir.path().into()).unwrap();
 		let cache = PageCache::new(storage, 128);
 
 		{

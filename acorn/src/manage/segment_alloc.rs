@@ -161,7 +161,7 @@ mod tests {
 
 	use crate::{
 		cache::PageCache,
-		disk::{self, DiskStorage},
+		disk::storage::{self, Storage},
 		manage::transaction::TransactionManager,
 		wal::{self, Wal},
 	};
@@ -173,10 +173,10 @@ mod tests {
 	fn alloc_page() {
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();
-		DiskStorage::init(dir.path().join("storage"), disk::InitParams::default()).unwrap();
+		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
 		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
 
-		let storage = DiskStorage::load(dir.path().join("storage")).unwrap();
+		let storage = Storage::load(dir.path().join("storage")).unwrap();
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
@@ -195,10 +195,10 @@ mod tests {
 	fn alloc_and_free_page() {
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();
-		DiskStorage::init(dir.path().join("storage"), disk::InitParams::default()).unwrap();
+		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
 		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
 
-		let storage = DiskStorage::load(dir.path().join("storage")).unwrap();
+		let storage = Storage::load(dir.path().join("storage")).unwrap();
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
