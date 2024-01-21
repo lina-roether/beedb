@@ -10,7 +10,7 @@ use byte_view::{ByteView, Bytes};
 use parking_lot::{lock_api::RawRwLock as _, Mutex, RawRwLock};
 use static_assertions::assert_impl_all;
 
-use crate::utils::aligned_buf::AlignedBuffer;
+use crate::{consts::PAGE_ALIGNMENT, utils::aligned_buf::AlignedBuffer};
 
 pub struct PageReadGuard<'a, T: ?Sized + ByteView> {
 	lock: &'a RawRwLock,
@@ -103,8 +103,6 @@ unsafe impl Sync for PageBuffer {}
 assert_impl_all!(PageBuffer: Send, Sync);
 
 impl PageBuffer {
-	const PAGE_ALIGNMENT: usize = 8;
-
 	pub fn new(page_size: usize, length: usize) -> Self {
 		let (buf_layout, page_size_padded) = Self::page_buffer_layout(page_size, length);
 
@@ -186,7 +184,7 @@ impl PageBuffer {
 	}
 
 	fn page_buffer_layout(page_size: usize, length: usize) -> (Layout, usize) {
-		let page_layout = Layout::from_size_align(page_size, Self::PAGE_ALIGNMENT).unwrap();
+		let page_layout = Layout::from_size_align(page_size, PAGE_ALIGNMENT).unwrap();
 		page_layout.repeat(length).unwrap()
 	}
 }

@@ -11,6 +11,7 @@ pub const DEFAULT_PAGE_SIZE: u16 = 16 * KiB as u16;
 pub const PAGE_SIZE_RANGE: RangeInclusive<u16> = (512 * B as u16)..=(32 * KiB as u16);
 pub const SEGMENT_FORMAT_VERSION: u8 = 1;
 pub const META_FORMAT_VERSION: u8 = 1;
+pub const PAGE_ALIGNMENT: usize = 8;
 
 #[derive(Debug, Error)]
 #[error(

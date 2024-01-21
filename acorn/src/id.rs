@@ -6,6 +6,7 @@ use byte_view::ByteView;
 pub struct PageId {
 	pub segment_num: u32,
 	pub page_num: u16,
+	pub _placeholder: u16,
 }
 
 impl PageId {
@@ -14,6 +15,7 @@ impl PageId {
 		Self {
 			segment_num,
 			page_num,
+			_placeholder: 0,
 		}
 	}
 }

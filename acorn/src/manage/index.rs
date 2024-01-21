@@ -5,19 +5,24 @@ use crate::{
 	pages::BTreePage,
 };
 
-use super::{err::Error, rw::PageRwManager};
+use super::err::Error;
 
 pub mod b_tree {
 	use std::mem;
 
+	use byte_view::ViewBuf;
+
+	use crate::manage::transaction::TransactionManager;
+
 	use super::*;
 
 	pub fn search<K: ByteView + Ord>(
-		rw_mgr: &PageRwManager,
+		tm: &TransactionManager,
 		root: PageId,
 		key: K,
 	) -> Result<Option<ItemId>, Error> {
-		let page = rw_mgr.read_page::<BTreePage<K>>(root)?;
+		let mut page: ViewBuf<BTreePage<K>> = ViewBuf::new();
+		tm.read(root, page.as_bytes_mut())?;
 
 		let mut pointer = None;
 		for section in &page.sections {
@@ -36,6 +41,6 @@ pub mod b_tree {
 
 		mem::drop(page);
 
-		search(rw_mgr, next_root, key)
+		search(tm, next_root, key)
 	}
 }

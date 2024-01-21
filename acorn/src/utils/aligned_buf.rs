@@ -45,6 +45,12 @@ impl AlignedBuffer {
 		Self::with_layout(Layout::new::<T>())
 	}
 
+	pub fn from_bytes(bytes: &[u8], align: usize) -> Self {
+		let mut buf = Self::with_capacity(align, bytes.len());
+		buf.copy_from_slice(bytes);
+		buf
+	}
+
 	#[inline]
 	pub fn align(&self) -> usize {
 		self.layout.align()
