@@ -97,7 +97,6 @@ impl<T: IoTarget> SegmentFile<T> {
 			page_size: params.page_size,
 			byte_order: ByteOrder::NATIVE as u8,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 		if target.write_at(header.as_bytes(), 0)? != header.size() {
@@ -210,7 +209,6 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -252,7 +250,6 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -279,7 +276,6 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -308,7 +304,6 @@ mod tests {
 			byte_order: 3,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -340,7 +335,6 @@ mod tests {
 			} as u8,
 			page_size: 16 * KiB as u16,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 
@@ -369,7 +363,6 @@ mod tests {
 			byte_order: ByteOrder::NATIVE as u8,
 			page_size: 15 * KiB as u16,
 			num_pages: 1,
-			free_pages: 0,
 			freelist_trunk: None,
 		};
 

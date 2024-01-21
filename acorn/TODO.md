@@ -1,5 +1,7 @@
 # TODO
 
-- What really needs to be an Arc<T>, and what doesn't?
-- Implement warning for incomplete byte coverage for ByteView?
+- I'm pretty sure SegmentAllocManager is broken as it stands...
+  It stores its state inside the segment's header page, while it should really keep track
+  of allocation structures in memory, because otherwise the state won't be synchronized until the allocation
+  finishes
 - Rework error structure once the public api is more established

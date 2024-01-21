@@ -5,6 +5,7 @@
 #![feature(ptr_metadata)]
 #![feature(pointer_is_aligned)]
 #![feature(test)]
+#![feature(negative_impls)]
 #![allow(dead_code)]
 
 #[cfg(test)]

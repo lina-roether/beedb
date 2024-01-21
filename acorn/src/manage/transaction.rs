@@ -52,6 +52,11 @@ impl TransactionManager {
 		Ok(())
 	}
 
+	#[inline]
+	pub fn segment_nums(&self) -> Box<[u32]> {
+		self.cache.segment_nums()
+	}
+
 	pub fn begin(&self) -> Transaction {
 		Transaction {
 			tid: self.next_tid(),

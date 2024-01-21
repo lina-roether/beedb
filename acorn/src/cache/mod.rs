@@ -54,6 +54,11 @@ impl PageCache {
 		self.state.lock().dirty.len()
 	}
 
+	#[inline]
+	pub fn segment_nums(&self) -> Box<[u32]> {
+		self.storage.segment_nums()
+	}
+
 	pub fn flush(&self) -> Result<(), storage::Error> {
 		let mut state = self.state.lock();
 		for dirty_page in state.dirty.iter().copied() {

@@ -123,7 +123,8 @@ impl Storage {
 		self.page_size
 	}
 
-	pub fn segments(&self) -> Box<[u32]> {
+	#[inline]
+	pub fn segment_nums(&self) -> Box<[u32]> {
 		self.state.read().iter_loaded_segments().collect()
 	}
 

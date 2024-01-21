@@ -1,7 +1,6 @@
 use std::{num::NonZeroU16, sync::Arc};
 
 use byte_view::ViewBuf;
-use static_assertions::assert_impl_all;
 
 use crate::{
 	id::PageId,
@@ -18,7 +17,7 @@ pub struct SegmentAllocManager {
 	tm: Arc<TransactionManager>,
 }
 
-assert_impl_all!(SegmentAllocManager: Send, Sync);
+impl !Sync for SegmentAllocManager {}
 
 impl SegmentAllocManager {
 	const MAX_NUM_PAGES: u16 = u16::MAX;
@@ -30,6 +29,11 @@ impl SegmentAllocManager {
 	#[inline]
 	pub fn segment_num(&self) -> u32 {
 		self.segment_num
+	}
+
+	pub fn has_free_pages(&self) -> Result<bool, Error> {
+		let header_page = self.read_header_page()?;
+		Ok(header_page.freelist_trunk.is_some() || header_page.num_pages != Self::MAX_NUM_PAGES)
 	}
 
 	pub fn alloc_page(&self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error> {
