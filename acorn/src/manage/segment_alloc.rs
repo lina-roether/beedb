@@ -161,9 +161,11 @@ mod tests {
 
 	use crate::{
 		cache::PageCache,
-		disk::storage::{self, Storage},
+		disk::{
+			storage::{self, Storage},
+			wal::{self, Wal},
+		},
 		manage::transaction::TransactionManager,
-		wal::{self, Wal},
 	};
 
 	use super::*;

@@ -15,10 +15,12 @@ use static_assertions::assert_impl_all;
 use crate::{
 	cache::PageCache,
 	consts::PAGE_ALIGNMENT,
-	disk::storage,
+	disk::{
+		storage,
+		wal::{self, Wal},
+	},
 	id::PageId,
 	utils::aligned_buf::AlignedBuffer,
-	wal::{self, Wal},
 };
 
 use super::err::Error;
@@ -249,7 +251,7 @@ mod tests {
 
 	use tempfile::tempdir;
 
-	use crate::{consts::DEFAULT_PAGE_SIZE, disk::storage::Storage, wal};
+	use crate::{consts::DEFAULT_PAGE_SIZE, disk::storage::Storage};
 
 	use super::*;
 
