@@ -12,17 +12,17 @@ pub mod b_tree {
 
 	use byte_view::ViewBuf;
 
-	use crate::manage::transaction::TransactionManager;
+	use crate::manage::read::ReadManager;
 
 	use super::*;
 
 	pub fn search<K: ByteView + Ord>(
-		tm: &TransactionManager,
+		rm: &ReadManager,
 		root: PageId,
 		key: K,
 	) -> Result<Option<ItemId>, Error> {
 		let mut page: ViewBuf<BTreePage<K>> = ViewBuf::new();
-		tm.read(root, page.as_bytes_mut())?;
+		rm.read(root, page.as_bytes_mut())?;
 
 		let mut pointer = None;
 		for section in &page.sections {
@@ -41,6 +41,6 @@ pub mod b_tree {
 
 		mem::drop(page);
 
-		search(tm, next_root, key)
+		search(rm, next_root, key)
 	}
 }

@@ -4,31 +4,27 @@ use parking_lot::Mutex;
 
 use crate::{id::PageId, utils::array_map::ArrayMap};
 
-use super::{
-	err::Error,
-	segment::SegmentManager,
-	transaction::{Transaction, TransactionManager},
-};
+use super::{err::Error, read::ReadManager, segment::SegmentManager, transaction::Transaction};
 
 pub struct AllocManager {
 	state: Mutex<State>,
-	tm: Arc<TransactionManager>,
+	rm: Arc<ReadManager>,
 }
 
 impl AllocManager {
-	pub fn new(tm: Arc<TransactionManager>) -> Result<Self, Error> {
+	pub fn new(rm: Arc<ReadManager>) -> Result<Self, Error> {
 		let mut state = State {
 			segments: ArrayMap::new(),
 			free_cache: HashSet::new(),
 			next_segment: 0,
 		};
-		for segment_num in tm.segment_nums().iter() {
-			state.add_segment(*segment_num, Arc::clone(&tm))?;
+		for segment_num in rm.segment_nums().iter() {
+			state.add_segment(*segment_num, Arc::clone(&rm))?;
 		}
 
 		Ok(Self {
 			state: Mutex::new(state),
-			tm,
+			rm,
 		})
 	}
 
@@ -58,7 +54,7 @@ impl AllocManager {
 	fn alloc_in_new_segment(&self, t: &mut Transaction) -> Result<PageId, Error> {
 		let mut state = self.state.lock();
 		let next_segment = state.next_segment;
-		let Some(page_id) = state.try_alloc_in_new(t, next_segment, Arc::clone(&self.tm))? else {
+		let Some(page_id) = state.try_alloc_in_new(t, next_segment, Arc::clone(&self.rm))? else {
 			return Err(Error::SizeLimitReached);
 		};
 		Ok(page_id)
@@ -90,12 +86,12 @@ impl State {
 		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
-		tm: Arc<TransactionManager>,
+		rm: Arc<ReadManager>,
 	) -> Result<Option<PageId>, Error> {
 		if self.has_segment(segment_num) {
 			self.try_alloc_in_existing(t, segment_num)
 		} else {
-			self.try_alloc_in_new(t, segment_num, tm)
+			self.try_alloc_in_new(t, segment_num, rm)
 		}
 	}
 
@@ -117,9 +113,9 @@ impl State {
 		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
-		tm: Arc<TransactionManager>,
+		rm: Arc<ReadManager>,
 	) -> Result<Option<PageId>, Error> {
-		let segment = self.add_segment(segment_num, tm)?;
+		let segment = self.add_segment(segment_num, rm)?;
 		let Some(page_num) = segment.alloc_page(t)? else {
 			return Ok(None);
 		};
@@ -133,9 +129,9 @@ impl State {
 	fn add_segment(
 		&mut self,
 		segment_num: u32,
-		tm: Arc<TransactionManager>,
+		rm: Arc<ReadManager>,
 	) -> Result<&mut SegmentManager, Error> {
-		let segment_alloc = SegmentManager::new(tm, segment_num)?;
+		let segment_alloc = SegmentManager::new(rm, segment_num)?;
 		if segment_alloc.has_free_pages() {
 			self.free_cache.insert(segment_num);
 		}
@@ -194,8 +190,9 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
-		let alloc_mgr = AllocManager::new(Arc::clone(&tm)).unwrap();
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
 		let mut t = tm.begin();
 		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
@@ -229,8 +226,9 @@ mod tests {
 		)
 		.unwrap();
 		let cache = Arc::new(PageCache::new(storage, 64 * 1024));
-		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
-		let alloc_mgr = AllocManager::new(Arc::clone(&tm)).unwrap();
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
 		b.iter(|| {
 			let mut t = tm.begin();
@@ -255,8 +253,9 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
-		let alloc_mgr = AllocManager::new(Arc::clone(&tm)).unwrap();
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
 		let mut t = tm.begin();
 		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
@@ -279,8 +278,9 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
-		let alloc_mgr = AllocManager::new(Arc::clone(&tm)).unwrap();
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
 		let mut t = tm.begin();
 		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();

@@ -7,28 +7,25 @@ use crate::{
 	pages::{FreelistPage, HeaderPage},
 };
 
-use super::{
-	err::Error,
-	transaction::{Transaction, TransactionManager},
-};
+use super::{err::Error, read::ReadManager, transaction::Transaction};
 
 pub struct SegmentManager {
 	segment_num: u32,
-	tm: Arc<TransactionManager>,
+	rm: Arc<ReadManager>,
 	header: ViewBuf<HeaderPage>,
 	freelist_stack: Vec<FreelistStackEntry>,
 }
 
 impl SegmentManager {
-	pub fn new(tm: Arc<TransactionManager>, segment_num: u32) -> Result<Self, Error> {
+	pub fn new(rm: Arc<ReadManager>, segment_num: u32) -> Result<Self, Error> {
 		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
-		tm.read(PageId::new(segment_num, 0), header.as_bytes_mut())?;
+		rm.read(PageId::new(segment_num, 0), header.as_bytes_mut())?;
 
 		let mut freelist_stack = Vec::new();
 		let mut next = header.freelist_trunk;
 		while let Some(page_num) = next {
-			let mut entry = FreelistStackEntry::new(page_num, tm.page_size()).unwrap();
-			tm.read(
+			let mut entry = FreelistStackEntry::new(page_num, rm.page_size()).unwrap();
+			rm.read(
 				PageId::new(segment_num, page_num.get()),
 				entry.buf.as_bytes_mut(),
 			)?;
@@ -39,7 +36,7 @@ impl SegmentManager {
 
 		Ok(Self {
 			segment_num,
-			tm,
+			rm,
 			header,
 			freelist_stack,
 		})
@@ -120,7 +117,7 @@ impl SegmentManager {
 	fn push_trunk(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
 		self.set_trunk(t, Some(page_num))?;
 		self.freelist_stack
-			.push(FreelistStackEntry::new(page_num, self.tm.page_size()).unwrap());
+			.push(FreelistStackEntry::new(page_num, self.rm.page_size()).unwrap());
 		let mut new_trunk = self.get_trunk().unwrap();
 		new_trunk.reset();
 		new_trunk.write(t)?;
@@ -246,6 +243,7 @@ mod tests {
 			storage::{self, Storage},
 			wal::{self, Wal},
 		},
+		manage::{read::ReadManager, transaction::TransactionManager},
 	};
 
 	use super::*;
@@ -260,9 +258,10 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 
-		let mut freelist_mgr = SegmentManager::new(Arc::clone(&tm), 0).unwrap();
+		let mut freelist_mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
 
 		let mut t = tm.begin();
 		freelist_mgr
@@ -274,14 +273,14 @@ mod tests {
 		t.commit().unwrap();
 
 		let mut header_page: ViewBuf<HeaderPage> = ViewBuf::new();
-		tm.read(PageId::new(0, 0), header_page.as_bytes_mut())
+		rm.read(PageId::new(0, 0), header_page.as_bytes_mut())
 			.unwrap();
 
 		assert_eq!(header_page.freelist_trunk, NonZeroU16::new(69));
 
 		let mut freelist_page: ViewBuf<FreelistPage> =
-			ViewBuf::new_with_size(tm.page_size().into()).unwrap();
-		tm.read(PageId::new(0, 69), freelist_page.as_bytes_mut())
+			ViewBuf::new_with_size(rm.page_size().into()).unwrap();
+		rm.read(PageId::new(0, 69), freelist_page.as_bytes_mut())
 			.unwrap();
 
 		assert_eq!(freelist_page.length, 1);
@@ -298,9 +297,10 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(Arc::clone(&cache), wal));
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 
-		let mut freelist_mgr = SegmentManager::new(Arc::clone(&tm), 0).unwrap();
+		let mut freelist_mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
 
 		let mut t = tm.begin();
 		freelist_mgr
@@ -334,8 +334,9 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(cache, wal));
-		let mut mgr = SegmentManager::new(Arc::clone(&tm), 0).unwrap();
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		let mut mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
 
 		let mut t = tm.begin();
 		let page = mgr.alloc_page(&mut t).unwrap().unwrap();
@@ -355,8 +356,9 @@ mod tests {
 		let wal =
 			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = Arc::new(TransactionManager::new(cache, wal));
-		let mut mgr = SegmentManager::new(Arc::clone(&tm), 0).unwrap();
+		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		let mut mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
 
 		let mut t = tm.begin();
 		let page = mgr.alloc_page(&mut t).unwrap().unwrap();

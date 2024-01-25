@@ -44,24 +44,6 @@ impl TransactionManager {
 		tm
 	}
 
-	pub fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<(), storage::Error> {
-		let page = self.cache.read_page(page_id)?;
-		debug_assert!(buf.len() <= page.len());
-
-		buf.copy_from_slice(&page[0..buf.len()]);
-		Ok(())
-	}
-
-	#[inline]
-	pub fn segment_nums(&self) -> Box<[u32]> {
-		self.cache.segment_nums()
-	}
-
-	#[inline]
-	pub fn page_size(&self) -> u16 {
-		self.cache.page_size()
-	}
-
 	pub fn begin(&self) -> Transaction {
 		Transaction {
 			tid: self.next_tid(),
