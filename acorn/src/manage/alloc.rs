@@ -6,7 +6,7 @@ use crate::{id::PageId, utils::array_map::ArrayMap};
 
 use super::{err::Error, read::ReadManager, segment::SegmentManager, transaction::Transaction};
 
-pub struct AllocManager {
+pub(super) struct AllocManager {
 	state: Mutex<State>,
 	rm: Arc<ReadManager>,
 }

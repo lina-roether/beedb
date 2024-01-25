@@ -4,7 +4,7 @@ use crate::{cache::PageCache, id::PageId};
 
 use super::err::Error;
 
-pub struct ReadManager {
+pub(super) struct ReadManager {
 	cache: Arc<PageCache>,
 }
 

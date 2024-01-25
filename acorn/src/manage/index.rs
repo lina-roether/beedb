@@ -7,7 +7,7 @@ use crate::{
 
 use super::err::Error;
 
-pub mod b_tree {
+pub(super) mod b_tree {
 	use std::mem;
 
 	use byte_view::ViewBuf;

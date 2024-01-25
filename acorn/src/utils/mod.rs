@@ -1,4 +1,4 @@
-pub mod aligned_buf;
-pub mod array_map;
-pub mod byte_order;
-pub mod units;
+pub(crate) mod aligned_buf;
+pub(crate) mod array_map;
+pub(crate) mod byte_order;
+pub(crate) mod units;

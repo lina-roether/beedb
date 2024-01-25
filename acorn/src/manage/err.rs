@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::{disk::storage, id::PageId};
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub(crate) enum Error {
 	#[error("Segment {0} is corrupted")]
 	CorruptedSegment(u32),
 

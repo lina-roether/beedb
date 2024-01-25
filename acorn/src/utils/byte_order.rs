@@ -2,7 +2,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ByteOrder {
+pub(crate) enum ByteOrder {
 	Big = 0,
 	Little = 1,
 }

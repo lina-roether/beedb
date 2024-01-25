@@ -16,9 +16,9 @@ use crate::{
 mod buffer;
 mod manager;
 
-pub use buffer::{PageReadGuard, PageWriteGuard};
+pub(crate) use buffer::{PageReadGuard, PageWriteGuard};
 
-pub struct PageCache {
+pub(crate) struct PageCache {
 	state: Mutex<CacheState>,
 	buffer: PageBuffer,
 	storage: Storage,

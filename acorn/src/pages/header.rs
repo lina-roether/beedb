@@ -4,7 +4,7 @@ use byte_view::ByteView;
 
 #[derive(Debug, ByteView)]
 #[repr(C)]
-pub struct HeaderPage {
+pub(crate) struct HeaderPage {
 	pub magic: [u8; 4],
 	pub format_version: u8,
 	pub byte_order: u8,

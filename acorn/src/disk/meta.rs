@@ -18,7 +18,7 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub enum LoadError {
+pub(crate) enum LoadError {
 	#[error(
 		"The provided file is not a storage meta file (expected magic bytes {META_MAGIC:08x?})"
 	)]
@@ -41,7 +41,7 @@ pub enum LoadError {
 }
 
 #[derive(Debug, Error)]
-pub enum InitError {
+pub(crate) enum InitError {
 	#[error(transparent)]
 	PageSizeBounds(#[from] PageSizeBoundsError),
 
@@ -49,7 +49,7 @@ pub enum InitError {
 	Io(#[from] io::Error),
 }
 
-pub struct InitParams {
+pub(crate) struct InitParams {
 	pub page_size: u16,
 }
 
@@ -65,7 +65,7 @@ impl Default for InitParams {
  * TODO: Maybe this should just mmap() the file?
  */
 
-pub struct StorageMetaBuf<F: IoTarget> {
+pub(super) struct StorageMetaBuf<F: IoTarget> {
 	meta: ViewBuf<StorageMeta>,
 	file: F,
 }
@@ -154,7 +154,7 @@ impl<T: IoTarget> DerefMut for StorageMetaBuf<T> {
 
 #[derive(ByteView)]
 #[repr(C)]
-pub struct StorageMeta {
+pub(super) struct StorageMeta {
 	pub magic: [u8; 4],
 	pub format_version: u8,
 	pub byte_order: u8,

@@ -17,10 +17,10 @@ use super::{
 	segment::{self, SegmentFile},
 };
 
-pub use meta::InitParams;
+pub(crate) use meta::InitParams;
 
 #[derive(Debug, Error)]
-pub enum InitError {
+pub(crate) enum InitError {
 	#[error("The directory {} doesn't exist", _0.display())]
 	NoSuchDir(PathBuf),
 
@@ -35,7 +35,7 @@ pub enum InitError {
 }
 
 #[derive(Debug, Error)]
-pub enum LoadError {
+pub(crate) enum LoadError {
 	#[error("The directory {} doesn't exist", _0.display())]
 	NoSuchDir(PathBuf),
 
@@ -53,7 +53,7 @@ pub enum LoadError {
 }
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub(crate) enum Error {
 	#[error("Failed to update storage metadata: {0}")]
 	MetaWrite(io::Error),
 
@@ -73,7 +73,7 @@ pub enum Error {
 	PageWrite(PageId, io::Error),
 }
 
-pub struct Storage {
+pub(crate) struct Storage {
 	page_size: u16,
 	dir: StorageDir,
 	state: RwLock<State>,

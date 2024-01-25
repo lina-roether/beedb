@@ -8,7 +8,7 @@ use std::{
 
 use static_assertions::assert_impl_all;
 
-pub struct AlignedBuffer {
+pub(crate) struct AlignedBuffer {
 	layout: Layout,
 	bytes: *mut u8,
 }

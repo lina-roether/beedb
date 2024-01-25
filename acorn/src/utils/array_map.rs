@@ -1,7 +1,7 @@
 use std::{iter, slice};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArrayMap<T> {
+pub(crate) struct ArrayMap<T> {
 	slots: Vec<Option<T>>,
 }
 
@@ -64,7 +64,7 @@ impl<T> Default for ArrayMap<T> {
 	}
 }
 
-pub struct Iter<'a, T> {
+pub(crate) struct Iter<'a, T> {
 	key: usize,
 	slots: slice::Iter<'a, Option<T>>,
 }
@@ -93,7 +93,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
 	}
 }
 
-pub struct IterMut<'a, T> {
+pub(crate) struct IterMut<'a, T> {
 	key: usize,
 	slots: slice::IterMut<'a, Option<T>>,
 }

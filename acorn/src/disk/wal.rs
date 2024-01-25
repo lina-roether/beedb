@@ -17,13 +17,13 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub enum InitError {
+pub(crate) enum InitError {
 	#[error(transparent)]
 	Io(#[from] io::Error),
 }
 
 #[derive(Debug, Error)]
-pub enum LoadError {
+pub(crate) enum LoadError {
 	#[error("This file is not an acorn WAL file")]
 	NotAWalFile,
 
@@ -45,7 +45,7 @@ pub enum LoadError {
 }
 
 #[derive(Debug, Error)]
-pub enum ReadError {
+pub(crate) enum ReadError {
 	#[error("The WAL file is corrupted")]
 	Corrupted,
 
@@ -53,7 +53,7 @@ pub enum ReadError {
 	Io(#[from] io::Error),
 }
 
-pub struct InitParams {
+pub(crate) struct InitParams {
 	pub page_size: u16,
 }
 
@@ -65,7 +65,7 @@ impl Default for InitParams {
 	}
 }
 
-pub struct LoadParams {
+pub(crate) struct LoadParams {
 	pub page_size: u16,
 }
 
@@ -102,7 +102,7 @@ struct ItemHeader {
 	pub tid: u64,
 }
 
-pub struct Wal<T: Seek + Read + Write> {
+pub(crate) struct Wal<T: Seek + Read + Write> {
 	log_start: u64,
 	page_size: u16,
 	batch_buf: Vec<u8>,
@@ -239,7 +239,7 @@ struct Header {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Item {
+pub(crate) enum Item {
 	Write {
 		tid: u64,
 		page_id: PageId,
@@ -250,7 +250,7 @@ pub enum Item {
 	Cancel(u64),
 }
 
-pub struct Iter<'a, T: Read> {
+pub(crate) struct Iter<'a, T: Read> {
 	page_size: u16,
 	seq: u64,
 	file: BufReader<&'a mut T>,

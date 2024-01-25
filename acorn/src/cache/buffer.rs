@@ -11,7 +11,7 @@ use static_assertions::assert_impl_all;
 
 use crate::{consts::PAGE_ALIGNMENT, utils::aligned_buf::AlignedBuffer};
 
-pub struct PageReadGuard<'a> {
+pub(crate) struct PageReadGuard<'a> {
 	lock: &'a RawRwLock,
 	page: &'a [u8],
 }
@@ -40,7 +40,7 @@ impl<'a> AsRef<[u8]> for PageReadGuard<'a> {
 	}
 }
 
-pub struct PageWriteGuard<'a> {
+pub(crate) struct PageWriteGuard<'a> {
 	lock: &'a RawRwLock,
 	page: &'a mut [u8],
 }
@@ -83,7 +83,7 @@ impl<'a> AsMut<[u8]> for PageWriteGuard<'a> {
 	}
 }
 
-pub struct PageBuffer {
+pub(super) struct PageBuffer {
 	length: usize,
 	page_size: usize,
 	page_size_padded: usize,

@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use crate::id::PageId;
 
 #[derive(Debug)]
-pub struct CacheManager {
+pub(super) struct CacheManager {
 	slow: VecDeque<PageId>,
 	fast_cap: usize,
 	fast: VecDeque<PageId>,

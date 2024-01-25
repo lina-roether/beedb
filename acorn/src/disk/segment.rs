@@ -19,7 +19,7 @@ use crate::{
 use super::lock::PageLocker;
 
 #[derive(Debug, Error)]
-pub enum LoadError {
+pub(crate) enum LoadError {
 	#[error("The segment file header is corrupted")]
 	CorruptedHeader,
 
@@ -43,7 +43,7 @@ pub enum LoadError {
 }
 
 #[derive(Debug, Error)]
-pub enum InitError {
+pub(crate) enum InitError {
 	#[error("Failed to write the file header completely")]
 	IncompleteWrite,
 
@@ -51,15 +51,15 @@ pub enum InitError {
 	Io(#[from] io::Error),
 }
 
-pub struct InitParams {
+pub(super) struct InitParams {
 	pub page_size: u16,
 }
 
-pub struct LoadParams {
+pub(super) struct LoadParams {
 	pub page_size: u16,
 }
 
-pub struct SegmentFile<T: IoTarget> {
+pub(super) struct SegmentFile<T: IoTarget> {
 	page_size: u16,
 	target: UnsafeCell<T>,
 	locker: PageLocker,

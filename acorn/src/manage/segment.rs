@@ -9,7 +9,7 @@ use crate::{
 
 use super::{err::Error, read::ReadManager, transaction::Transaction};
 
-pub struct SegmentManager {
+pub(super) struct SegmentManager {
 	segment_num: u32,
 	rm: Arc<ReadManager>,
 	header: ViewBuf<HeaderPage>,

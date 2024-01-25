@@ -1,5 +1,5 @@
-pub mod storage;
-pub mod wal;
+pub(crate) mod storage;
+pub(crate) mod wal;
 
 mod dir;
 mod lock;

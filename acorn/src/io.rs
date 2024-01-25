@@ -8,7 +8,7 @@ use std::os::windows::fs::FileExt;
 
 use crate::utils::aligned_buf::AlignedBuffer;
 
-pub trait IoTarget {
+pub(crate) trait IoTarget {
 	fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
 
 	fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<usize>;

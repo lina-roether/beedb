@@ -25,7 +25,7 @@ use crate::{
 
 use super::err::Error;
 
-pub struct TransactionManager {
+pub(super) struct TransactionManager {
 	tid_counter: AtomicU64,
 	cache: Arc<PageCache>,
 	state: Arc<Mutex<State>>,
@@ -129,7 +129,7 @@ impl State {
 	}
 }
 
-pub struct Transaction {
+pub(crate) struct Transaction {
 	tid: u64,
 	state: Arc<Mutex<State>>,
 	cache: Arc<PageCache>,

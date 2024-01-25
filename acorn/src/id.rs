@@ -3,7 +3,7 @@ use core::fmt;
 use byte_view::ByteView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ByteView)]
-pub struct PageId {
+pub(crate) struct PageId {
 	pub segment_num: u32,
 	pub page_num: u16,
 	pub _placeholder: u16,
@@ -27,7 +27,7 @@ impl fmt::Display for PageId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ByteView)]
-pub struct ItemId {
+pub(crate) struct ItemId {
 	pub segment_num: u32,
 	pub page_num: u16,
 	pub index: u16,

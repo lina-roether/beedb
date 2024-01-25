@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use static_assertions::assert_impl_all;
 
-pub struct StorageDir {
+pub(super) struct StorageDir {
 	path: PathBuf,
 }
 

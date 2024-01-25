@@ -4,14 +4,14 @@ use thiserror::Error;
 
 use crate::utils::units::*;
 
-pub const SEGMENT_MAGIC: [u8; 4] = *b"ACNS";
-pub const META_MAGIC: [u8; 4] = *b"ACNM";
-pub const WAL_MAGIC: [u8; 4] = *b"ACNL";
-pub const DEFAULT_PAGE_SIZE: u16 = 16 * KiB as u16;
-pub const PAGE_SIZE_RANGE: RangeInclusive<u16> = (512 * B as u16)..=(32 * KiB as u16);
-pub const SEGMENT_FORMAT_VERSION: u8 = 1;
-pub const META_FORMAT_VERSION: u8 = 1;
-pub const PAGE_ALIGNMENT: usize = 8;
+pub(crate) const SEGMENT_MAGIC: [u8; 4] = *b"ACNS";
+pub(crate) const META_MAGIC: [u8; 4] = *b"ACNM";
+pub(crate) const WAL_MAGIC: [u8; 4] = *b"ACNL";
+pub(crate) const DEFAULT_PAGE_SIZE: u16 = 16 * KiB as u16;
+pub(crate) const PAGE_SIZE_RANGE: RangeInclusive<u16> = (512 * B as u16)..=(32 * KiB as u16);
+pub(crate) const SEGMENT_FORMAT_VERSION: u8 = 1;
+pub(crate) const META_FORMAT_VERSION: u8 = 1;
+pub(crate) const PAGE_ALIGNMENT: usize = 8;
 
 #[derive(Debug, Error)]
 #[error(
@@ -19,10 +19,10 @@ pub const PAGE_ALIGNMENT: usize = 8;
 	display_size(*PAGE_SIZE_RANGE.start() as usize),
 	display_size(*PAGE_SIZE_RANGE.end() as usize)
 )]
-pub struct PageSizeBoundsError(u16);
+pub(crate) struct PageSizeBoundsError(u16);
 
 #[inline]
-pub fn validate_page_size(size: u16) -> Result<(), PageSizeBoundsError> {
+pub(crate) fn validate_page_size(size: u16) -> Result<(), PageSizeBoundsError> {
 	if !size.is_power_of_two() || !PAGE_SIZE_RANGE.contains(&size) {
 		return Err(PageSizeBoundsError(size));
 	}

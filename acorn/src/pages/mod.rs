@@ -2,6 +2,6 @@ mod b_tree;
 mod freelist;
 mod header;
 
-pub use b_tree::*;
-pub use freelist::*;
-pub use header::*;
+pub(crate) use b_tree::*;
+pub(crate) use freelist::*;
+pub(crate) use header::*;
