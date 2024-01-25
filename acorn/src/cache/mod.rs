@@ -59,6 +59,11 @@ impl PageCache {
 		self.storage.segment_nums()
 	}
 
+	#[inline]
+	pub fn page_size(&self) -> u16 {
+		self.storage.page_size()
+	}
+
 	pub fn flush(&self) -> Result<(), storage::Error> {
 		let mut state = self.state.lock();
 		for dirty_page in state.dirty.iter().copied() {

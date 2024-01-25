@@ -1,4 +1,4 @@
-use std::{num::NonZeroU16, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU16, sync::Arc};
 
 use parking_lot::Mutex;
 
@@ -6,7 +6,7 @@ use crate::{id::PageId, utils::array_map::ArrayMap};
 
 use super::{
 	err::Error,
-	segment_alloc::SegmentAllocManager,
+	segment::SegmentManager,
 	transaction::{Transaction, TransactionManager},
 };
 
@@ -19,7 +19,7 @@ impl AllocManager {
 	pub fn new(tm: Arc<TransactionManager>) -> Result<Self, Error> {
 		let mut state = State {
 			segments: ArrayMap::new(),
-			free_stack: Vec::new(),
+			free_cache: HashSet::new(),
 			next_segment: 0,
 		};
 		for segment_num in tm.segment_nums().iter() {
@@ -33,7 +33,7 @@ impl AllocManager {
 	}
 
 	pub fn free_page(&self, t: &mut Transaction, page_id: PageId) -> Result<(), Error> {
-		let state = self.state.lock();
+		let mut state = self.state.lock();
 
 		let Some(page_num) = NonZeroU16::new(page_id.page_num) else {
 			return Ok(());
@@ -42,11 +42,14 @@ impl AllocManager {
 		let Some(segment) = state.get_segment(page_id.segment_num) else {
 			return Ok(());
 		};
-		segment.free_page(t, page_num)
+
+		segment.free_page(t, page_num)?;
+		state.free_cache_store(page_id.segment_num);
+		Ok(())
 	}
 
 	pub fn alloc_page(&self, t: &mut Transaction) -> Result<PageId, Error> {
-		if let Some(page_id) = self.alloc_from_free_stack(t)? {
+		if let Some(page_id) = self.alloc_from_free_cache(t)? {
 			return Ok(page_id);
 		}
 		self.alloc_in_new_segment(t)
@@ -61,14 +64,14 @@ impl AllocManager {
 		Ok(page_id)
 	}
 
-	fn alloc_from_free_stack(&self, t: &mut Transaction) -> Result<Option<PageId>, Error> {
+	fn alloc_from_free_cache(&self, t: &mut Transaction) -> Result<Option<PageId>, Error> {
 		let mut state = self.state.lock();
 		loop {
-			let Some(segment_num) = state.free_stack.last() else {
+			let Some(segment_num) = state.free_cache_get() else {
 				return Ok(None);
 			};
-			let Some(page_id) = state.try_alloc_in_existing(t, *segment_num)? else {
-				state.free_stack.pop();
+			let Some(page_id) = state.try_alloc_in_existing(t, segment_num)? else {
+				state.free_cache_evict(segment_num);
 				continue;
 			};
 			return Ok(Some(page_id));
@@ -77,8 +80,8 @@ impl AllocManager {
 }
 
 struct State {
-	segments: ArrayMap<SegmentAllocManager>,
-	free_stack: Vec<u32>,
+	segments: ArrayMap<SegmentManager>,
+	free_cache: HashSet<u32>,
 	next_segment: u32,
 }
 
@@ -97,7 +100,7 @@ impl State {
 	}
 
 	fn try_alloc_in_existing(
-		&self,
+		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
 	) -> Result<Option<PageId>, Error> {
@@ -131,20 +134,32 @@ impl State {
 		&mut self,
 		segment_num: u32,
 		tm: Arc<TransactionManager>,
-	) -> Result<&SegmentAllocManager, Error> {
-		let segment_alloc = SegmentAllocManager::new(tm, segment_num);
-		if segment_alloc.has_free_pages()? {
-			self.free_stack.push(segment_num);
+	) -> Result<&mut SegmentManager, Error> {
+		let segment_alloc = SegmentManager::new(tm, segment_num)?;
+		if segment_alloc.has_free_pages() {
+			self.free_cache.insert(segment_num);
 		}
 		if segment_num >= self.next_segment {
 			self.next_segment = segment_num + 1;
 		}
 		self.segments.insert(segment_num as usize, segment_alloc);
-		Ok(self.segments.get(segment_num as usize).unwrap())
+		Ok(self.segments.get_mut(segment_num as usize).unwrap())
 	}
 
-	fn get_segment(&self, segment_num: u32) -> Option<&SegmentAllocManager> {
-		self.segments.get(segment_num as usize)
+	fn get_segment(&mut self, segment_num: u32) -> Option<&mut SegmentManager> {
+		self.segments.get_mut(segment_num as usize)
+	}
+
+	fn free_cache_get(&self) -> Option<u32> {
+		self.free_cache.iter().copied().next()
+	}
+
+	fn free_cache_store(&mut self, segment_num: u32) {
+		self.free_cache.insert(segment_num);
+	}
+
+	fn free_cache_evict(&mut self, segment_num: u32) {
+		self.free_cache.remove(&segment_num);
 	}
 }
 
@@ -191,7 +206,7 @@ mod tests {
 
 	#[bench]
 	#[cfg_attr(miri, ignore)]
-	fn bench_alloc_page(b: &mut Bencher) {
+	fn bench_alloc_and_free_page(b: &mut Bencher) {
 		let page_size = *PAGE_SIZE_RANGE.start();
 
 		let dir = tempdir().unwrap();
@@ -219,7 +234,11 @@ mod tests {
 
 		b.iter(|| {
 			let mut t = tm.begin();
-			alloc_mgr.alloc_page(&mut t).unwrap();
+			let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
+			t.commit().unwrap();
+
+			let mut t = tm.begin();
+			alloc_mgr.free_page(&mut t, page_id).unwrap();
 			t.commit().unwrap();
 		});
 	}

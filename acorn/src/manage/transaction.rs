@@ -57,6 +57,11 @@ impl TransactionManager {
 		self.cache.segment_nums()
 	}
 
+	#[inline]
+	pub fn page_size(&self) -> u16 {
+		self.cache.page_size()
+	}
+
 	pub fn begin(&self) -> Transaction {
 		Transaction {
 			tid: self.next_tid(),

@@ -25,6 +25,10 @@ impl<T> ArrayMap<T> {
 		self.slots.get(key)?.as_ref()
 	}
 
+	pub fn get_mut(&mut self, key: usize) -> Option<&mut T> {
+		self.slots.get_mut(key)?.as_mut()
+	}
+
 	pub fn has(&self, key: usize) -> bool {
 		self.get(key).is_some()
 	}
