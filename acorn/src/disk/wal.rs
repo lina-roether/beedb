@@ -175,30 +175,19 @@ impl<T: Seek + Read + Write> Wal<T> {
 		})
 	}
 
-	pub fn push_write(
-		&mut self,
-		tid: u64,
-		seq: NonZeroU64,
-		page_id: PageId,
-		before: &[u8],
-		after: &[u8],
-	) {
-		debug_assert!(before.len() <= self.page_size as usize);
-		debug_assert!(after.len() <= self.page_size as usize);
+	pub fn push_write(&mut self, tid: u64, seq: NonZeroU64, page_id: PageId, diff: &[u8]) {
+		debug_assert!(diff.len() <= self.page_size as usize);
 
 		self.push_header(ItemKind::Write, tid, seq);
 		let page_id_buf = ViewBuf::from(page_id);
 
 		self.batch_buf.extend(page_id_buf.as_bytes());
 
-		// The additional extend is there to pad out the data of before and after
+		// The additional extend is there to pad out the data of the diff
 		// to the page size
-		self.batch_buf.extend(before);
+		self.batch_buf.extend(diff);
 		self.batch_buf
-			.extend(iter::repeat(0).take(self.page_size as usize - before.len()));
-		self.batch_buf.extend(after);
-		self.batch_buf
-			.extend(iter::repeat(0).take(self.page_size as usize - after.len()));
+			.extend(iter::repeat(0).take(self.page_size as usize - diff.len()));
 	}
 
 	pub fn push_commit(&mut self, tid: u64, seq: NonZeroU64) {
@@ -243,8 +232,7 @@ pub(crate) enum Item {
 	Write {
 		tid: u64,
 		page_id: PageId,
-		before: Box<[u8]>,
-		after: Box<[u8]>,
+		diff: Box<[u8]>,
 	},
 	Commit(u64),
 	Cancel(u64),
@@ -289,17 +277,13 @@ impl<'a, T: Read> Iter<'a, T> {
 				let mut page_id_buf: ViewBuf<PageId> = ViewBuf::new();
 				self.file.read_exact(page_id_buf.as_bytes_mut())?;
 
-				let mut before_buf: Box<[u8]> = vec![0; self.page_size.into()].into();
-				self.file.read_exact(&mut before_buf)?;
-
-				let mut after_buf: Box<[u8]> = vec![0; self.page_size.into()].into();
-				self.file.read_exact(&mut after_buf)?;
+				let mut diff_buf: Box<[u8]> = vec![0; self.page_size.into()].into();
+				self.file.read_exact(&mut diff_buf)?;
 
 				Ok(Some(Item::Write {
 					tid: header_buf.tid,
 					page_id: *page_id_buf,
-					before: before_buf,
-					after: after_buf,
+					diff: diff_buf,
 				}))
 			}
 		}
@@ -358,20 +342,8 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.push_write(
-			0,
-			NonZeroU64::new(1).unwrap(),
-			PageId::new(0, 10),
-			&[2; 8],
-			&[10; 8],
-		);
-		wal.push_write(
-			0,
-			NonZeroU64::new(2).unwrap(),
-			PageId::new(0, 12),
-			&[0; 8],
-			&[15; 8],
-		);
+		wal.push_write(0, NonZeroU64::new(1).unwrap(), PageId::new(0, 10), &[2; 8]);
+		wal.push_write(0, NonZeroU64::new(2).unwrap(), PageId::new(0, 12), &[0; 8]);
 		wal.push_commit(0, NonZeroU64::new(3).unwrap());
 		wal.flush().unwrap();
 
@@ -386,7 +358,6 @@ mod tests {
 				.as_bytes(),
 				ViewBuf::from(PageId::new(0, 10)).as_bytes(),
 				&[2; 8],
-				&[10; 8],
 				ViewBuf::from(ItemHeader {
 					kind: ItemKind::Write as u64,
 					tid: 0,
@@ -395,7 +366,6 @@ mod tests {
 				.as_bytes(),
 				ViewBuf::from(PageId::new(0, 12)).as_bytes(),
 				&[0; 8],
-				&[15; 8],
 				ViewBuf::from(ItemHeader {
 					kind: ItemKind::Commit as u64,
 					tid: 0,
@@ -414,20 +384,8 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.push_write(
-			0,
-			NonZeroU64::new(1).unwrap(),
-			PageId::new(0, 10),
-			&[2; 8],
-			&[10; 8],
-		);
-		wal.push_write(
-			0,
-			NonZeroU64::new(2).unwrap(),
-			PageId::new(0, 12),
-			&[0; 8],
-			&[15; 8],
-		);
+		wal.push_write(0, NonZeroU64::new(1).unwrap(), PageId::new(0, 10), &[2; 8]);
+		wal.push_write(0, NonZeroU64::new(2).unwrap(), PageId::new(0, 12), &[0; 8]);
 		wal.push_commit(0, NonZeroU64::new(3).unwrap());
 
 		assert!(data[size_of::<Header>()..].is_empty());
@@ -440,27 +398,9 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.push_write(
-			0,
-			NonZeroU64::new(1).unwrap(),
-			PageId::new(0, 10),
-			&[0; 8],
-			&[10; 8],
-		);
-		wal.push_write(
-			1,
-			NonZeroU64::new(2).unwrap(),
-			PageId::new(0, 12),
-			&[0; 8],
-			&[25; 8],
-		);
-		wal.push_write(
-			0,
-			NonZeroU64::new(3).unwrap(),
-			PageId::new(0, 12),
-			&[0; 8],
-			&[15; 8],
-		);
+		wal.push_write(0, NonZeroU64::new(1).unwrap(), PageId::new(0, 10), &[10; 8]);
+		wal.push_write(1, NonZeroU64::new(2).unwrap(), PageId::new(0, 12), &[25; 8]);
+		wal.push_write(0, NonZeroU64::new(3).unwrap(), PageId::new(0, 12), &[15; 8]);
 		wal.push_commit(0, NonZeroU64::new(4).unwrap());
 		wal.push_commit(1, NonZeroU64::new(5).unwrap());
 		wal.flush().unwrap();
@@ -471,8 +411,7 @@ mod tests {
 			Item::Write {
 				tid: 0,
 				page_id: PageId::new(0, 10),
-				before: vec![0; 8].into(),
-				after: vec![10; 8].into()
+				diff: vec![10; 8].into()
 			}
 		);
 		assert_eq!(
@@ -480,8 +419,7 @@ mod tests {
 			Item::Write {
 				tid: 1,
 				page_id: PageId::new(0, 12),
-				before: vec![0; 8].into(),
-				after: vec![25; 8].into()
+				diff: vec![25; 8].into()
 			}
 		);
 		assert_eq!(
@@ -489,8 +427,7 @@ mod tests {
 			Item::Write {
 				tid: 0,
 				page_id: PageId::new(0, 12),
-				before: vec![0; 8].into(),
-				after: vec![15; 8].into()
+				diff: vec![15; 8].into()
 			}
 		);
 		assert_eq!(iter.next().unwrap().unwrap(), Item::Commit(0));
@@ -505,20 +442,8 @@ mod tests {
 		Wal::init(&mut file, InitParams { page_size: 8 }).unwrap();
 
 		let mut wal = Wal::load(file, LoadParams { page_size: 8 }).unwrap();
-		wal.push_write(
-			0,
-			NonZeroU64::new(1).unwrap(),
-			PageId::new(0, 10),
-			&[0; 8],
-			&[10; 8],
-		);
-		wal.push_write(
-			1,
-			NonZeroU64::new(1).unwrap(),
-			PageId::new(0, 12),
-			&[0; 8],
-			&[25; 8],
-		);
+		wal.push_write(0, NonZeroU64::new(1).unwrap(), PageId::new(0, 10), &[10; 8]);
+		wal.push_write(1, NonZeroU64::new(1).unwrap(), PageId::new(0, 12), &[25; 8]);
 		wal.flush().unwrap();
 
 		let mut iter = wal.iter().unwrap();

@@ -1,5 +1,5 @@
 use std::{
-	collections::HashMap,
+	collections::{hash_map::Entry, HashMap},
 	fmt::Display,
 	fs::File,
 	num::NonZeroU64,
@@ -13,14 +13,12 @@ use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
 
 use crate::{
-	cache::PageCache,
-	consts::PAGE_ALIGNMENT,
+	cache::{PageCache, PageWriteGuard},
 	disk::{
 		storage,
 		wal::{self, Wal},
 	},
 	id::PageId,
-	utils::aligned_buf::AlignedBuffer,
 };
 
 use super::err::Error;
@@ -47,9 +45,9 @@ impl TransactionManager {
 	pub fn begin(&self) -> Transaction {
 		Transaction {
 			tid: self.next_tid(),
-			cache: Arc::clone(&self.cache),
-			state: Arc::clone(&self.state),
-			writes: HashMap::new(),
+			cache: &self.cache,
+			state: &self.state,
+			locks: HashMap::new(),
 		}
 	}
 
@@ -72,29 +70,23 @@ impl TransactionManager {
 		for item in items_iter {
 			let item = item.unwrap_or_else(|err| Self::panic_recovery_failed(err));
 			match item {
-				wal::Item::Write {
-					tid,
-					page_id,
-					before,
-					after,
-				} => {
+				wal::Item::Write { tid, page_id, diff } => {
 					let buffered_writes = transactions.entry(tid).or_default();
-					buffered_writes.push((page_id, after));
-
-					self.cache
-						.write_page(page_id)
-						.unwrap_or_else(|err| Self::panic_recovery_failed(err))
-						.copy_from_slice(&before);
+					buffered_writes.push((page_id, diff));
 				}
 				wal::Item::Commit(tid) => {
-					let Some(buffered_writes) = transactions.get_mut(&tid) else {
+					let Some(buffered_writes) = transactions.get(&tid) else {
 						continue;
 					};
-					for (page_id, data) in buffered_writes {
-						self.cache
+					for (page_id, diff) in buffered_writes {
+						let mut page = self
+							.cache
 							.write_page(*page_id)
-							.unwrap_or_else(|err| Self::panic_recovery_failed(err))
-							.copy_from_slice(data)
+							.unwrap_or_else(|err| Self::panic_recovery_failed(err));
+
+						for (byte, diff) in page.iter_mut().zip(diff.iter()) {
+							*byte ^= *diff;
+						}
 					}
 				}
 				wal::Item::Cancel(tid) => {
@@ -129,17 +121,17 @@ impl State {
 	}
 }
 
-pub(crate) struct Transaction {
+pub(crate) struct Transaction<'a> {
 	tid: u64,
-	state: Arc<Mutex<State>>,
-	cache: Arc<PageCache>,
-	writes: HashMap<PageId, AlignedBuffer>,
+	state: &'a Mutex<State>,
+	cache: &'a PageCache,
+	locks: HashMap<PageId, PageWriteGuard<'a>>,
 }
 
-impl Transaction {
+impl<'a> Transaction<'a> {
 	pub fn read(&mut self, page_id: PageId, buf: &mut [u8]) -> Result<(), storage::Error> {
-		if let Some(data) = self.writes.get(&page_id) {
-			buf.copy_from_slice(data);
+		if let Some(lock) = self.locks.get(&page_id) {
+			buf.copy_from_slice(lock);
 		} else {
 			let page = self.cache.read_page(page_id)?;
 			buf.copy_from_slice(&page);
@@ -149,51 +141,22 @@ impl Transaction {
 	}
 
 	pub fn write(&mut self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
-		self.track_write(self.tid, page_id, data)?;
-		self.writes
-			.insert(page_id, AlignedBuffer::from_bytes(data, PAGE_ALIGNMENT));
+		self.track_write(page_id, data)?;
+		if let Entry::Vacant(e) = self.locks.entry(page_id) {
+			e.insert(self.cache.write_page(page_id)?);
+		}
+		let lock = self.locks.get_mut(&page_id).unwrap();
+		lock[0..data.len()].copy_from_slice(data);
 		Ok(())
 	}
 
 	pub fn cancel(self) {
-		self.track_cancel(self.tid);
+		self.track_cancel();
+		todo!("This needs to rollback the changes written to the PageCache");
 	}
 
 	pub fn commit(self) -> Result<(), Error> {
-		self.track_commit(self.tid)?;
-		let mut rollback_list: Vec<(PageId, Box<[u8]>)> = Vec::new();
-		let mut write_err: Option<storage::Error> = None;
-
-		// Try to write all the changes to the storage
-		for (page_id, buf) in &self.writes {
-			match self.create_rollback_write(*page_id) {
-				Ok(rb) => rollback_list.push(rb),
-				Err(err) => {
-					write_err = Some(err);
-					break;
-				}
-			}
-
-			if let Err(err) = self.apply_write(*page_id, buf) {
-				write_err = Some(err);
-				break;
-			}
-		}
-
-		if let Some(err) = write_err {
-			// Something went wrong! Try to rollback.
-			for (page_id, buf) in rollback_list {
-				if let Err(err) = self.apply_write(page_id, &buf) {
-					// Rollback failed! This leaves the database in an unrecoverable inconsistent
-					// state. The only way out is to fix the underlying issue, restart, and recover
-					// from the WAL.
-					panic!("Rollback on page {page_id} after a failed transaction did not succeed: {err}\nRestart the application to attempt recovery.");
-				}
-			}
-
-			return Err(err.into());
-		}
-
+		self.track_commit()?;
 		Ok(())
 	}
 
@@ -213,24 +176,30 @@ impl Transaction {
 		Ok(())
 	}
 
-	fn track_write(&self, tid: u64, page_id: PageId, data: &[u8]) -> Result<(), Error> {
+	fn track_write(&self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
 		let mut state = self.state.lock();
-		let page = self.cache.read_page(page_id)?;
+		let prev_data = self.cache.read_page(page_id)?;
+		let diff: Box<[u8]> = prev_data
+			.iter()
+			.zip(data.iter())
+			.map(|(a, b)| *a ^ *b)
+			.collect();
+
 		let seq = state.next_seq();
-		state.wal.push_write(tid, seq, page_id, &page, data);
+		state.wal.push_write(self.tid, seq, page_id, &diff);
 		Ok(())
 	}
 
-	fn track_cancel(&self, tid: u64) {
+	fn track_cancel(&self) {
 		let mut state = self.state.lock();
 		let seq = state.next_seq();
-		state.wal.push_cancel(tid, seq);
+		state.wal.push_cancel(self.tid, seq);
 	}
 
-	fn track_commit(&self, tid: u64) -> Result<(), Error> {
+	fn track_commit(&self) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		let seq = state.next_seq();
-		state.wal.push_commit(tid, seq);
+		state.wal.push_commit(self.tid, seq);
 		state.wal.flush().map_err(Error::WalWrite)?;
 		Ok(())
 	}
@@ -291,14 +260,12 @@ mod tests {
 				wal::Item::Write {
 					tid: 0,
 					page_id: PageId::new(0, 1),
-					before: [0; DEFAULT_PAGE_SIZE as usize].into(),
-					after: [25; DEFAULT_PAGE_SIZE as usize].into(),
+					diff: [25; DEFAULT_PAGE_SIZE as usize].into(),
 				},
 				wal::Item::Write {
 					tid: 0,
 					page_id: PageId::new(0, 2),
-					before: [0; DEFAULT_PAGE_SIZE as usize].into(),
-					after: [69; DEFAULT_PAGE_SIZE as usize].into(),
+					diff: [69; DEFAULT_PAGE_SIZE as usize].into(),
 				},
 				wal::Item::Commit(0)
 			]
