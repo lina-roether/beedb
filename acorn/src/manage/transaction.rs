@@ -19,6 +19,7 @@ use crate::{
 		wal::{self, Wal},
 	},
 	id::PageId,
+	utils::aligned_buf::AlignedBuffer,
 };
 
 use super::err::Error;
@@ -176,14 +177,16 @@ impl<'a> Transaction<'a> {
 		Ok(())
 	}
 
-	fn track_write(&self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
+	fn track_write(&mut self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
 		let mut state = self.state.lock();
-		let prev_data = self.cache.read_page(page_id)?;
-		let diff: Box<[u8]> = prev_data
-			.iter()
-			.zip(data.iter())
-			.map(|(a, b)| *a ^ *b)
-			.collect();
+
+		let mut diff: AlignedBuffer =
+			AlignedBuffer::with_capacity(1, self.cache.page_size().into());
+		self.read(page_id, &mut diff)?;
+
+		for (diff, change) in diff.iter_mut().zip(data.iter()) {
+			*diff ^= *change
+		}
 
 		let seq = state.next_seq();
 		state.wal.push_write(self.tid, seq, page_id, &diff);
