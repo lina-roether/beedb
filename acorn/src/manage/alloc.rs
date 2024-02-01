@@ -168,7 +168,7 @@ mod tests {
 
 	use crate::{
 		cache::PageCache,
-		consts::PAGE_SIZE_RANGE,
+		consts::DEFAULT_PAGE_SIZE,
 		disk::{
 			storage::{self, Storage},
 			wal::{self, Wal},
@@ -204,7 +204,7 @@ mod tests {
 	#[bench]
 	#[cfg_attr(miri, ignore)]
 	fn bench_alloc_and_free_page(b: &mut Bencher) {
-		let page_size = *PAGE_SIZE_RANGE.start();
+		let page_size = DEFAULT_PAGE_SIZE;
 
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();

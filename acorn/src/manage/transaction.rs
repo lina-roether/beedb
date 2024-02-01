@@ -61,7 +61,7 @@ impl TransactionManager {
 		let mut state = self.state.lock();
 
 		#[allow(clippy::type_complexity)]
-		let mut transactions: HashMap<u64, Vec<(PageId, Box<[u8]>)>> = HashMap::new();
+		let mut transactions: HashMap<u64, Vec<(PageId, u16, Box<[u8]>)>> = HashMap::new();
 
 		let items_iter = state
 			.wal
@@ -71,21 +71,28 @@ impl TransactionManager {
 		for item in items_iter {
 			let item = item.unwrap_or_else(|err| Self::panic_recovery_failed(err));
 			match item {
-				wal::Item::Write { tid, page_id, diff } => {
+				wal::Item::Write {
+					tid,
+					page_id,
+					diff_start,
+					diff,
+				} => {
 					let buffered_writes = transactions.entry(tid).or_default();
-					buffered_writes.push((page_id, diff));
+					buffered_writes.push((page_id, diff_start, diff));
 				}
 				wal::Item::Commit(tid) => {
 					let Some(buffered_writes) = transactions.get(&tid) else {
 						continue;
 					};
-					for (page_id, diff) in buffered_writes {
+					for (page_id, diff_start, diff) in buffered_writes {
 						let mut page = self
 							.cache
 							.write_page(*page_id)
 							.unwrap_or_else(|err| Self::panic_recovery_failed(err));
 
-						for (byte, diff) in page.iter_mut().zip(diff.iter()) {
+						for (byte, diff) in
+							page.iter_mut().skip((*diff_start).into()).zip(diff.iter())
+						{
 							*byte ^= *diff;
 						}
 					}
@@ -131,6 +138,8 @@ pub(crate) struct Transaction<'a> {
 
 impl<'a> Transaction<'a> {
 	pub fn read(&mut self, page_id: PageId, buf: &mut [u8]) -> Result<(), storage::Error> {
+		debug_assert!(buf.len() >= self.cache.page_size().into());
+
 		if let Some(lock) = self.locks.get(&page_id) {
 			buf.copy_from_slice(lock);
 		} else {
@@ -142,7 +151,15 @@ impl<'a> Transaction<'a> {
 	}
 
 	pub fn write(&mut self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
-		self.track_write(page_id, data)?;
+		debug_assert!(data.len() <= self.cache.page_size().into());
+
+		let mut page = AlignedBuffer::with_capacity(1, self.cache.page_size().into());
+		self.read(page_id, &mut page)?;
+
+		let (diff_start, diff) = Self::generate_diff(&mut page, data)?;
+
+		self.track_write(page_id, diff_start as u16, diff)?;
+
 		if let Entry::Vacant(e) = self.locks.entry(page_id) {
 			e.insert(self.cache.write_page(page_id)?);
 		}
@@ -177,20 +194,34 @@ impl<'a> Transaction<'a> {
 		Ok(())
 	}
 
-	fn track_write(&mut self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
+	fn track_write(&mut self, page_id: PageId, diff_start: u16, diff: &[u8]) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		let mut diff: AlignedBuffer =
-			AlignedBuffer::with_capacity(1, self.cache.page_size().into());
-		self.read(page_id, &mut diff)?;
+		let seq = state.next_seq();
+		state
+			.wal
+			.push_write(self.tid, seq, page_id, diff_start, diff);
+		Ok(())
+	}
 
-		for (diff, change) in diff.iter_mut().zip(data.iter()) {
-			*diff ^= *change
+	fn generate_diff<'b>(buf: &'b mut [u8], new: &[u8]) -> Result<(usize, &'b [u8]), Error> {
+		let mut start_index = 0;
+		let mut end_index = 0;
+		let mut has_started = false;
+		for (i, (byte, change)) in buf.iter_mut().zip(new.iter()).enumerate() {
+			if byte == change {
+				if !has_started {
+					start_index = i;
+					end_index = i + 1;
+				}
+			} else {
+				has_started = true;
+				*byte ^= change;
+				end_index = i + 1;
+			}
 		}
 
-		let seq = state.next_seq();
-		state.wal.push_write(self.tid, seq, page_id, &diff);
-		Ok(())
+		Ok((start_index, &buf[start_index..end_index]))
 	}
 
 	fn track_cancel(&self) {
@@ -215,7 +246,7 @@ mod tests {
 
 	use tempfile::tempdir;
 
-	use crate::{consts::DEFAULT_PAGE_SIZE, disk::storage::Storage};
+	use crate::{consts::PAGE_SIZE_RANGE, disk::storage::Storage};
 
 	use super::*;
 
@@ -224,13 +255,32 @@ mod tests {
 	// :/
 	#[cfg_attr(miri, ignore)]
 	fn simple_transaction() {
+		const PAGE_SIZE: u16 = *PAGE_SIZE_RANGE.start();
+
 		let dir = tempdir().unwrap();
-		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Storage::init(
+			dir.path(),
+			storage::InitParams {
+				page_size: PAGE_SIZE,
+			},
+		)
+		.unwrap();
+		Wal::init_file(
+			dir.path().join("writes.acnl"),
+			wal::InitParams {
+				page_size: PAGE_SIZE,
+			},
+		)
+		.unwrap();
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(
+			dir.path().join("writes.acnl"),
+			wal::LoadParams {
+				page_size: PAGE_SIZE,
+			},
+		)
+		.unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
 
 		cache.write_page(PageId::new(0, 1)).unwrap().fill(0);
@@ -238,14 +288,14 @@ mod tests {
 
 		let tm = TransactionManager::new(cache, wal);
 		let mut t = tm.begin();
-		let mut buf = vec![0; DEFAULT_PAGE_SIZE as usize];
+		let mut buf = vec![0; PAGE_SIZE as usize];
 
-		t.write(PageId::new(0, 1), &[25; DEFAULT_PAGE_SIZE as usize])
+		t.write(PageId::new(0, 1), &[25; PAGE_SIZE as usize])
 			.unwrap();
 		t.read(PageId::new(0, 1), &mut buf).unwrap();
 		assert!(buf.iter().all(|b| *b == 25));
 
-		t.write(PageId::new(0, 2), &[69; DEFAULT_PAGE_SIZE as usize])
+		t.write(PageId::new(0, 2), &[69; PAGE_SIZE as usize])
 			.unwrap();
 		t.read(PageId::new(0, 2), &mut buf).unwrap();
 		assert!(buf.iter().all(|b| *b == 69));
@@ -254,8 +304,13 @@ mod tests {
 
 		mem::drop(tm);
 
-		let mut wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let mut wal = Wal::load_file(
+			dir.path().join("writes.acnl"),
+			wal::LoadParams {
+				page_size: PAGE_SIZE,
+			},
+		)
+		.unwrap();
 		let wal_items: Vec<wal::Item> = wal.iter().unwrap().map(|i| i.unwrap()).collect();
 		assert_eq!(
 			wal_items,
@@ -263,12 +318,14 @@ mod tests {
 				wal::Item::Write {
 					tid: 0,
 					page_id: PageId::new(0, 1),
-					diff: [25; DEFAULT_PAGE_SIZE as usize].into(),
+					diff_start: 0,
+					diff: [25; PAGE_SIZE as usize].into(),
 				},
 				wal::Item::Write {
 					tid: 0,
 					page_id: PageId::new(0, 2),
-					diff: [69; DEFAULT_PAGE_SIZE as usize].into(),
+					diff_start: 0,
+					diff: [69; PAGE_SIZE as usize].into(),
 				},
 				wal::Item::Commit(0)
 			]
