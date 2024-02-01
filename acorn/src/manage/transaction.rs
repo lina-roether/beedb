@@ -3,6 +3,7 @@ use std::{
 	fmt::Display,
 	fs::File,
 	num::NonZeroU64,
+	ops::Range,
 	sync::{
 		atomic::{AtomicU64, Ordering},
 		Arc,
@@ -156,15 +157,15 @@ impl<'a> Transaction<'a> {
 		let mut page = AlignedBuffer::with_capacity(1, self.cache.page_size().into());
 		self.read(page_id, &mut page)?;
 
-		let (diff_start, diff) = Self::generate_diff(&mut page, data)?;
+		let (diff_range, diff) = Self::generate_diff(&mut page, data)?;
 
-		self.track_write(page_id, diff_start as u16, diff)?;
+		self.track_write(page_id, diff_range.start as u16, diff)?;
 
 		if let Entry::Vacant(e) = self.locks.entry(page_id) {
 			e.insert(self.cache.write_page(page_id)?);
 		}
 		let lock = self.locks.get_mut(&page_id).unwrap();
-		lock[0..data.len()].copy_from_slice(data);
+		lock[diff_range.clone()].copy_from_slice(&data[diff_range]);
 		Ok(())
 	}
 
@@ -204,7 +205,7 @@ impl<'a> Transaction<'a> {
 		Ok(())
 	}
 
-	fn generate_diff<'b>(buf: &'b mut [u8], new: &[u8]) -> Result<(usize, &'b [u8]), Error> {
+	fn generate_diff<'b>(buf: &'b mut [u8], new: &[u8]) -> Result<(Range<usize>, &'b [u8]), Error> {
 		let mut start_index = 0;
 		let mut end_index = 0;
 		let mut has_started = false;
@@ -221,7 +222,7 @@ impl<'a> Transaction<'a> {
 			}
 		}
 
-		Ok((start_index, &buf[start_index..end_index]))
+		Ok((start_index..end_index, &buf[start_index..end_index]))
 	}
 
 	fn track_cancel(&self) {
