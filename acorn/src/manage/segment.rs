@@ -222,7 +222,6 @@ impl<'a> FreelistPageManager<'a> {
 	fn reset(&mut self) {
 		self.buf_mut().next = None;
 		self.buf_mut().length = 0;
-		self.buf_mut().items.fill(None);
 	}
 
 	fn write(&self, t: &mut Transaction) -> Result<(), Error> {
