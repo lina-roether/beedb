@@ -52,13 +52,11 @@ impl<T: ?Sized + ByteView> ViewBuf<T> {
 			handle_alloc_error(layout);
 		};
 
-		let mut buf = Self {
+		Self {
 			size,
 			bytes,
 			marker: PhantomData,
-		};
-		buf.as_bytes_mut().fill(0);
-		buf
+		}
 	}
 
 	pub fn resize(&mut self, new_size: usize) -> Result<(), BufError> {
@@ -82,10 +80,6 @@ impl<T: ?Sized + ByteView> ViewBuf<T> {
 		else {
 			handle_alloc_error(Self::layout_for(new_size))
 		};
-		if new_size < self.size {
-			let new_bytes_start = self.size;
-			self.as_bytes_mut()[new_bytes_start..].fill(0);
-		}
 		self.size = new_size;
 		self.bytes = new_bytes;
 	}
