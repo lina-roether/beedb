@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{cache::PageCache, id::PageId};
+use crate::{cache::PageCache, id::PageId, pages::ReadOp};
 
 use super::err::Error;
 
@@ -23,11 +23,11 @@ impl ReadManager {
 		self.cache.segment_nums()
 	}
 
-	pub fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<(), Error> {
+	pub fn read(&self, page_id: PageId, op: ReadOp) -> Result<(), Error> {
 		let page = self.cache.read_page(page_id)?;
-		debug_assert!(buf.len() <= page.len());
+		debug_assert!(op.range().end <= page.len());
 
-		buf.copy_from_slice(&page[0..buf.len()]);
+		op.bytes.copy_from_slice(&page[op.range()]);
 		Ok(())
 	}
 }

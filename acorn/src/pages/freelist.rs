@@ -2,7 +2,7 @@ use std::{mem::size_of, num::NonZeroU16};
 
 use byte_view::{ByteView, ViewBuf};
 
-use super::WriteOp;
+use super::{ReadOp, WriteOp};
 
 #[derive(Debug, ByteView)]
 #[dynamically_sized]
@@ -15,6 +15,10 @@ pub(crate) struct FreelistPage {
 
 impl FreelistPage {
 	const ITEM_SIZE: usize = size_of::<Option<NonZeroU16>>();
+
+	pub fn read(page: &mut ViewBuf<Self>) -> ReadOp {
+		ReadOp::new(0, page.as_bytes_mut())
+	}
 
 	pub fn write_header(page: &ViewBuf<Self>) -> WriteOp {
 		WriteOp::new(0, &page.as_bytes()[0..Self::MIN_SIZE])

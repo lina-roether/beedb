@@ -2,7 +2,7 @@ use std::num::NonZeroU16;
 
 use byte_view::{ByteView, ViewBuf};
 
-use super::WriteOp;
+use super::{ReadOp, WriteOp};
 
 #[derive(Debug, ByteView)]
 #[repr(C)]
@@ -16,6 +16,10 @@ pub(crate) struct HeaderPage {
 }
 
 impl HeaderPage {
+	pub(crate) fn read(page: &mut ViewBuf<Self>) -> ReadOp {
+		ReadOp::new(0, page.as_bytes_mut())
+	}
+
 	pub(crate) fn write(page: &ViewBuf<Self>) -> WriteOp {
 		WriteOp::new(0, page.as_bytes())
 	}

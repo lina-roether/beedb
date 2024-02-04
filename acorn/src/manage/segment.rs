@@ -19,7 +19,7 @@ pub(super) struct SegmentManager {
 impl SegmentManager {
 	pub fn new(rm: Arc<ReadManager>, segment_num: u32) -> Result<Self, Error> {
 		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
-		rm.read(PageId::new(segment_num, 0), header.as_bytes_mut())?;
+		rm.read(PageId::new(segment_num, 0), HeaderPage::read(&mut header))?;
 
 		let mut freelist_stack = Vec::new();
 		let mut next = header.freelist_trunk;
@@ -27,7 +27,7 @@ impl SegmentManager {
 			let mut entry = FreelistStackEntry::new(page_num, rm.page_size()).unwrap();
 			rm.read(
 				PageId::new(segment_num, page_num.get()),
-				entry.buf.as_bytes_mut(),
+				FreelistPage::read(&mut entry.buf),
 			)?;
 			next = entry.buf.next;
 			freelist_stack.push(entry);
@@ -273,14 +273,14 @@ mod tests {
 		t.commit().unwrap();
 
 		let mut header_page: ViewBuf<HeaderPage> = ViewBuf::new();
-		rm.read(PageId::new(0, 0), header_page.as_bytes_mut())
+		rm.read(PageId::new(0, 0), HeaderPage::read(&mut header_page))
 			.unwrap();
 
 		assert_eq!(header_page.freelist_trunk, NonZeroU16::new(69));
 
 		let mut freelist_page: ViewBuf<FreelistPage> =
 			ViewBuf::new_with_size(rm.page_size().into()).unwrap();
-		rm.read(PageId::new(0, 69), freelist_page.as_bytes_mut())
+		rm.read(PageId::new(0, 69), FreelistPage::read(&mut freelist_page))
 			.unwrap();
 
 		assert_eq!(freelist_page.length, 1);
