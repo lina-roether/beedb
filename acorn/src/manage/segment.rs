@@ -4,7 +4,7 @@ use byte_view::{BufError, ViewBuf};
 
 use crate::{
 	id::PageId,
-	pages::{FreelistPage, HeaderPage},
+	pages::{FreelistPage, HeaderPage, WriteOp},
 };
 
 use super::{err::Error, read::ReadManager, transaction::Transaction};
@@ -77,13 +77,11 @@ impl SegmentManager {
 	fn push_freelist(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
 		if let Some(mut trunk) = self.get_trunk() {
 			if !trunk.is_full() {
-				trunk.push(page_num);
-				trunk.write(t)?;
+				trunk.push(t, page_num)?;
 				return Ok(());
 			}
 
-			trunk.set_next(Some(page_num));
-			trunk.write(t)?;
+			trunk.set_next(t, Some(page_num))?;
 		}
 
 		self.push_trunk(t, page_num)?;
@@ -98,12 +96,11 @@ impl SegmentManager {
 		let next = trunk.next();
 		let page_num = trunk.page_num();
 
-		let Some(page_num) = trunk.pop()? else {
+		let Some(page_num) = trunk.pop(t)? else {
 			self.set_trunk(t, next)?;
 			self.freelist_stack.pop();
 			return Ok(Some(page_num));
 		};
-		trunk.write(t)?;
 
 		Ok(Some(page_num))
 	}
@@ -119,8 +116,7 @@ impl SegmentManager {
 		self.freelist_stack
 			.push(FreelistStackEntry::new(page_num, self.rm.page_size()).unwrap());
 		let mut new_trunk = self.get_trunk().unwrap();
-		new_trunk.reset();
-		new_trunk.write(t)?;
+		new_trunk.reset(t)?;
 		Ok(())
 	}
 
@@ -130,16 +126,16 @@ impl SegmentManager {
 		trunk_num: Option<NonZeroU16>,
 	) -> Result<(), Error> {
 		self.header.freelist_trunk = trunk_num;
-		self.write(t, 0, self.header.as_bytes())?;
+		self.write_header(t)?;
 		Ok(())
 	}
 
 	fn write_header(&self, t: &mut Transaction) -> Result<(), Error> {
-		self.write(t, 0, self.header.as_bytes())
+		self.write(t, 0, HeaderPage::write(&self.header))
 	}
 
-	fn write(&self, t: &mut Transaction, page_num: u16, data: &[u8]) -> Result<(), Error> {
-		t.write(PageId::new(self.segment_num, page_num), data)
+	fn write(&self, t: &mut Transaction, page_num: u16, op: WriteOp) -> Result<(), Error> {
+		t.write(PageId::new(self.segment_num, page_num), op)
 	}
 }
 
@@ -195,13 +191,17 @@ impl<'a> FreelistPageManager<'a> {
 		self.page.page_num
 	}
 
-	fn push(&mut self, page_num: NonZeroU16) {
+	fn push(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
 		let index: usize = self.buf().length.into();
 		self.buf_mut().length += 1;
-		self.buf_mut().items[index] = Some(page_num)
+		t.write(self.page_id(), FreelistPage::write_header(self.buf()))?;
+
+		self.buf_mut().items[index] = Some(page_num);
+		t.write(self.page_id(), FreelistPage::write_item(self.buf(), index))?;
+		Ok(())
 	}
 
-	fn pop(&mut self) -> Result<Option<NonZeroU16>, Error> {
+	fn pop(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error> {
 		if self.buf().length == 0 {
 			return Ok(None);
 		}
@@ -211,24 +211,25 @@ impl<'a> FreelistPageManager<'a> {
 			return Err(Error::CorruptedSegment(self.segment_num));
 		};
 		self.buf_mut().length -= 1;
+		t.write(self.page_id(), FreelistPage::write_header(self.buf()))?;
 
 		Ok(Some(page_num))
 	}
 
-	fn set_next(&mut self, next: Option<NonZeroU16>) {
-		self.buf_mut().next = next
+	fn set_next(&mut self, t: &mut Transaction, next: Option<NonZeroU16>) -> Result<(), Error> {
+		self.buf_mut().next = next;
+		t.write(self.page_id(), FreelistPage::write_header(self.buf()))
 	}
 
-	fn reset(&mut self) {
+	fn reset(&mut self, t: &mut Transaction) -> Result<(), Error> {
 		self.buf_mut().next = None;
 		self.buf_mut().length = 0;
+		t.write(self.page_id(), FreelistPage::write_header(self.buf()))
 	}
 
-	fn write(&self, t: &mut Transaction) -> Result<(), Error> {
-		t.write(
-			PageId::new(self.segment_num, self.page.page_num.get()),
-			self.buf().as_bytes(),
-		)
+	#[inline]
+	fn page_id(&self) -> PageId {
+		PageId::new(self.segment_num, self.page.page_num.get())
 	}
 }
 
@@ -240,9 +241,9 @@ mod tests {
 		cache::PageCache,
 		disk::{
 			storage::{self, Storage},
-			wal::{self, Wal},
+			wal::Wal,
 		},
-		manage::{read::ReadManager, transaction::TransactionManager},
+		manage::{read::ReadManager, recovery::RecoveryManager, transaction::TransactionManager},
 	};
 
 	use super::*;
@@ -251,13 +252,13 @@ mod tests {
 	fn simple_push() {
 		let dir = tempdir().unwrap();
 		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 
 		let mut freelist_mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
@@ -290,13 +291,13 @@ mod tests {
 	fn simple_push_pop() {
 		let dir = tempdir().unwrap();
 		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 
 		let mut freelist_mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
@@ -327,13 +328,13 @@ mod tests {
 	fn alloc_page() {
 		let dir = tempdir().unwrap();
 		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 		let mut mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
 
@@ -349,13 +350,13 @@ mod tests {
 	fn alloc_and_free_page() {
 		let dir = tempdir().unwrap();
 		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 		let mut mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
 

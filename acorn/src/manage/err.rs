@@ -2,7 +2,10 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::{disk::storage, id::PageId};
+use crate::{
+	disk::{storage, wal},
+	id::PageId,
+};
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -16,10 +19,13 @@ pub(crate) enum Error {
 	Disk(#[from] storage::Error),
 
 	#[error("Failed to read from WAL: {0}")]
-	WalRead(io::Error),
+	WalRead(#[from] wal::ReadError),
 
 	#[error("Failed to write to WAL: {0}")]
 	WalWrite(io::Error),
+
+	#[error("The WAL is corrupted")]
+	WalCorrupted,
 
 	#[error("B-Tree index page {0} is corrupted")]
 	CorruptedBTreeIndex(PageId),

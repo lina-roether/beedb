@@ -1,6 +1,8 @@
 use std::{
 	marker::PhantomData,
+	mem::size_of,
 	ops::{Deref, DerefMut},
+	slice,
 };
 
 use thiserror::Error;
@@ -18,12 +20,12 @@ pub enum BytesError {
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct Bytes<T: ?Sized + ByteView> {
+pub struct ViewSlice<T: ?Sized + ByteView> {
 	_marker: PhantomData<T>,
 	bytes: [u8],
 }
 
-impl<T: ?Sized + ByteView> Bytes<T> {
+impl<T: ?Sized + ByteView> ViewSlice<T> {
 	pub fn new(bytes: &[u8]) -> Result<&Self, BytesError> {
 		if bytes.len() < T::MIN_SIZE {
 			return Err(BytesError::TooSmall {
@@ -71,7 +73,7 @@ impl<T: ?Sized + ByteView> Bytes<T> {
 	}
 }
 
-impl<T: ?Sized + ByteView> Deref for Bytes<T> {
+impl<T: ?Sized + ByteView> Deref for ViewSlice<T> {
 	type Target = T;
 
 	fn deref(&self) -> &Self::Target {
@@ -79,8 +81,22 @@ impl<T: ?Sized + ByteView> Deref for Bytes<T> {
 	}
 }
 
-impl<T: ?Sized + ByteView> DerefMut for Bytes<T> {
+impl<T: ?Sized + ByteView> DerefMut for ViewSlice<T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		T::from_bytes_mut(self.as_bytes_mut())
+	}
+}
+
+impl<T: ByteView> ViewSlice<T> {
+	pub fn from(value: &T) -> &Self {
+		let byte_slice =
+			unsafe { slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) };
+		Self::new(byte_slice).unwrap()
+	}
+
+	pub fn from_mut(value: &mut T) -> &mut Self {
+		let byte_slice =
+			unsafe { slice::from_raw_parts_mut(value as *mut T as *mut u8, size_of::<T>()) };
+		Self::new_mut(byte_slice).unwrap()
 	}
 }

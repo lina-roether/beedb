@@ -1,9 +1,6 @@
 use std::{
 	collections::{hash_map::Entry, HashMap},
-	fmt::Display,
-	fs::File,
 	num::NonZeroU64,
-	ops::Range,
 	sync::{
 		atomic::{AtomicU64, Ordering},
 		Arc,
@@ -17,13 +14,13 @@ use crate::{
 	cache::{PageCache, PageWriteGuard},
 	disk::{
 		storage,
-		wal::{self, Wal},
+		wal::{self},
 	},
 	id::PageId,
-	utils::aligned_buf::AlignedBuffer,
+	pages::{ReadOp, WriteOp},
 };
 
-use super::err::Error;
+use super::{err::Error, recovery::RecoveryManager};
 
 pub(super) struct TransactionManager {
 	tid_counter: AtomicU64,
@@ -34,91 +31,33 @@ pub(super) struct TransactionManager {
 assert_impl_all!(TransactionManager: Send, Sync);
 
 impl TransactionManager {
-	pub fn new(cache: Arc<PageCache>, wal: Wal<File>) -> Self {
-		let tm = Self {
+	pub fn new(cache: Arc<PageCache>, recovery: RecoveryManager) -> Self {
+		Self {
 			tid_counter: AtomicU64::new(0),
 			cache,
-			state: Arc::new(Mutex::new(State::new(wal))),
-		};
-		tm.recover_from_wal();
-		tm
+			state: Arc::new(Mutex::new(State::new(recovery))),
+		}
 	}
 
 	pub fn begin(&self) -> Transaction {
-		Transaction {
-			tid: self.next_tid(),
-			cache: &self.cache,
-			state: &self.state,
-			locks: HashMap::new(),
-		}
+		Transaction::new(self.next_tid(), &self.state, &self.cache)
 	}
 
 	#[inline]
 	fn next_tid(&self) -> u64 {
 		self.tid_counter.fetch_add(1, Ordering::SeqCst)
 	}
-
-	fn recover_from_wal(&self) {
-		let mut state = self.state.lock();
-
-		#[allow(clippy::type_complexity)]
-		let mut transactions: HashMap<u64, Vec<(PageId, u16, Box<[u8]>)>> = HashMap::new();
-
-		let items_iter = state
-			.wal
-			.iter()
-			.unwrap_or_else(|err| Self::panic_recovery_failed(err));
-
-		for item in items_iter {
-			let item = item.unwrap_or_else(|err| Self::panic_recovery_failed(err));
-			match item {
-				wal::Item::Write {
-					tid,
-					page_id,
-					diff_start,
-					diff,
-				} => {
-					let buffered_writes = transactions.entry(tid).or_default();
-					buffered_writes.push((page_id, diff_start, diff));
-				}
-				wal::Item::Commit(tid) => {
-					let Some(buffered_writes) = transactions.get(&tid) else {
-						continue;
-					};
-					for (page_id, diff_start, diff) in buffered_writes {
-						let mut page = self
-							.cache
-							.write_page(*page_id)
-							.unwrap_or_else(|err| Self::panic_recovery_failed(err));
-
-						for (byte, diff) in
-							page.iter_mut().skip((*diff_start).into()).zip(diff.iter())
-						{
-							*byte ^= *diff;
-						}
-					}
-				}
-				wal::Item::Cancel(tid) => {
-					transactions.remove(&tid);
-				}
-			}
-		}
-	}
-
-	fn panic_recovery_failed(err: impl Display) -> ! {
-		panic!("Failed to recover from WAL: {err}\nStarting without recovering could leave the database in an inconsistent state.")
-	}
 }
 
 struct State {
-	wal: Wal<File>,
+	recovery: RecoveryManager,
 	seq_counter: u64,
 }
 
 impl State {
-	fn new(wal: Wal<File>) -> Self {
+	fn new(recovery: RecoveryManager) -> Self {
 		Self {
-			wal,
+			recovery,
 			seq_counter: 0,
 		}
 	}
@@ -132,51 +71,70 @@ impl State {
 
 pub(crate) struct Transaction<'a> {
 	tid: u64,
+	last_seq: Option<NonZeroU64>,
 	state: &'a Mutex<State>,
 	cache: &'a PageCache,
 	locks: HashMap<PageId, PageWriteGuard<'a>>,
 }
 
 impl<'a> Transaction<'a> {
-	pub fn read(&mut self, page_id: PageId, buf: &mut [u8]) -> Result<(), storage::Error> {
-		debug_assert!(buf.len() >= self.cache.page_size().into());
+	fn new(tid: u64, state: &'a Mutex<State>, cache: &'a PageCache) -> Self {
+		Self {
+			tid,
+			last_seq: None,
+			state,
+			cache,
+			locks: HashMap::new(),
+		}
+	}
+
+	pub fn read(&mut self, page_id: PageId, op: ReadOp) -> Result<(), storage::Error> {
+		debug_assert!(op.range().end <= self.cache.page_size().into());
 
 		if let Some(lock) = self.locks.get(&page_id) {
-			buf.copy_from_slice(lock);
+			op.bytes.copy_from_slice(&lock[op.range()]);
 		} else {
 			let page = self.cache.read_page(page_id)?;
-			buf.copy_from_slice(&page);
+			op.bytes.copy_from_slice(&page[op.range()]);
 		}
 
 		Ok(())
 	}
 
-	pub fn write(&mut self, page_id: PageId, data: &[u8]) -> Result<(), Error> {
-		debug_assert!(data.len() <= self.cache.page_size().into());
+	pub fn write(&mut self, page_id: PageId, op: WriteOp) -> Result<(), Error> {
+		debug_assert!(op.range().end <= self.cache.page_size().into());
 
-		let mut page = AlignedBuffer::with_capacity(1, self.cache.page_size().into());
-		self.read(page_id, &mut page)?;
+		let mut before: Box<[u8]> = vec![0; op.bytes.len()].into();
+		self.read(page_id, ReadOp::new(op.start, &mut before))?;
 
-		let (diff_range, diff) = Self::generate_diff(&mut page, data)?;
-
-		self.track_write(page_id, diff_range.start as u16, diff)?;
+		self.track_write(page_id, &before, op)?;
 
 		if let Entry::Vacant(e) = self.locks.entry(page_id) {
 			e.insert(self.cache.write_page(page_id)?);
 		}
 		let lock = self.locks.get_mut(&page_id).unwrap();
-		lock[diff_range.clone()].copy_from_slice(&data[diff_range]);
+		lock[op.range()].copy_from_slice(op.bytes);
 		Ok(())
 	}
 
-	pub fn cancel(self) {
-		self.track_cancel();
-		todo!("This needs to rollback the changes written to the PageCache");
+	pub fn cancel(mut self) -> Result<(), Error> {
+		let mut state = self.state.lock();
+		let (seq, prev_seq) = self.next_seq(&mut state);
+		state.recovery.cancel_transaction(wal::ItemInfo {
+			tid: self.tid,
+			seq,
+			prev_seq,
+		})
 	}
 
-	pub fn commit(self) -> Result<(), Error> {
-		self.track_commit()?;
-		Ok(())
+	pub fn commit(mut self) -> Result<(), Error> {
+		let mut state = self.state.lock();
+		let (seq, prev_seq) = self.next_seq(&mut state);
+		state.recovery.commit_transaction(wal::ItemInfo {
+			tid: self.tid,
+			seq,
+			prev_seq,
+		})
 	}
 
 	fn create_rollback_write(
@@ -195,48 +153,34 @@ impl<'a> Transaction<'a> {
 		Ok(())
 	}
 
-	fn track_write(&mut self, page_id: PageId, diff_start: u16, diff: &[u8]) -> Result<(), Error> {
+	fn track_write(&mut self, page_id: PageId, before: &[u8], op: WriteOp) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		let seq = state.next_seq();
+		let (seq, prev_seq) = self.next_seq(&mut state);
 		state
-			.wal
-			.push_write(self.tid, seq, page_id, diff_start, diff);
+			.recovery
+			.track_write(
+				wal::ItemInfo {
+					tid: self.tid,
+					seq,
+					prev_seq,
+				},
+				wal::WriteInfo {
+					page_id,
+					start: op.start as u16,
+					before,
+					after: op.bytes,
+				},
+			)
+			.unwrap();
 		Ok(())
 	}
 
-	fn generate_diff<'b>(buf: &'b mut [u8], new: &[u8]) -> Result<(Range<usize>, &'b [u8]), Error> {
-		let mut start_index = 0;
-		let mut end_index = 0;
-		let mut has_started = false;
-		for (i, (byte, change)) in buf.iter_mut().zip(new.iter()).enumerate() {
-			if byte == change {
-				if !has_started {
-					start_index = i;
-					end_index = i + 1;
-				}
-			} else {
-				has_started = true;
-				*byte ^= change;
-				end_index = i + 1;
-			}
-		}
-
-		Ok((start_index..end_index, &buf[start_index..end_index]))
-	}
-
-	fn track_cancel(&self) {
-		let mut state = self.state.lock();
+	fn next_seq(&mut self, state: &mut State) -> (NonZeroU64, Option<NonZeroU64>) {
 		let seq = state.next_seq();
-		state.wal.push_cancel(self.tid, seq);
-	}
-
-	fn track_commit(&self) -> Result<(), Error> {
-		let mut state = self.state.lock();
-		let seq = state.next_seq();
-		state.wal.push_commit(self.tid, seq);
-		state.wal.flush().map_err(Error::WalWrite)?;
-		Ok(())
+		let prev_seq = self.last_seq;
+		self.last_seq = Some(seq);
+		(seq, prev_seq)
 	}
 }
 
@@ -247,7 +191,9 @@ mod tests {
 
 	use tempfile::tempdir;
 
-	use crate::{consts::PAGE_SIZE_RANGE, disk::storage::Storage};
+	use crate::{
+		consts::PAGE_SIZE_RANGE, disk::storage::Storage, manage::transaction::tests::wal::Wal,
+	};
 
 	use super::*;
 
@@ -266,69 +212,81 @@ mod tests {
 			},
 		)
 		.unwrap();
-		Wal::init_file(
-			dir.path().join("writes.acnl"),
-			wal::InitParams {
-				page_size: PAGE_SIZE,
-			},
-		)
-		.unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal = Wal::load_file(
-			dir.path().join("writes.acnl"),
-			wal::LoadParams {
-				page_size: PAGE_SIZE,
-			},
-		)
-		.unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
 
 		cache.write_page(PageId::new(0, 1)).unwrap().fill(0);
 		cache.write_page(PageId::new(0, 2)).unwrap().fill(0);
 
-		let tm = TransactionManager::new(cache, wal);
+		let tm = TransactionManager::new(cache, recovery);
 		let mut t = tm.begin();
 		let mut buf = vec![0; PAGE_SIZE as usize];
 
-		t.write(PageId::new(0, 1), &[25; PAGE_SIZE as usize])
-			.unwrap();
-		t.read(PageId::new(0, 1), &mut buf).unwrap();
+		t.write(
+			PageId::new(0, 1),
+			WriteOp::new(0, &[25; PAGE_SIZE as usize]),
+		)
+		.unwrap();
+		t.read(PageId::new(0, 1), ReadOp::new(0, &mut buf)).unwrap();
 		assert!(buf.iter().all(|b| *b == 25));
 
-		t.write(PageId::new(0, 2), &[69; PAGE_SIZE as usize])
-			.unwrap();
-		t.read(PageId::new(0, 2), &mut buf).unwrap();
-		assert!(buf.iter().all(|b| *b == 69));
+		t.write(
+			PageId::new(0, 1),
+			WriteOp::new(10, &[69; PAGE_SIZE as usize - 10]),
+		)
+		.unwrap();
+		t.read(PageId::new(0, 1), ReadOp::new(0, &mut buf)).unwrap();
+
+		assert!(buf[0..10].iter().all(|b| *b == 25));
+		assert!(buf[10..].iter().all(|b| *b == 69));
 
 		t.commit().unwrap();
 
 		mem::drop(tm);
 
-		let mut wal = Wal::load_file(
-			dir.path().join("writes.acnl"),
-			wal::LoadParams {
-				page_size: PAGE_SIZE,
-			},
-		)
-		.unwrap();
+		let mut wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let wal_items: Vec<wal::Item> = wal.iter().unwrap().map(|i| i.unwrap()).collect();
 		assert_eq!(
 			wal_items,
 			vec![
-				wal::Item::Write {
-					tid: 0,
-					page_id: PageId::new(0, 1),
-					diff_start: 0,
-					diff: [25; PAGE_SIZE as usize].into(),
+				wal::Item {
+					info: wal::ItemInfo {
+						tid: 0,
+						seq: NonZeroU64::new(1).unwrap(),
+						prev_seq: None
+					},
+					data: wal::ItemData::Write {
+						page_id: PageId::new(0, 1),
+						start: 0,
+						before: [0; PAGE_SIZE as usize].into(),
+						after: [25; PAGE_SIZE as usize].into()
+					}
 				},
-				wal::Item::Write {
-					tid: 0,
-					page_id: PageId::new(0, 2),
-					diff_start: 0,
-					diff: [69; PAGE_SIZE as usize].into(),
+				wal::Item {
+					info: wal::ItemInfo {
+						tid: 0,
+						seq: NonZeroU64::new(2).unwrap(),
+						prev_seq: NonZeroU64::new(1)
+					},
+					data: wal::ItemData::Write {
+						page_id: PageId::new(0, 1),
+						start: 10,
+						before: [25; PAGE_SIZE as usize - 10].into(),
+						after: [69; PAGE_SIZE as usize - 10].into()
+					}
 				},
-				wal::Item::Commit(0)
+				wal::Item {
+					info: wal::ItemInfo {
+						tid: 0,
+						seq: NonZeroU64::new(3).unwrap(),
+						prev_seq: NonZeroU64::new(2)
+					},
+					data: wal::ItemData::Commit
+				},
 			]
 		)
 	}

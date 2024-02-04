@@ -171,9 +171,9 @@ mod tests {
 		consts::DEFAULT_PAGE_SIZE,
 		disk::{
 			storage::{self, Storage},
-			wal::{self, Wal},
+			wal::Wal,
 		},
-		manage::transaction::TransactionManager,
+		manage::{recovery::RecoveryManager, transaction::TransactionManager},
 	};
 
 	use super::*;
@@ -184,13 +184,13 @@ mod tests {
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();
 		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
@@ -213,20 +213,13 @@ mod tests {
 			storage::InitParams { page_size },
 		)
 		.unwrap();
-		Wal::init_file(
-			dir.path().join("writes.acnl"),
-			wal::InitParams { page_size },
-		)
-		.unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal = Wal::load_file(
-			dir.path().join("writes.acnl"),
-			wal::LoadParams { page_size },
-		)
-		.unwrap();
-		let cache = Arc::new(PageCache::new(storage, 64 * 1024));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
+		let cache = Arc::new(PageCache::new(storage, 100));
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
@@ -247,13 +240,13 @@ mod tests {
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();
 		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
@@ -272,13 +265,13 @@ mod tests {
 		let dir = tempdir().unwrap();
 		fs::create_dir(dir.path().join("storage")).unwrap();
 		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl"), wal::InitParams::default()).unwrap();
+		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
 
 		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal =
-			Wal::load_file(dir.path().join("writes.acnl"), wal::LoadParams::default()).unwrap();
+		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
 		let cache = Arc::new(PageCache::new(storage, 100));
-		let tm = TransactionManager::new(Arc::clone(&cache), wal);
+		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
+		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
 		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
 
