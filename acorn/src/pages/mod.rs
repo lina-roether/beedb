@@ -1,10 +1,8 @@
-mod b_tree;
 mod freelist;
 mod header;
 
 use std::ops::Range;
 
-pub(crate) use b_tree::*;
 pub(crate) use freelist::*;
 pub(crate) use header::*;
 
