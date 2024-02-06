@@ -3,7 +3,7 @@
 - Proper interfacing and mocking
 
   - [x] crate::disk::storage
-  - [ ] crate::disk::wal
+  - [x] crate::disk::wal
   - [ ] crate::cache
   - [ ] crate::manage::\*
     - [ ] crate::manage::alloc
@@ -12,8 +12,6 @@
     - [ ] crate::manage::segment
     - [ ] crate::manage::transaction
 
-- Tests
-
-  - [ ] crate::manage::recovery
+- Overhaul Tests
 
 - Rework error structure once the public api is more established
