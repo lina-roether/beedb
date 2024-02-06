@@ -7,19 +7,28 @@ use std::{
 
 use crate::{
 	cache::PageCache,
-	disk::wal::{self, Wal},
+	disk::{
+		storage::StorageApi,
+		wal::{self, Wal},
+	},
 	id::PageId,
 };
 
 use super::err::Error;
 
-pub(super) struct RecoveryManager {
-	page_cache: Arc<PageCache>,
+pub(super) struct RecoveryManager<Storage>
+where
+	Storage: StorageApi,
+{
+	page_cache: Arc<PageCache<Storage>>,
 	wal: Wal<File>,
 }
 
-impl RecoveryManager {
-	pub fn new(page_cache: Arc<PageCache>, wal: Wal<File>) -> Self {
+impl<Storage> RecoveryManager<Storage>
+where
+	Storage: StorageApi,
+{
+	pub fn new(page_cache: Arc<PageCache<Storage>>, wal: Wal<File>) -> Self {
 		Self { page_cache, wal }
 	}
 
@@ -109,7 +118,7 @@ impl RecoveryManager {
 	}
 
 	fn apply_write(
-		page_cache: &PageCache,
+		page_cache: &PageCache<Storage>,
 		page_id: PageId,
 		start: u16,
 		data: &[u8],

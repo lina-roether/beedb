@@ -13,7 +13,7 @@ use static_assertions::assert_impl_all;
 use crate::{
 	cache::{PageCache, PageWriteGuard},
 	disk::{
-		storage,
+		storage::{self, Storage, StorageApi},
 		wal::{self},
 	},
 	id::PageId,
@@ -22,16 +22,22 @@ use crate::{
 
 use super::{err::Error, recovery::RecoveryManager};
 
-pub(super) struct TransactionManager {
+pub(super) struct TransactionManager<Storage>
+where
+	Storage: StorageApi,
+{
 	tid_counter: AtomicU64,
-	cache: Arc<PageCache>,
-	state: Arc<Mutex<State>>,
+	cache: Arc<PageCache<Storage>>,
+	state: Arc<Mutex<State<Storage>>>,
 }
 
-assert_impl_all!(TransactionManager: Send, Sync);
+assert_impl_all!(TransactionManager<Storage>: Send, Sync);
 
-impl TransactionManager {
-	pub fn new(cache: Arc<PageCache>, recovery: RecoveryManager) -> Self {
+impl<Storage> TransactionManager<Storage>
+where
+	Storage: StorageApi,
+{
+	pub fn new(cache: Arc<PageCache<Storage>>, recovery: RecoveryManager<Storage>) -> Self {
 		Self {
 			tid_counter: AtomicU64::new(0),
 			cache,
@@ -39,7 +45,7 @@ impl TransactionManager {
 		}
 	}
 
-	pub fn begin(&self) -> Transaction {
+	pub fn begin(&self) -> Transaction<Storage> {
 		Transaction::new(self.next_tid(), &self.state, &self.cache)
 	}
 
@@ -49,13 +55,19 @@ impl TransactionManager {
 	}
 }
 
-struct State {
-	recovery: RecoveryManager,
+struct State<Storage>
+where
+	Storage: StorageApi,
+{
+	recovery: RecoveryManager<Storage>,
 	seq_counter: u64,
 }
 
-impl State {
-	fn new(recovery: RecoveryManager) -> Self {
+impl<Storage> State<Storage>
+where
+	Storage: StorageApi,
+{
+	fn new(recovery: RecoveryManager<Storage>) -> Self {
 		Self {
 			recovery,
 			seq_counter: 0,
@@ -69,16 +81,22 @@ impl State {
 	}
 }
 
-pub(crate) struct Transaction<'a> {
+pub(crate) struct Transaction<'a, Storage>
+where
+	Storage: StorageApi,
+{
 	tid: u64,
 	last_seq: Option<NonZeroU64>,
-	state: &'a Mutex<State>,
-	cache: &'a PageCache,
+	state: &'a Mutex<State<Storage>>,
+	cache: &'a PageCache<Storage>,
 	locks: HashMap<PageId, PageWriteGuard<'a>>,
 }
 
-impl<'a> Transaction<'a> {
-	fn new(tid: u64, state: &'a Mutex<State>, cache: &'a PageCache) -> Self {
+impl<'a, Storage> Transaction<'a, Storage>
+where
+	Storage: StorageApi,
+{
+	fn new(tid: u64, state: &'a Mutex<State<Storage>>, cache: &'a PageCache<Storage>) -> Self {
 		Self {
 			tid,
 			last_seq: None,
@@ -176,7 +194,7 @@ impl<'a> Transaction<'a> {
 		Ok(())
 	}
 
-	fn next_seq(&mut self, state: &mut State) -> (NonZeroU64, Option<NonZeroU64>) {
+	fn next_seq(&mut self, state: &mut State<Storage>) -> (NonZeroU64, Option<NonZeroU64>) {
 		let seq = state.next_seq();
 		let prev_seq = self.last_seq;
 		self.last_seq = Some(seq);

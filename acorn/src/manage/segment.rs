@@ -3,21 +3,28 @@ use std::{num::NonZeroU16, sync::Arc};
 use byte_view::{BufError, ViewBuf};
 
 use crate::{
+	disk::storage::StorageApi,
 	id::PageId,
 	pages::{FreelistPage, HeaderPage, WriteOp},
 };
 
 use super::{err::Error, read::ReadManager, transaction::Transaction};
 
-pub(super) struct SegmentManager {
+pub(super) struct SegmentManager<Storage>
+where
+	Storage: StorageApi,
+{
 	segment_num: u32,
-	rm: Arc<ReadManager>,
+	rm: Arc<ReadManager<Storage>>,
 	header: ViewBuf<HeaderPage>,
 	freelist_stack: Vec<FreelistStackEntry>,
 }
 
-impl SegmentManager {
-	pub fn new(rm: Arc<ReadManager>, segment_num: u32) -> Result<Self, Error> {
+impl<Storage> SegmentManager<Storage>
+where
+	Storage: StorageApi,
+{
+	pub fn new(rm: Arc<ReadManager<Storage>>, segment_num: u32) -> Result<Self, Error> {
 		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
 		rm.read(PageId::new(segment_num, 0), HeaderPage::read(&mut header))?;
 
@@ -42,7 +49,10 @@ impl SegmentManager {
 		})
 	}
 
-	pub fn alloc_page(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error> {
+	pub fn alloc_page(&mut self, t: &mut Transaction<Storage>) -> Result<Option<NonZeroU16>, Error>
+	where
+		Storage: StorageApi,
+	{
 		if let Some(free_page) = self.pop_freelist(t)? {
 			return Ok(Some(free_page));
 		}
@@ -52,7 +62,14 @@ impl SegmentManager {
 		Ok(None)
 	}
 
-	pub fn free_page(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
+	pub fn free_page(
+		&mut self,
+		t: &mut Transaction<Storage>,
+		page_num: NonZeroU16,
+	) -> Result<(), Error>
+	where
+		Storage: StorageApi,
+	{
 		self.push_freelist(t, page_num)
 	}
 
@@ -60,7 +77,10 @@ impl SegmentManager {
 		!self.freelist_stack.is_empty()
 	}
 
-	fn create_new_page(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error> {
+	fn create_new_page(
+		&mut self,
+		t: &mut Transaction<Storage>,
+	) -> Result<Option<NonZeroU16>, Error> {
 		if self.header.num_pages == u16::MAX {
 			return Ok(None);
 		}
@@ -74,7 +94,11 @@ impl SegmentManager {
 		Ok(Some(new_page))
 	}
 
-	fn push_freelist(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
+	fn push_freelist(
+		&mut self,
+		t: &mut Transaction<Storage>,
+		page_num: NonZeroU16,
+	) -> Result<(), Error> {
 		if let Some(mut trunk) = self.get_trunk() {
 			if !trunk.is_full() {
 				trunk.push(t, page_num)?;
@@ -88,7 +112,7 @@ impl SegmentManager {
 		Ok(())
 	}
 
-	fn pop_freelist(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error> {
+	fn pop_freelist(&mut self, t: &mut Transaction<Storage>) -> Result<Option<NonZeroU16>, Error> {
 		let Some(mut trunk) = self.get_trunk() else {
 			return Ok(None);
 		};
@@ -111,7 +135,11 @@ impl SegmentManager {
 			.map(|page| FreelistPageManager::new(self.segment_num, page))
 	}
 
-	fn push_trunk(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
+	fn push_trunk(
+		&mut self,
+		t: &mut Transaction<Storage>,
+		page_num: NonZeroU16,
+	) -> Result<(), Error> {
 		self.set_trunk(t, Some(page_num))?;
 		self.freelist_stack
 			.push(FreelistStackEntry::new(page_num, self.rm.page_size()).unwrap());
@@ -122,7 +150,7 @@ impl SegmentManager {
 
 	fn set_trunk(
 		&mut self,
-		t: &mut Transaction,
+		t: &mut Transaction<Storage>,
 		trunk_num: Option<NonZeroU16>,
 	) -> Result<(), Error> {
 		self.header.freelist_trunk = trunk_num;
@@ -130,11 +158,11 @@ impl SegmentManager {
 		Ok(())
 	}
 
-	fn write_header(&self, t: &mut Transaction) -> Result<(), Error> {
+	fn write_header(&self, t: &mut Transaction<Storage>) -> Result<(), Error> {
 		self.write(t, 0, HeaderPage::write(&self.header))
 	}
 
-	fn write(&self, t: &mut Transaction, page_num: u16, op: WriteOp) -> Result<(), Error> {
+	fn write(&self, t: &mut Transaction<Storage>, page_num: u16, op: WriteOp) -> Result<(), Error> {
 		t.write(PageId::new(self.segment_num, page_num), op)
 	}
 }
@@ -191,7 +219,14 @@ impl<'a> FreelistPageManager<'a> {
 		self.page.page_num
 	}
 
-	fn push(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error> {
+	fn push<Storage>(
+		&mut self,
+		t: &mut Transaction<Storage>,
+		page_num: NonZeroU16,
+	) -> Result<(), Error>
+	where
+		Storage: StorageApi,
+	{
 		let index: usize = self.buf().length.into();
 		self.buf_mut().length += 1;
 		t.write(self.page_id(), FreelistPage::write_header(self.buf()))?;
@@ -201,7 +236,10 @@ impl<'a> FreelistPageManager<'a> {
 		Ok(())
 	}
 
-	fn pop(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error> {
+	fn pop<Storage>(&mut self, t: &mut Transaction<Storage>) -> Result<Option<NonZeroU16>, Error>
+	where
+		Storage: StorageApi,
+	{
 		if self.buf().length == 0 {
 			return Ok(None);
 		}
@@ -216,12 +254,22 @@ impl<'a> FreelistPageManager<'a> {
 		Ok(Some(page_num))
 	}
 
-	fn set_next(&mut self, t: &mut Transaction, next: Option<NonZeroU16>) -> Result<(), Error> {
+	fn set_next<Storage>(
+		&mut self,
+		t: &mut Transaction<Storage>,
+		next: Option<NonZeroU16>,
+	) -> Result<(), Error>
+	where
+		Storage: StorageApi,
+	{
 		self.buf_mut().next = next;
 		t.write(self.page_id(), FreelistPage::write_header(self.buf()))
 	}
 
-	fn reset(&mut self, t: &mut Transaction) -> Result<(), Error> {
+	fn reset<Storage>(&mut self, t: &mut Transaction<Storage>) -> Result<(), Error>
+	where
+		Storage: StorageApi,
+	{
 		self.buf_mut().next = None;
 		self.buf_mut().length = 0;
 		t.write(self.page_id(), FreelistPage::write_header(self.buf()))

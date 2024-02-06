@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 byte_view = { version = "0.1.0", path = "../byte_view" }
+mockall = { version = "0.12.1", features = ["nightly"] }
 parking_lot = "0.12.1"
 static_assertions = "1.1.0"
 thiserror = "1.0.50"

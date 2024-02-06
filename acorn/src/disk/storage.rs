@@ -5,6 +5,9 @@ use std::{
 	usize,
 };
 
+#[cfg(test)]
+use mockall::automock;
+
 use parking_lot::RwLock;
 use static_assertions::assert_impl_all;
 use thiserror::Error;
@@ -73,6 +76,14 @@ pub(crate) enum Error {
 	PageWrite(PageId, io::Error),
 }
 
+#[cfg_attr(test, automock)]
+pub(crate) trait StorageApi {
+	fn page_size(&self) -> u16;
+	fn segment_nums(&self) -> Box<[u32]>;
+	fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error>;
+	fn write_page(&self, buf: &[u8], page_id: PageId) -> Result<(), Error>;
+}
+
 pub(crate) struct Storage {
 	page_size: u16,
 	dir: StorageDir,
@@ -117,18 +128,20 @@ impl Storage {
 		disk_storage.load_all_segment_files()?;
 		Ok(disk_storage)
 	}
+}
 
+impl StorageApi for Storage {
 	#[inline]
-	pub fn page_size(&self) -> u16 {
+	fn page_size(&self) -> u16 {
 		self.page_size
 	}
 
 	#[inline]
-	pub fn segment_nums(&self) -> Box<[u32]> {
+	fn segment_nums(&self) -> Box<[u32]> {
 		self.state.read().iter_loaded_segments().collect()
 	}
 
-	pub fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error> {
+	fn read_page(&self, buf: &mut [u8], page_id: PageId) -> Result<(), Error> {
 		self.ensure_segment_exists(page_id.segment_num)?;
 
 		let state = self.state.read();
@@ -141,7 +154,7 @@ impl Storage {
 		Ok(())
 	}
 
-	pub fn write_page(&self, buf: &[u8], page_id: PageId) -> Result<(), Error> {
+	fn write_page(&self, buf: &[u8], page_id: PageId) -> Result<(), Error> {
 		self.ensure_segment_exists(page_id.segment_num)?;
 
 		let state = self.state.read();
@@ -153,7 +166,9 @@ impl Storage {
 			.map_err(|err| Error::PageWrite(page_id, err))?;
 		Ok(())
 	}
+}
 
+impl Storage {
 	fn ensure_segment_exists(&self, segment_num: u32) -> Result<(), Error> {
 		if !self.dir.segment_file(segment_num).exists() {
 			self.create_segment(segment_num)

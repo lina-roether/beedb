@@ -2,17 +2,23 @@ use std::{collections::HashSet, num::NonZeroU16, sync::Arc};
 
 use parking_lot::Mutex;
 
-use crate::{id::PageId, utils::array_map::ArrayMap};
+use crate::{disk::storage::StorageApi, id::PageId, utils::array_map::ArrayMap};
 
 use super::{err::Error, read::ReadManager, segment::SegmentManager, transaction::Transaction};
 
-pub(super) struct AllocManager {
-	state: Mutex<State>,
-	rm: Arc<ReadManager>,
+pub(super) struct AllocManager<Storage>
+where
+	Storage: StorageApi,
+{
+	state: Mutex<State<Storage>>,
+	rm: Arc<ReadManager<Storage>>,
 }
 
-impl AllocManager {
-	pub fn new(rm: Arc<ReadManager>) -> Result<Self, Error> {
+impl<Storage> AllocManager<Storage>
+where
+	Storage: StorageApi,
+{
+	pub fn new(rm: Arc<ReadManager<Storage>>) -> Result<Self, Error> {
 		let mut state = State {
 			segments: ArrayMap::new(),
 			free_cache: HashSet::new(),
@@ -28,7 +34,10 @@ impl AllocManager {
 		})
 	}
 
-	pub fn free_page(&self, t: &mut Transaction, page_id: PageId) -> Result<(), Error> {
+	pub fn free_page(&self, t: &mut Transaction<Storage>, page_id: PageId) -> Result<(), Error>
+	where
+		Storage: StorageApi,
+	{
 		let mut state = self.state.lock();
 
 		let Some(page_num) = NonZeroU16::new(page_id.page_num) else {
@@ -44,14 +53,20 @@ impl AllocManager {
 		Ok(())
 	}
 
-	pub fn alloc_page(&self, t: &mut Transaction) -> Result<PageId, Error> {
+	pub fn alloc_page(&self, t: &mut Transaction<Storage>) -> Result<PageId, Error>
+	where
+		Storage: StorageApi,
+	{
 		if let Some(page_id) = self.alloc_from_free_cache(t)? {
 			return Ok(page_id);
 		}
 		self.alloc_in_new_segment(t)
 	}
 
-	fn alloc_in_new_segment(&self, t: &mut Transaction) -> Result<PageId, Error> {
+	fn alloc_in_new_segment(&self, t: &mut Transaction<Storage>) -> Result<PageId, Error>
+	where
+		Storage: StorageApi,
+	{
 		let mut state = self.state.lock();
 		let next_segment = state.next_segment;
 		let Some(page_id) = state.try_alloc_in_new(t, next_segment, Arc::clone(&self.rm))? else {
@@ -60,7 +75,10 @@ impl AllocManager {
 		Ok(page_id)
 	}
 
-	fn alloc_from_free_cache(&self, t: &mut Transaction) -> Result<Option<PageId>, Error> {
+	fn alloc_from_free_cache(&self, t: &mut Transaction<Storage>) -> Result<Option<PageId>, Error>
+	where
+		Storage: StorageApi,
+	{
 		let mut state = self.state.lock();
 		loop {
 			let Some(segment_num) = state.free_cache_get() else {
@@ -75,19 +93,28 @@ impl AllocManager {
 	}
 }
 
-struct State {
-	segments: ArrayMap<SegmentManager>,
+struct State<Storage>
+where
+	Storage: StorageApi,
+{
+	segments: ArrayMap<SegmentManager<Storage>>,
 	free_cache: HashSet<u32>,
 	next_segment: u32,
 }
 
-impl State {
+impl<Storage> State<Storage>
+where
+	Storage: StorageApi,
+{
 	fn try_alloc_in(
 		&mut self,
-		t: &mut Transaction,
+		t: &mut Transaction<Storage>,
 		segment_num: u32,
-		rm: Arc<ReadManager>,
-	) -> Result<Option<PageId>, Error> {
+		rm: Arc<ReadManager<Storage>>,
+	) -> Result<Option<PageId>, Error>
+	where
+		Storage: StorageApi,
+	{
 		if self.has_segment(segment_num) {
 			self.try_alloc_in_existing(t, segment_num)
 		} else {
@@ -97,9 +124,12 @@ impl State {
 
 	fn try_alloc_in_existing(
 		&mut self,
-		t: &mut Transaction,
+		t: &mut Transaction<Storage>,
 		segment_num: u32,
-	) -> Result<Option<PageId>, Error> {
+	) -> Result<Option<PageId>, Error>
+	where
+		Storage: StorageApi,
+	{
 		let Some(segment) = self.get_segment(segment_num) else {
 			return Ok(None);
 		};
@@ -111,10 +141,13 @@ impl State {
 
 	fn try_alloc_in_new(
 		&mut self,
-		t: &mut Transaction,
+		t: &mut Transaction<Storage>,
 		segment_num: u32,
-		rm: Arc<ReadManager>,
-	) -> Result<Option<PageId>, Error> {
+		rm: Arc<ReadManager<Storage>>,
+	) -> Result<Option<PageId>, Error>
+	where
+		Storage: StorageApi,
+	{
 		let segment = self.add_segment(segment_num, rm)?;
 		let Some(page_num) = segment.alloc_page(t)? else {
 			return Ok(None);
@@ -129,8 +162,8 @@ impl State {
 	fn add_segment(
 		&mut self,
 		segment_num: u32,
-		rm: Arc<ReadManager>,
-	) -> Result<&mut SegmentManager, Error> {
+		rm: Arc<ReadManager<Storage>>,
+	) -> Result<&mut SegmentManager<Storage>, Error> {
 		let segment_alloc = SegmentManager::new(rm, segment_num)?;
 		if segment_alloc.has_free_pages() {
 			self.free_cache.insert(segment_num);
@@ -142,7 +175,7 @@ impl State {
 		Ok(self.segments.get_mut(segment_num as usize).unwrap())
 	}
 
-	fn get_segment(&mut self, segment_num: u32) -> Option<&mut SegmentManager> {
+	fn get_segment(&mut self, segment_num: u32) -> Option<&mut SegmentManager<Storage>> {
 		self.segments.get_mut(segment_num as usize)
 	}
 
