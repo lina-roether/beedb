@@ -1,5 +1,6 @@
 use std::{
 	collections::{hash_map::Entry, HashMap},
+	fs::File,
 	num::NonZeroU64,
 	sync::{
 		atomic::{AtomicU64, Ordering},
@@ -14,7 +15,7 @@ use crate::{
 	cache::{PageCache, PageWriteGuard},
 	disk::{
 		storage::{self, Storage, StorageApi},
-		wal::{self},
+		wal::{self, Wal, WalApi},
 	},
 	id::PageId,
 	pages::{ReadOp, WriteOp},
@@ -22,22 +23,24 @@ use crate::{
 
 use super::{err::Error, recovery::RecoveryManager};
 
-pub(super) struct TransactionManager<Storage>
+pub(super) struct TransactionManager<Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
 	tid_counter: AtomicU64,
 	cache: Arc<PageCache<Storage>>,
-	state: Arc<Mutex<State<Storage>>>,
+	state: Arc<Mutex<State<Storage, Wal>>>,
 }
 
-assert_impl_all!(TransactionManager<Storage>: Send, Sync);
+assert_impl_all!(TransactionManager<Storage, Wal<File>>: Send, Sync);
 
-impl<Storage> TransactionManager<Storage>
+impl<Storage, Wal> TransactionManager<Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
-	pub fn new(cache: Arc<PageCache<Storage>>, recovery: RecoveryManager<Storage>) -> Self {
+	pub fn new(cache: Arc<PageCache<Storage>>, recovery: RecoveryManager<Storage, Wal>) -> Self {
 		Self {
 			tid_counter: AtomicU64::new(0),
 			cache,
@@ -45,7 +48,7 @@ where
 		}
 	}
 
-	pub fn begin(&self) -> Transaction<Storage> {
+	pub fn begin(&self) -> Transaction<Storage, Wal> {
 		Transaction::new(self.next_tid(), &self.state, &self.cache)
 	}
 
@@ -55,19 +58,21 @@ where
 	}
 }
 
-struct State<Storage>
+struct State<Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
-	recovery: RecoveryManager<Storage>,
+	recovery: RecoveryManager<Storage, Wal>,
 	seq_counter: u64,
 }
 
-impl<Storage> State<Storage>
+impl<Storage, Wal> State<Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
-	fn new(recovery: RecoveryManager<Storage>) -> Self {
+	fn new(recovery: RecoveryManager<Storage, Wal>) -> Self {
 		Self {
 			recovery,
 			seq_counter: 0,
@@ -81,22 +86,24 @@ where
 	}
 }
 
-pub(crate) struct Transaction<'a, Storage>
+pub(crate) struct Transaction<'a, Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
 	tid: u64,
 	last_seq: Option<NonZeroU64>,
-	state: &'a Mutex<State<Storage>>,
+	state: &'a Mutex<State<Storage, Wal>>,
 	cache: &'a PageCache<Storage>,
 	locks: HashMap<PageId, PageWriteGuard<'a>>,
 }
 
-impl<'a, Storage> Transaction<'a, Storage>
+impl<'a, Storage, Wal> Transaction<'a, Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
-	fn new(tid: u64, state: &'a Mutex<State<Storage>>, cache: &'a PageCache<Storage>) -> Self {
+	fn new(tid: u64, state: &'a Mutex<State<Storage, Wal>>, cache: &'a PageCache<Storage>) -> Self {
 		Self {
 			tid,
 			last_seq: None,
@@ -194,7 +201,7 @@ where
 		Ok(())
 	}
 
-	fn next_seq(&mut self, state: &mut State<Storage>) -> (NonZeroU64, Option<NonZeroU64>) {
+	fn next_seq(&mut self, state: &mut State<Storage, Wal>) -> (NonZeroU64, Option<NonZeroU64>) {
 		let seq = state.next_seq();
 		let prev_seq = self.last_seq;
 		self.last_seq = Some(seq);

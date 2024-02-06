@@ -3,7 +3,7 @@ use std::{num::NonZeroU16, sync::Arc};
 use byte_view::{BufError, ViewBuf};
 
 use crate::{
-	disk::storage::StorageApi,
+	disk::{storage::StorageApi, wal::WalApi},
 	id::PageId,
 	pages::{FreelistPage, HeaderPage, WriteOp},
 };
@@ -49,9 +49,12 @@ where
 		})
 	}
 
-	pub fn alloc_page(&mut self, t: &mut Transaction<Storage>) -> Result<Option<NonZeroU16>, Error>
+	pub fn alloc_page<Wal>(
+		&mut self,
+		t: &mut Transaction<Storage, Wal>,
+	) -> Result<Option<NonZeroU16>, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		if let Some(free_page) = self.pop_freelist(t)? {
 			return Ok(Some(free_page));
@@ -62,13 +65,13 @@ where
 		Ok(None)
 	}
 
-	pub fn free_page(
+	pub fn free_page<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		page_num: NonZeroU16,
 	) -> Result<(), Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		self.push_freelist(t, page_num)
 	}
@@ -77,10 +80,13 @@ where
 		!self.freelist_stack.is_empty()
 	}
 
-	fn create_new_page(
+	fn create_new_page<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
-	) -> Result<Option<NonZeroU16>, Error> {
+		t: &mut Transaction<Storage, Wal>,
+	) -> Result<Option<NonZeroU16>, Error>
+	where
+		Wal: WalApi,
+	{
 		if self.header.num_pages == u16::MAX {
 			return Ok(None);
 		}
@@ -94,11 +100,14 @@ where
 		Ok(Some(new_page))
 	}
 
-	fn push_freelist(
+	fn push_freelist<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		page_num: NonZeroU16,
-	) -> Result<(), Error> {
+	) -> Result<(), Error>
+	where
+		Wal: WalApi,
+	{
 		if let Some(mut trunk) = self.get_trunk() {
 			if !trunk.is_full() {
 				trunk.push(t, page_num)?;
@@ -112,7 +121,13 @@ where
 		Ok(())
 	}
 
-	fn pop_freelist(&mut self, t: &mut Transaction<Storage>) -> Result<Option<NonZeroU16>, Error> {
+	fn pop_freelist<Wal>(
+		&mut self,
+		t: &mut Transaction<Storage, Wal>,
+	) -> Result<Option<NonZeroU16>, Error>
+	where
+		Wal: WalApi,
+	{
 		let Some(mut trunk) = self.get_trunk() else {
 			return Ok(None);
 		};
@@ -135,11 +150,14 @@ where
 			.map(|page| FreelistPageManager::new(self.segment_num, page))
 	}
 
-	fn push_trunk(
+	fn push_trunk<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		page_num: NonZeroU16,
-	) -> Result<(), Error> {
+	) -> Result<(), Error>
+	where
+		Wal: WalApi,
+	{
 		self.set_trunk(t, Some(page_num))?;
 		self.freelist_stack
 			.push(FreelistStackEntry::new(page_num, self.rm.page_size()).unwrap());
@@ -148,21 +166,35 @@ where
 		Ok(())
 	}
 
-	fn set_trunk(
+	fn set_trunk<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		trunk_num: Option<NonZeroU16>,
-	) -> Result<(), Error> {
+	) -> Result<(), Error>
+	where
+		Wal: WalApi,
+	{
 		self.header.freelist_trunk = trunk_num;
 		self.write_header(t)?;
 		Ok(())
 	}
 
-	fn write_header(&self, t: &mut Transaction<Storage>) -> Result<(), Error> {
+	fn write_header<Wal>(&self, t: &mut Transaction<Storage, Wal>) -> Result<(), Error>
+	where
+		Wal: WalApi,
+	{
 		self.write(t, 0, HeaderPage::write(&self.header))
 	}
 
-	fn write(&self, t: &mut Transaction<Storage>, page_num: u16, op: WriteOp) -> Result<(), Error> {
+	fn write<Wal>(
+		&self,
+		t: &mut Transaction<Storage, Wal>,
+		page_num: u16,
+		op: WriteOp,
+	) -> Result<(), Error>
+	where
+		Wal: WalApi,
+	{
 		t.write(PageId::new(self.segment_num, page_num), op)
 	}
 }
@@ -219,13 +251,14 @@ impl<'a> FreelistPageManager<'a> {
 		self.page.page_num
 	}
 
-	fn push<Storage>(
+	fn push<Storage, Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		page_num: NonZeroU16,
 	) -> Result<(), Error>
 	where
 		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		let index: usize = self.buf().length.into();
 		self.buf_mut().length += 1;
@@ -236,9 +269,13 @@ impl<'a> FreelistPageManager<'a> {
 		Ok(())
 	}
 
-	fn pop<Storage>(&mut self, t: &mut Transaction<Storage>) -> Result<Option<NonZeroU16>, Error>
+	fn pop<Storage, Wal>(
+		&mut self,
+		t: &mut Transaction<Storage, Wal>,
+	) -> Result<Option<NonZeroU16>, Error>
 	where
 		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		if self.buf().length == 0 {
 			return Ok(None);
@@ -254,21 +291,23 @@ impl<'a> FreelistPageManager<'a> {
 		Ok(Some(page_num))
 	}
 
-	fn set_next<Storage>(
+	fn set_next<Storage, Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		next: Option<NonZeroU16>,
 	) -> Result<(), Error>
 	where
 		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		self.buf_mut().next = next;
 		t.write(self.page_id(), FreelistPage::write_header(self.buf()))
 	}
 
-	fn reset<Storage>(&mut self, t: &mut Transaction<Storage>) -> Result<(), Error>
+	fn reset<Storage, Wal>(&mut self, t: &mut Transaction<Storage, Wal>) -> Result<(), Error>
 	where
 		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		self.buf_mut().next = None;
 		self.buf_mut().length = 0;

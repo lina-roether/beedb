@@ -1,6 +1,5 @@
 use std::{
 	collections::{HashMap, HashSet},
-	fs::File,
 	num::NonZeroU64,
 	sync::Arc,
 };
@@ -9,26 +8,28 @@ use crate::{
 	cache::PageCache,
 	disk::{
 		storage::StorageApi,
-		wal::{self, Wal},
+		wal::{self, WalApi},
 	},
 	id::PageId,
 };
 
 use super::err::Error;
 
-pub(super) struct RecoveryManager<Storage>
+pub(super) struct RecoveryManager<Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
 	page_cache: Arc<PageCache<Storage>>,
-	wal: Wal<File>,
+	wal: Wal,
 }
 
-impl<Storage> RecoveryManager<Storage>
+impl<Storage, Wal> RecoveryManager<Storage, Wal>
 where
 	Storage: StorageApi,
+	Wal: WalApi,
 {
-	pub fn new(page_cache: Arc<PageCache<Storage>>, wal: Wal<File>) -> Self {
+	pub fn new(page_cache: Arc<PageCache<Storage>>, wal: Wal) -> Self {
 		Self { page_cache, wal }
 	}
 

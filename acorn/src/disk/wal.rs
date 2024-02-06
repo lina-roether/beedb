@@ -4,7 +4,11 @@ use std::{
 	mem::size_of,
 	num::NonZeroU64,
 	path::Path,
+	vec,
 };
+
+#[cfg(test)]
+use mockall::automock;
 
 use byte_view::{ByteView, ViewBuf, ViewSlice};
 use thiserror::Error;
@@ -53,6 +57,40 @@ pub(crate) enum ReadError {
 
 	#[error(transparent)]
 	Io(#[from] io::Error),
+}
+
+#[allow(clippy::needless_lifetimes)]
+#[cfg_attr(test, automock(
+    type Iter<'a> = vec::IntoIter<Result<Item, ReadError>>;
+    type Retrace<'a> = vec::IntoIter<Result<Item, ReadError>>;
+))]
+pub(crate) trait WalApi {
+	type Iter<'a>: Iterator<Item = Result<Item, ReadError>> + 'a
+	where
+		Self: 'a;
+
+	type Retrace<'a>: Iterator<Item = Result<Item, ReadError>> + 'a
+	where
+		Self: 'a;
+
+	fn push_write<'a>(
+		&mut self,
+		item_info: ItemInfo,
+		write_info: WriteInfo<'a>,
+	) -> Result<(), io::Error>;
+
+	fn push_commit(&mut self, item_info: ItemInfo) -> Result<(), io::Error>;
+
+	fn push_cancel(&mut self, item_info: ItemInfo) -> Result<(), io::Error>;
+
+	fn flush(&mut self) -> Result<(), io::Error>;
+
+	fn iter<'a>(&'a mut self) -> Result<Self::Iter<'a>, ReadError>;
+
+	fn retrace_transaction<'a>(
+		&'a mut self,
+		seq: NonZeroU64,
+	) -> Result<Self::Retrace<'a>, ReadError>;
 }
 
 #[repr(u8)]
@@ -166,8 +204,13 @@ impl<T: Seek + Read + Write> Wal<T> {
 			batch_buf: Vec::new(),
 		})
 	}
+}
 
-	pub fn push_write(
+impl<T: Seek + Read + Write> WalApi for Wal<T> {
+	type Iter<'a> = Iter<'a, T> where T: 'a;
+	type Retrace<'a> = Retrace<'a, T> where T: 'a;
+
+	fn push_write(
 		&mut self,
 		item_info: ItemInfo,
 		WriteInfo {
@@ -204,34 +247,36 @@ impl<T: Seek + Read + Write> Wal<T> {
 		Ok(())
 	}
 
-	pub fn push_commit(&mut self, item_info: ItemInfo) -> Result<(), io::Error> {
+	fn push_commit(&mut self, item_info: ItemInfo) -> Result<(), io::Error> {
 		self.file.seek(SeekFrom::End(0))?;
 		self.push_header(Self::EMPTY_ITEM_LENGTH, ItemKind::Commit, item_info);
 		self.push_footer(Self::EMPTY_ITEM_LENGTH);
 		Ok(())
 	}
 
-	pub fn push_cancel(&mut self, item_info: ItemInfo) -> Result<(), io::Error> {
+	fn push_cancel(&mut self, item_info: ItemInfo) -> Result<(), io::Error> {
 		self.file.seek(SeekFrom::End(0))?;
 		self.push_header(Self::EMPTY_ITEM_LENGTH, ItemKind::Cancel, item_info);
 		self.push_footer(Self::EMPTY_ITEM_LENGTH);
 		Ok(())
 	}
 
-	pub fn flush(&mut self) -> Result<(), io::Error> {
+	fn flush(&mut self) -> Result<(), io::Error> {
 		self.file.write_all(&self.batch_buf)?;
 		self.batch_buf.clear();
 		Ok(())
 	}
 
-	pub fn iter(&mut self) -> Result<Iter<T>, ReadError> {
+	fn iter(&mut self) -> Result<Iter<T>, ReadError> {
 		Iter::new(&mut self.file, self.log_start)
 	}
 
-	pub fn retrace_transaction(&mut self, seq: NonZeroU64) -> Result<Retrace<T>, ReadError> {
+	fn retrace_transaction(&mut self, seq: NonZeroU64) -> Result<Retrace<T>, ReadError> {
 		Retrace::new(&mut self.file, self.log_start, seq)
 	}
+}
 
+impl<T: Seek + Read + Write> Wal<T> {
 	#[inline]
 	const fn get_length(content_length: usize) -> usize {
 		size_of::<ItemHeader>() + content_length + size_of::<ItemFooter>()

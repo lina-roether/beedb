@@ -12,4 +12,8 @@
     - [ ] crate::manage::segment
     - [ ] crate::manage::transaction
 
+- Tests
+
+  - [ ] crate::manage::recovery
+
 - Rework error structure once the public api is more established

@@ -2,7 +2,11 @@ use std::{collections::HashSet, num::NonZeroU16, sync::Arc};
 
 use parking_lot::Mutex;
 
-use crate::{disk::storage::StorageApi, id::PageId, utils::array_map::ArrayMap};
+use crate::{
+	disk::{storage::StorageApi, wal::WalApi},
+	id::PageId,
+	utils::array_map::ArrayMap,
+};
 
 use super::{err::Error, read::ReadManager, segment::SegmentManager, transaction::Transaction};
 
@@ -34,9 +38,13 @@ where
 		})
 	}
 
-	pub fn free_page(&self, t: &mut Transaction<Storage>, page_id: PageId) -> Result<(), Error>
+	pub fn free_page<Wal>(
+		&self,
+		t: &mut Transaction<Storage, Wal>,
+		page_id: PageId,
+	) -> Result<(), Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		let mut state = self.state.lock();
 
@@ -53,9 +61,9 @@ where
 		Ok(())
 	}
 
-	pub fn alloc_page(&self, t: &mut Transaction<Storage>) -> Result<PageId, Error>
+	pub fn alloc_page<Wal>(&self, t: &mut Transaction<Storage, Wal>) -> Result<PageId, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		if let Some(page_id) = self.alloc_from_free_cache(t)? {
 			return Ok(page_id);
@@ -63,9 +71,9 @@ where
 		self.alloc_in_new_segment(t)
 	}
 
-	fn alloc_in_new_segment(&self, t: &mut Transaction<Storage>) -> Result<PageId, Error>
+	fn alloc_in_new_segment<Wal>(&self, t: &mut Transaction<Storage, Wal>) -> Result<PageId, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		let mut state = self.state.lock();
 		let next_segment = state.next_segment;
@@ -75,9 +83,12 @@ where
 		Ok(page_id)
 	}
 
-	fn alloc_from_free_cache(&self, t: &mut Transaction<Storage>) -> Result<Option<PageId>, Error>
+	fn alloc_from_free_cache<Wal>(
+		&self,
+		t: &mut Transaction<Storage, Wal>,
+	) -> Result<Option<PageId>, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		let mut state = self.state.lock();
 		loop {
@@ -106,14 +117,14 @@ impl<Storage> State<Storage>
 where
 	Storage: StorageApi,
 {
-	fn try_alloc_in(
+	fn try_alloc_in<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		segment_num: u32,
 		rm: Arc<ReadManager<Storage>>,
 	) -> Result<Option<PageId>, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		if self.has_segment(segment_num) {
 			self.try_alloc_in_existing(t, segment_num)
@@ -122,13 +133,13 @@ where
 		}
 	}
 
-	fn try_alloc_in_existing(
+	fn try_alloc_in_existing<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		segment_num: u32,
 	) -> Result<Option<PageId>, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		let Some(segment) = self.get_segment(segment_num) else {
 			return Ok(None);
@@ -139,14 +150,14 @@ where
 		Ok(Some(PageId::new(segment_num, page_num.get())))
 	}
 
-	fn try_alloc_in_new(
+	fn try_alloc_in_new<Wal>(
 		&mut self,
-		t: &mut Transaction<Storage>,
+		t: &mut Transaction<Storage, Wal>,
 		segment_num: u32,
 		rm: Arc<ReadManager<Storage>>,
 	) -> Result<Option<PageId>, Error>
 	where
-		Storage: StorageApi,
+		Wal: WalApi,
 	{
 		let segment = self.add_segment(segment_num, rm)?;
 		let Some(page_num) = segment.alloc_page(t)? else {
