@@ -4,15 +4,34 @@ use std::{
 	sync::Arc,
 };
 
+#[cfg(test)]
+use mockall::automock;
+
 use crate::{
-	cache::PageCacheApi,
-	disk::wal::{self, WalApi},
+	cache::{PageCache, PageCacheApi},
+	disk::wal::{self, Wal, WalApi},
 	id::PageId,
 };
 
 use super::err::Error;
 
-pub(super) struct RecoveryManager<PageCache, Wal>
+#[allow(clippy::needless_lifetimes)]
+#[cfg_attr(test, automock)]
+pub(super) trait RecoveryManagerApi {
+	fn recover(&mut self) -> Result<(), Error>;
+
+	fn track_write<'a>(
+		&mut self,
+		item_info: wal::ItemInfo,
+		write_info: wal::WriteInfo<'a>,
+	) -> Result<(), Error>;
+
+	fn commit_transaction(&mut self, item_info: wal::ItemInfo) -> Result<(), Error>;
+
+	fn cancel_transaction(&mut self, item_info: wal::ItemInfo) -> Result<(), Error>;
+}
+
+pub(super) struct RecoveryManager<PageCache = self::PageCache, Wal = self::Wal>
 where
 	PageCache: PageCacheApi,
 	Wal: WalApi,
@@ -29,8 +48,14 @@ where
 	pub fn new(page_cache: Arc<PageCache>, wal: Wal) -> Self {
 		Self { page_cache, wal }
 	}
+}
 
-	pub fn recover(&mut self) -> Result<(), Error> {
+impl<PageCache, Wal> RecoveryManagerApi for RecoveryManager<PageCache, Wal>
+where
+	PageCache: PageCacheApi,
+	Wal: WalApi,
+{
+	fn recover(&mut self) -> Result<(), Error> {
 		let mut open_transactions: HashMap<u64, NonZeroU64> = HashMap::new();
 		self.fast_forward(&mut open_transactions)?;
 		for (_, last_seq) in open_transactions {
@@ -39,7 +64,7 @@ where
 		Ok(())
 	}
 
-	pub fn track_write(
+	fn track_write(
 		&mut self,
 		item_info: wal::ItemInfo,
 		write_info: wal::WriteInfo,
@@ -49,20 +74,26 @@ where
 			.map_err(Error::WalWrite)
 	}
 
-	pub fn commit_transaction(&mut self, item_info: wal::ItemInfo) -> Result<(), Error> {
+	fn commit_transaction(&mut self, item_info: wal::ItemInfo) -> Result<(), Error> {
 		self.wal.push_commit(item_info).map_err(Error::WalWrite)?;
 		self.wal.flush().map_err(Error::WalWrite)?;
 		Ok(())
 	}
 
-	pub fn cancel_transaction(&mut self, item_info: wal::ItemInfo) -> Result<(), Error> {
+	fn cancel_transaction(&mut self, item_info: wal::ItemInfo) -> Result<(), Error> {
 		let seq = item_info.seq;
 		self.wal.push_cancel(item_info).map_err(Error::WalWrite)?;
 		self.wal.flush().map_err(Error::WalWrite)?;
 		self.revert_from(seq)?;
 		Ok(())
 	}
+}
 
+impl<PageCache, Wal> RecoveryManager<PageCache, Wal>
+where
+	PageCache: PageCacheApi,
+	Wal: WalApi,
+{
 	fn fast_forward(
 		&mut self,
 		open_transactions: &mut HashMap<u64, NonZeroU64>,

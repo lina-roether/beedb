@@ -1,6 +1,5 @@
 use std::{
 	collections::{hash_map::Entry, HashMap},
-	fs::File,
 	num::NonZeroU64,
 	sync::{
 		atomic::{AtomicU64, Ordering},
@@ -14,17 +13,18 @@ use static_assertions::assert_impl_all;
 #[cfg(test)]
 use mockall::automock;
 
+use crate::disk::storage;
 use crate::{
 	cache::{PageCache, PageCacheApi},
-	disk::{
-		storage::{self, Storage},
-		wal::{self, Wal, WalApi},
-	},
+	disk::wal::{self},
 	id::PageId,
 	pages::{ReadOp, WriteOp},
 };
 
-use super::{err::Error, recovery::RecoveryManager};
+use super::{
+	err::Error,
+	recovery::{RecoveryManager, RecoveryManagerApi},
+};
 
 #[allow(clippy::needless_lifetimes)]
 #[cfg_attr(test, automock)]
@@ -50,24 +50,26 @@ pub(super) trait TransactionManagerApi {
 	fn begin<'a>(&'a self) -> Self::Transaction<'a>;
 }
 
-pub(super) struct TransactionManager<PageCache, Wal>
-where
+pub(super) struct TransactionManager<
+	PageCache = self::PageCache,
+	RecoveryManager = self::RecoveryManager,
+> where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
 	tid_counter: AtomicU64,
 	cache: Arc<PageCache>,
-	state: Arc<Mutex<State<PageCache, Wal>>>,
+	state: Arc<Mutex<State<RecoveryManager>>>,
 }
 
-assert_impl_all!(TransactionManager<PageCache<Storage>, Wal<File>>: Send, Sync);
+assert_impl_all!(TransactionManager: Send, Sync);
 
-impl<PageCache, Wal> TransactionManager<PageCache, Wal>
+impl<PageCache, RecoveryManager> TransactionManager<PageCache, RecoveryManager>
 where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
-	pub fn new(cache: Arc<PageCache>, recovery: RecoveryManager<PageCache, Wal>) -> Self {
+	pub fn new(cache: Arc<PageCache>, recovery: RecoveryManager) -> Self {
 		Self {
 			tid_counter: AtomicU64::new(0),
 			cache,
@@ -81,33 +83,32 @@ where
 	}
 }
 
-impl<PageCache, Wal> TransactionManagerApi for TransactionManager<PageCache, Wal>
+impl<PageCache, RecoveryManager> TransactionManagerApi
+	for TransactionManager<PageCache, RecoveryManager>
 where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
-	type Transaction<'a> = Transaction<'a, PageCache, Wal> where PageCache: 'a, Wal: 'a;
+	type Transaction<'a> = Transaction<'a, PageCache, RecoveryManager> where PageCache: 'a, RecoveryManager: 'a;
 
-	fn begin(&self) -> Transaction<PageCache, Wal> {
+	fn begin(&self) -> Transaction<PageCache, RecoveryManager> {
 		Transaction::new(self.next_tid(), &self.state, &self.cache)
 	}
 }
 
-struct State<PageCache, Wal>
+struct State<RecoveryManager>
 where
-	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
-	recovery: RecoveryManager<PageCache, Wal>,
+	recovery: RecoveryManager,
 	seq_counter: u64,
 }
 
-impl<PageCache, Wal> State<PageCache, Wal>
+impl<RecoveryManager> State<RecoveryManager>
 where
-	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
-	fn new(recovery: RecoveryManager<PageCache, Wal>) -> Self {
+	fn new(recovery: RecoveryManager) -> Self {
 		Self {
 			recovery,
 			seq_counter: 0,
@@ -121,24 +122,24 @@ where
 	}
 }
 
-pub(crate) struct Transaction<'a, PageCache, Wal>
+pub(crate) struct Transaction<'a, PageCache, RecoveryManager>
 where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
 	tid: u64,
 	last_seq: Option<NonZeroU64>,
-	state: &'a Mutex<State<PageCache, Wal>>,
+	state: &'a Mutex<State<RecoveryManager>>,
 	cache: &'a PageCache,
 	locks: HashMap<PageId, PageCache::WriteGuard<'a>>,
 }
 
-impl<'a, PageCache, Wal> Transaction<'a, PageCache, Wal>
+impl<'a, PageCache, RecoveryManager> Transaction<'a, PageCache, RecoveryManager>
 where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
-	fn new(tid: u64, state: &'a Mutex<State<PageCache, Wal>>, cache: &'a PageCache) -> Self {
+	fn new(tid: u64, state: &'a Mutex<State<RecoveryManager>>, cache: &'a PageCache) -> Self {
 		Self {
 			tid,
 			last_seq: None,
@@ -149,10 +150,10 @@ where
 	}
 }
 
-impl<'a, PageCache, Wal> TransactionApi for Transaction<'a, PageCache, Wal>
+impl<'a, PageCache, RecoveryManager> TransactionApi for Transaction<'a, PageCache, RecoveryManager>
 where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
 	fn read(&mut self, page_id: PageId, op: ReadOp) -> Result<(), Error> {
 		debug_assert!(op.range().end <= self.cache.page_size().into());
@@ -204,10 +205,10 @@ where
 	}
 }
 
-impl<'a, PageCache, Wal> Transaction<'a, PageCache, Wal>
+impl<'a, PageCache, RecoveryManager> Transaction<'a, PageCache, RecoveryManager>
 where
 	PageCache: PageCacheApi,
-	Wal: WalApi,
+	RecoveryManager: RecoveryManagerApi,
 {
 	fn create_rollback_write(
 		&self,
@@ -248,7 +249,7 @@ where
 		Ok(())
 	}
 
-	fn next_seq(&mut self, state: &mut State<PageCache, Wal>) -> (NonZeroU64, Option<NonZeroU64>) {
+	fn next_seq(&mut self, state: &mut State<RecoveryManager>) -> (NonZeroU64, Option<NonZeroU64>) {
 		let seq = state.next_seq();
 		let prev_seq = self.last_seq;
 		self.last_seq = Some(seq);
@@ -264,7 +265,9 @@ mod tests {
 	use tempfile::tempdir;
 
 	use crate::{
-		consts::PAGE_SIZE_RANGE, disk::storage::Storage, manage::transaction::tests::wal::Wal,
+		consts::PAGE_SIZE_RANGE,
+		disk::storage::Storage,
+		manage::transaction::tests::wal::{Wal, WalApi as _},
 	};
 
 	use super::*;

@@ -48,7 +48,7 @@ pub(crate) trait PageCacheApi {
 	fn page_size(&self) -> u16;
 }
 
-pub(crate) struct PageCache<Storage>
+pub(crate) struct PageCache<Storage = self::Storage>
 where
 	Storage: StorageApi,
 {

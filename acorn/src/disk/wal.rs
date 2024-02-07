@@ -139,7 +139,7 @@ pub(crate) struct WriteInfo<'a> {
 	pub after: &'a [u8],
 }
 
-pub(crate) struct Wal<T: Seek + Read + Write> {
+pub(crate) struct Wal<T: Seek + Read + Write = File> {
 	log_start: u64,
 	batch_buf: Vec<u8>,
 	file: T,

@@ -8,7 +8,7 @@
   - [ ] crate::manage::\*
     - [ ] crate::manage::alloc
     - [ ] crate::manage::read
-    - [ ] crate::manage::recovery
+    - [x] crate::manage::recovery
     - [ ] crate::manage::segment
     - [x] crate::manage::transaction
 
