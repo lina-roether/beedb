@@ -1,21 +1,21 @@
 use std::sync::Arc;
 
-use crate::{cache::PageCache, disk::storage::StorageApi, id::PageId, pages::ReadOp};
+use crate::{cache::PageCacheApi, id::PageId, pages::ReadOp};
 
 use super::err::Error;
 
-pub(super) struct ReadManager<Storage>
+pub(super) struct ReadManager<PageCache>
 where
-	Storage: StorageApi,
+	PageCache: PageCacheApi,
 {
-	cache: Arc<PageCache<Storage>>,
+	cache: Arc<PageCache>,
 }
 
-impl<Storage> ReadManager<Storage>
+impl<PageCache> ReadManager<PageCache>
 where
-	Storage: StorageApi,
+	PageCache: PageCacheApi,
 {
-	pub fn new(cache: Arc<PageCache<Storage>>) -> Self {
+	pub fn new(cache: Arc<PageCache>) -> Self {
 		Self { cache }
 	}
 

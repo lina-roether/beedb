@@ -3,28 +3,28 @@ use std::{num::NonZeroU16, sync::Arc};
 use byte_view::{BufError, ViewBuf};
 
 use crate::{
-	disk::{storage::StorageApi, wal::WalApi},
+	cache::PageCacheApi,
 	id::PageId,
 	pages::{FreelistPage, HeaderPage, WriteOp},
 };
 
-use super::{err::Error, read::ReadManager, transaction::Transaction};
+use super::{err::Error, read::ReadManager, transaction::TransactionApi};
 
-pub(super) struct SegmentManager<Storage>
+pub(super) struct SegmentManager<PageCache>
 where
-	Storage: StorageApi,
+	PageCache: PageCacheApi,
 {
 	segment_num: u32,
-	rm: Arc<ReadManager<Storage>>,
+	rm: Arc<ReadManager<PageCache>>,
 	header: ViewBuf<HeaderPage>,
 	freelist_stack: Vec<FreelistStackEntry>,
 }
 
-impl<Storage> SegmentManager<Storage>
+impl<PageCache> SegmentManager<PageCache>
 where
-	Storage: StorageApi,
+	PageCache: PageCacheApi,
 {
-	pub fn new(rm: Arc<ReadManager<Storage>>, segment_num: u32) -> Result<Self, Error> {
+	pub fn new(rm: Arc<ReadManager<PageCache>>, segment_num: u32) -> Result<Self, Error> {
 		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
 		rm.read(PageId::new(segment_num, 0), HeaderPage::read(&mut header))?;
 
@@ -49,12 +49,12 @@ where
 		})
 	}
 
-	pub fn alloc_page<Wal>(
+	pub fn alloc_page<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 	) -> Result<Option<NonZeroU16>, Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		if let Some(free_page) = self.pop_freelist(t)? {
 			return Ok(Some(free_page));
@@ -65,13 +65,13 @@ where
 		Ok(None)
 	}
 
-	pub fn free_page<Wal>(
+	pub fn free_page<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 		page_num: NonZeroU16,
 	) -> Result<(), Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		self.push_freelist(t, page_num)
 	}
@@ -80,12 +80,12 @@ where
 		!self.freelist_stack.is_empty()
 	}
 
-	fn create_new_page<Wal>(
+	fn create_new_page<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 	) -> Result<Option<NonZeroU16>, Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		if self.header.num_pages == u16::MAX {
 			return Ok(None);
@@ -100,13 +100,13 @@ where
 		Ok(Some(new_page))
 	}
 
-	fn push_freelist<Wal>(
+	fn push_freelist<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 		page_num: NonZeroU16,
 	) -> Result<(), Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		if let Some(mut trunk) = self.get_trunk() {
 			if !trunk.is_full() {
@@ -121,12 +121,12 @@ where
 		Ok(())
 	}
 
-	fn pop_freelist<Wal>(
+	fn pop_freelist<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 	) -> Result<Option<NonZeroU16>, Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		let Some(mut trunk) = self.get_trunk() else {
 			return Ok(None);
@@ -150,13 +150,13 @@ where
 			.map(|page| FreelistPageManager::new(self.segment_num, page))
 	}
 
-	fn push_trunk<Wal>(
+	fn push_trunk<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 		page_num: NonZeroU16,
 	) -> Result<(), Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		self.set_trunk(t, Some(page_num))?;
 		self.freelist_stack
@@ -166,34 +166,34 @@ where
 		Ok(())
 	}
 
-	fn set_trunk<Wal>(
+	fn set_trunk<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 		trunk_num: Option<NonZeroU16>,
 	) -> Result<(), Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		self.header.freelist_trunk = trunk_num;
 		self.write_header(t)?;
 		Ok(())
 	}
 
-	fn write_header<Wal>(&self, t: &mut Transaction<Storage, Wal>) -> Result<(), Error>
+	fn write_header<Transaction>(&self, t: &mut Transaction) -> Result<(), Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		self.write(t, 0, HeaderPage::write(&self.header))
 	}
 
-	fn write<Wal>(
+	fn write<Transaction>(
 		&self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 		page_num: u16,
 		op: WriteOp,
 	) -> Result<(), Error>
 	where
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		t.write(PageId::new(self.segment_num, page_num), op)
 	}
@@ -251,14 +251,9 @@ impl<'a> FreelistPageManager<'a> {
 		self.page.page_num
 	}
 
-	fn push<Storage, Wal>(
-		&mut self,
-		t: &mut Transaction<Storage, Wal>,
-		page_num: NonZeroU16,
-	) -> Result<(), Error>
+	fn push<Transaction>(&mut self, t: &mut Transaction, page_num: NonZeroU16) -> Result<(), Error>
 	where
-		Storage: StorageApi,
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		let index: usize = self.buf().length.into();
 		self.buf_mut().length += 1;
@@ -269,13 +264,9 @@ impl<'a> FreelistPageManager<'a> {
 		Ok(())
 	}
 
-	fn pop<Storage, Wal>(
-		&mut self,
-		t: &mut Transaction<Storage, Wal>,
-	) -> Result<Option<NonZeroU16>, Error>
+	fn pop<Transaction>(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error>
 	where
-		Storage: StorageApi,
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		if self.buf().length == 0 {
 			return Ok(None);
@@ -291,23 +282,21 @@ impl<'a> FreelistPageManager<'a> {
 		Ok(Some(page_num))
 	}
 
-	fn set_next<Storage, Wal>(
+	fn set_next<Transaction>(
 		&mut self,
-		t: &mut Transaction<Storage, Wal>,
+		t: &mut Transaction,
 		next: Option<NonZeroU16>,
 	) -> Result<(), Error>
 	where
-		Storage: StorageApi,
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		self.buf_mut().next = next;
 		t.write(self.page_id(), FreelistPage::write_header(self.buf()))
 	}
 
-	fn reset<Storage, Wal>(&mut self, t: &mut Transaction<Storage, Wal>) -> Result<(), Error>
+	fn reset<Transaction>(&mut self, t: &mut Transaction) -> Result<(), Error>
 	where
-		Storage: StorageApi,
-		Wal: WalApi,
+		Transaction: TransactionApi,
 	{
 		self.buf_mut().next = None;
 		self.buf_mut().length = 0;
@@ -330,7 +319,11 @@ mod tests {
 			storage::{self, Storage},
 			wal::Wal,
 		},
-		manage::{read::ReadManager, recovery::RecoveryManager, transaction::TransactionManager},
+		manage::{
+			read::ReadManager,
+			recovery::RecoveryManager,
+			transaction::{TransactionManager, TransactionManagerApi as _},
+		},
 	};
 
 	use super::*;

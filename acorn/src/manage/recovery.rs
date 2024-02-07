@@ -5,31 +5,28 @@ use std::{
 };
 
 use crate::{
-	cache::PageCache,
-	disk::{
-		storage::StorageApi,
-		wal::{self, WalApi},
-	},
+	cache::PageCacheApi,
+	disk::wal::{self, WalApi},
 	id::PageId,
 };
 
 use super::err::Error;
 
-pub(super) struct RecoveryManager<Storage, Wal>
+pub(super) struct RecoveryManager<PageCache, Wal>
 where
-	Storage: StorageApi,
+	PageCache: PageCacheApi,
 	Wal: WalApi,
 {
-	page_cache: Arc<PageCache<Storage>>,
+	page_cache: Arc<PageCache>,
 	wal: Wal,
 }
 
-impl<Storage, Wal> RecoveryManager<Storage, Wal>
+impl<PageCache, Wal> RecoveryManager<PageCache, Wal>
 where
-	Storage: StorageApi,
+	PageCache: PageCacheApi,
 	Wal: WalApi,
 {
-	pub fn new(page_cache: Arc<PageCache<Storage>>, wal: Wal) -> Self {
+	pub fn new(page_cache: Arc<PageCache>, wal: Wal) -> Self {
 		Self { page_cache, wal }
 	}
 
@@ -119,7 +116,7 @@ where
 	}
 
 	fn apply_write(
-		page_cache: &PageCache<Storage>,
+		page_cache: &PageCache,
 		page_id: PageId,
 		start: u16,
 		data: &[u8],

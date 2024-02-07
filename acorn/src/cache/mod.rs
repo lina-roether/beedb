@@ -1,10 +1,14 @@
 use std::{
 	collections::{HashMap, HashSet},
 	mem,
+	ops::{Deref, DerefMut},
 };
 
 use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
+
+#[cfg(test)]
+use mockall::automock;
 
 use self::{buffer::PageBuffer, manager::CacheManager};
 
@@ -17,6 +21,32 @@ mod buffer;
 mod manager;
 
 pub(crate) use buffer::{PageReadGuard, PageWriteGuard};
+
+#[allow(clippy::needless_lifetimes)]
+#[cfg_attr(test, automock(
+    type ReadGuard<'a> = Vec<u8>;
+    type WriteGuard<'a> = Vec<u8>;
+))]
+pub(crate) trait PageCacheApi {
+	type ReadGuard<'a>: Deref<Target = [u8]> + AsRef<[u8]>
+	where
+		Self: 'a;
+	type WriteGuard<'a>: Deref<Target = [u8]> + DerefMut + AsRef<[u8]> + AsMut<[u8]>
+	where
+		Self: 'a;
+
+	fn read_page<'a>(&'a self, page_id: PageId) -> Result<Self::ReadGuard<'a>, storage::Error>;
+
+	fn write_page<'a>(&'a self, page_id: PageId) -> Result<Self::WriteGuard<'a>, storage::Error>;
+
+	fn flush(&self) -> Result<(), storage::Error>;
+
+	fn num_dirty(&self) -> usize;
+
+	fn segment_nums(&self) -> Box<[u32]>;
+
+	fn page_size(&self) -> u16;
+}
 
 pub(crate) struct PageCache<Storage>
 where
@@ -44,33 +74,41 @@ where
 			storage,
 		}
 	}
+}
 
-	pub fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, storage::Error> {
+impl<Storage> PageCacheApi for PageCache<Storage>
+where
+	Storage: StorageApi,
+{
+	type ReadGuard<'a> = PageReadGuard<'a> where Storage: 'a;
+	type WriteGuard<'a> = PageWriteGuard<'a> where Storage: 'a;
+
+	fn read_page(&self, page_id: PageId) -> Result<PageReadGuard, storage::Error> {
 		let index = self.access(page_id, false)?;
 		Ok(self.buffer.read_page(index).unwrap())
 	}
 
-	pub fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, storage::Error> {
+	fn write_page(&self, page_id: PageId) -> Result<PageWriteGuard, storage::Error> {
 		let index = self.access(page_id, true)?;
 		Ok(self.buffer.write_page(index).unwrap())
 	}
 
 	#[inline]
-	pub fn num_dirty(&self) -> usize {
+	fn num_dirty(&self) -> usize {
 		self.state.lock().dirty.len()
 	}
 
 	#[inline]
-	pub fn segment_nums(&self) -> Box<[u32]> {
+	fn segment_nums(&self) -> Box<[u32]> {
 		self.storage.segment_nums()
 	}
 
 	#[inline]
-	pub fn page_size(&self) -> u16 {
+	fn page_size(&self) -> u16 {
 		self.storage.page_size()
 	}
 
-	pub fn flush(&self) -> Result<(), storage::Error> {
+	fn flush(&self) -> Result<(), storage::Error> {
 		let mut state = self.state.lock();
 		for dirty_page in state.dirty.iter().copied() {
 			let index = *state.map.get(&dirty_page).unwrap();
@@ -80,7 +118,12 @@ where
 		state.dirty.clear();
 		Ok(())
 	}
+}
 
+impl<Storage> PageCache<Storage>
+where
+	Storage: StorageApi,
+{
 	fn access(&self, page_id: PageId, dirty: bool) -> Result<usize, storage::Error> {
 		let mut state = self.state.lock();
 		state.manager.access(page_id);

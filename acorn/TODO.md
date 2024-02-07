@@ -4,13 +4,13 @@
 
   - [x] crate::disk::storage
   - [x] crate::disk::wal
-  - [ ] crate::cache
+  - [x] crate::cache
   - [ ] crate::manage::\*
     - [ ] crate::manage::alloc
     - [ ] crate::manage::read
     - [ ] crate::manage::recovery
     - [ ] crate::manage::segment
-    - [ ] crate::manage::transaction
+    - [x] crate::manage::transaction
 
 - Overhaul Tests
 
