@@ -2,6 +2,9 @@ use std::{num::NonZeroU16, sync::Arc};
 
 use byte_view::{BufError, ViewBuf};
 
+#[cfg(test)]
+use mockall::{automock, concretize};
+
 use crate::{
 	id::PageId,
 	pages::{FreelistPage, HeaderPage, WriteOp},
@@ -12,6 +15,95 @@ use super::{
 	read::{ReadManager, ReadManagerApi},
 	transaction::TransactionApi,
 };
+
+#[cfg_attr(test, automock(
+    type SegmentManager = MockSegmentManagerApi;
+    type BuildIter = std::vec::IntoIter<Result<MockSegmentManagerApi, Error>>;
+))]
+pub(super) trait SegmentManagerFactoryApi {
+	type SegmentManager: SegmentManagerApi;
+	type BuildIter: Iterator<Item = Result<Self::SegmentManager, Error>>;
+
+	fn build(&self, segment_num: u32) -> Result<Self::SegmentManager, Error>;
+
+	fn build_existing(&self) -> Self::BuildIter;
+}
+
+#[cfg_attr(test, automock)]
+pub(super) trait SegmentManagerApi {
+	fn segment_num(&self) -> u32;
+
+	#[cfg_attr(test, concretize)]
+	fn alloc_page<Transaction>(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error>
+	where
+		Transaction: TransactionApi;
+
+	#[cfg_attr(test, concretize)]
+	fn free_page<Transaction>(
+		&mut self,
+		t: &mut Transaction,
+		page_num: NonZeroU16,
+	) -> Result<(), Error>
+	where
+		Transaction: TransactionApi;
+
+	fn has_free_pages(&self) -> bool;
+}
+
+pub(super) struct SegmentManagerFactory<ReadManager = self::ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
+	rm: Arc<ReadManager>,
+}
+
+impl<ReadManager> SegmentManagerFactory<ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
+	pub fn new(rm: Arc<ReadManager>) -> Self {
+		Self { rm }
+	}
+}
+
+impl<ReadManager> SegmentManagerFactoryApi for SegmentManagerFactory<ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
+	type SegmentManager = SegmentManager<ReadManager>;
+	type BuildIter = BuildIter<ReadManager>;
+
+	fn build(&self, segment_num: u32) -> Result<Self::SegmentManager, Error> {
+		SegmentManager::new(Arc::clone(&self.rm), segment_num)
+	}
+
+	fn build_existing(&self) -> BuildIter<ReadManager> {
+		BuildIter {
+			rm: Arc::clone(&self.rm),
+			segment_nums: self.rm.segment_nums().into_vec().into_iter(),
+		}
+	}
+}
+
+pub(super) struct BuildIter<ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
+	rm: Arc<ReadManager>,
+	segment_nums: std::vec::IntoIter<u32>,
+}
+
+impl<ReadManager> Iterator for BuildIter<ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
+	type Item = Result<SegmentManager<ReadManager>, Error>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let segment_num = self.segment_nums.next()?;
+		Some(SegmentManager::new(Arc::clone(&self.rm), segment_num))
+	}
+}
 
 pub(super) struct SegmentManager<ReadManager = self::ReadManager>
 where
@@ -51,11 +143,17 @@ where
 			freelist_stack,
 		})
 	}
+}
 
-	pub fn alloc_page<Transaction>(
-		&mut self,
-		t: &mut Transaction,
-	) -> Result<Option<NonZeroU16>, Error>
+impl<ReadManager> SegmentManagerApi for SegmentManager<ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
+	fn segment_num(&self) -> u32 {
+		self.segment_num
+	}
+
+	fn alloc_page<Transaction>(&mut self, t: &mut Transaction) -> Result<Option<NonZeroU16>, Error>
 	where
 		Transaction: TransactionApi,
 	{
@@ -68,7 +166,7 @@ where
 		Ok(None)
 	}
 
-	pub fn free_page<Transaction>(
+	fn free_page<Transaction>(
 		&mut self,
 		t: &mut Transaction,
 		page_num: NonZeroU16,
@@ -79,10 +177,15 @@ where
 		self.push_freelist(t, page_num)
 	}
 
-	pub fn has_free_pages(&self) -> bool {
+	fn has_free_pages(&self) -> bool {
 		!self.freelist_stack.is_empty()
 	}
+}
 
+impl<ReadManager> SegmentManager<ReadManager>
+where
+	ReadManager: ReadManagerApi,
+{
 	fn create_new_page<Transaction>(
 		&mut self,
 		t: &mut Transaction,

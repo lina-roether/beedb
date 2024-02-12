@@ -1,4 +1,4 @@
-use std::{collections::HashSet, num::NonZeroU16, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU16};
 
 use parking_lot::Mutex;
 
@@ -6,36 +6,32 @@ use crate::{id::PageId, utils::array_map::ArrayMap};
 
 use super::{
 	err::Error,
-	read::{ReadManager, ReadManagerApi},
-	segment::SegmentManager,
+	segment::{SegmentManagerApi as _, SegmentManagerFactory, SegmentManagerFactoryApi},
 	transaction::TransactionApi,
 };
 
-pub(super) struct AllocManager<ReadManager = self::ReadManager>
+pub(super) struct AllocManager<SegmentManagerFactory = self::SegmentManagerFactory>
 where
-	ReadManager: ReadManagerApi,
+	SegmentManagerFactory: SegmentManagerFactoryApi,
 {
-	state: Mutex<State<ReadManager>>,
-	rm: Arc<ReadManager>,
+	state: Mutex<State<SegmentManagerFactory>>,
 }
 
-impl<ReadManager> AllocManager<ReadManager>
+impl<SegmentManagerFactory> AllocManager<SegmentManagerFactory>
 where
-	ReadManager: ReadManagerApi,
+	SegmentManagerFactory: SegmentManagerFactoryApi,
 {
-	pub fn new(rm: Arc<ReadManager>) -> Result<Self, Error> {
+	pub fn new(factory: SegmentManagerFactory) -> Result<Self, Error> {
 		let mut state = State {
+			factory,
 			segments: ArrayMap::new(),
 			free_cache: HashSet::new(),
 			next_segment: 0,
 		};
-		for segment_num in rm.segment_nums().iter() {
-			state.add_segment(*segment_num, Arc::clone(&rm))?;
-		}
+		state.add_existing_segments()?;
 
 		Ok(Self {
 			state: Mutex::new(state),
-			rm,
 		})
 	}
 
@@ -74,7 +70,7 @@ where
 	{
 		let mut state = self.state.lock();
 		let next_segment = state.next_segment;
-		let Some(page_id) = state.try_alloc_in_new(t, next_segment, Arc::clone(&self.rm))? else {
+		let Some(page_id) = state.try_alloc_in_new(t, next_segment)? else {
 			return Err(Error::SizeLimitReached);
 		};
 		Ok(page_id)
@@ -101,24 +97,31 @@ where
 	}
 }
 
-struct State<ReadManager>
+struct State<SegmentManagerFactory>
 where
-	ReadManager: ReadManagerApi,
+	SegmentManagerFactory: SegmentManagerFactoryApi,
 {
-	segments: ArrayMap<SegmentManager<ReadManager>>,
+	factory: SegmentManagerFactory,
+	segments: ArrayMap<SegmentManagerFactory::SegmentManager>,
 	free_cache: HashSet<u32>,
 	next_segment: u32,
 }
 
-impl<ReadManager> State<ReadManager>
+impl<SegmentManagerFactory> State<SegmentManagerFactory>
 where
-	ReadManager: ReadManagerApi,
+	SegmentManagerFactory: SegmentManagerFactoryApi,
 {
+	fn add_existing_segments(&mut self) -> Result<(), Error> {
+		for segment in self.factory.build_existing() {
+			self.add_segment(segment?);
+		}
+		Ok(())
+	}
+
 	fn try_alloc_in<Transaction>(
 		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
-		rm: Arc<ReadManager>,
 	) -> Result<Option<PageId>, Error>
 	where
 		Transaction: TransactionApi,
@@ -126,7 +129,7 @@ where
 		if self.has_segment(segment_num) {
 			self.try_alloc_in_existing(t, segment_num)
 		} else {
-			self.try_alloc_in_new(t, segment_num, rm)
+			self.try_alloc_in_new(t, segment_num)
 		}
 	}
 
@@ -151,16 +154,15 @@ where
 		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
-		rm: Arc<ReadManager>,
 	) -> Result<Option<PageId>, Error>
 	where
 		Transaction: TransactionApi,
 	{
-		let segment = self.add_segment(segment_num, rm)?;
+		let segment = self.add_segment(self.factory.build(segment_num)?);
 		let Some(page_num) = segment.alloc_page(t)? else {
 			return Ok(None);
 		};
-		Ok(Some(PageId::new(segment_num, page_num.get())))
+		Ok(Some(PageId::new(segment.segment_num(), page_num.get())))
 	}
 
 	fn has_segment(&self, segment_num: u32) -> bool {
@@ -169,10 +171,9 @@ where
 
 	fn add_segment(
 		&mut self,
-		segment_num: u32,
-		rm: Arc<ReadManager>,
-	) -> Result<&mut SegmentManager<ReadManager>, Error> {
-		let segment_alloc = SegmentManager::new(rm, segment_num)?;
+		segment_alloc: SegmentManagerFactory::SegmentManager,
+	) -> &mut SegmentManagerFactory::SegmentManager {
+		let segment_num = segment_alloc.segment_num();
 		if segment_alloc.has_free_pages() {
 			self.free_cache.insert(segment_num);
 		}
@@ -180,10 +181,13 @@ where
 			self.next_segment = segment_num + 1;
 		}
 		self.segments.insert(segment_num as usize, segment_alloc);
-		Ok(self.segments.get_mut(segment_num as usize).unwrap())
+		self.segments.get_mut(segment_num as usize).unwrap()
 	}
 
-	fn get_segment(&mut self, segment_num: u32) -> Option<&mut SegmentManager<ReadManager>> {
+	fn get_segment(
+		&mut self,
+		segment_num: u32,
+	) -> Option<&mut SegmentManagerFactory::SegmentManager> {
 		self.segments.get_mut(segment_num as usize)
 	}
 
@@ -202,7 +206,7 @@ where
 
 #[cfg(test)]
 mod tests {
-	use std::fs;
+	use std::{fs, sync::Arc};
 
 	use tempfile::tempdir;
 	use test::Bencher;
@@ -215,6 +219,7 @@ mod tests {
 			wal::Wal,
 		},
 		manage::{
+			read::ReadManager,
 			recovery::RecoveryManager,
 			transaction::{TransactionManager, TransactionManagerApi as _},
 		},
@@ -236,7 +241,7 @@ mod tests {
 		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
 		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
+		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
 
 		let mut t = tm.begin();
 		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
@@ -265,7 +270,7 @@ mod tests {
 		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
 		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
+		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
 
 		b.iter(|| {
 			let mut t = tm.begin();
@@ -292,7 +297,7 @@ mod tests {
 		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
 		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
+		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
 
 		let mut t = tm.begin();
 		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
@@ -317,7 +322,7 @@ mod tests {
 		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
 		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
 		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(Arc::clone(&rm)).unwrap();
+		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
 
 		let mut t = tm.begin();
 		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();

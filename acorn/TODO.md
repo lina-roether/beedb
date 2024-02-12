@@ -9,7 +9,7 @@
     - [ ] crate::manage::alloc
     - [x] crate::manage::read
     - [x] crate::manage::recovery
-    - [ ] crate::manage::segment
+    - [x] crate::manage::segment
     - [x] crate::manage::transaction
 
 - Overhaul Tests
