@@ -1,5 +1,8 @@
 use std::{collections::HashSet, num::NonZeroU16};
 
+#[cfg(test)]
+use mockall::{automock, concretize};
+
 use parking_lot::Mutex;
 
 use crate::{id::PageId, utils::array_map::ArrayMap};
@@ -9,6 +12,19 @@ use super::{
 	segment::{SegmentManagerApi as _, SegmentManagerFactory, SegmentManagerFactoryApi},
 	transaction::TransactionApi,
 };
+
+#[cfg_attr(test, automock)]
+pub(super) trait AllocManagerApi {
+	#[cfg_attr(test, concretize)]
+	fn alloc_page<Transaction>(&self, t: &mut Transaction) -> Result<PageId, Error>
+	where
+		Transaction: TransactionApi;
+
+	#[cfg_attr(test, concretize)]
+	fn free_page<Transaction>(&self, t: &mut Transaction, page_id: PageId) -> Result<(), Error>
+	where
+		Transaction: TransactionApi;
+}
 
 pub(super) struct AllocManager<SegmentManagerFactory = self::SegmentManagerFactory>
 where
@@ -34,8 +50,13 @@ where
 			state: Mutex::new(state),
 		})
 	}
+}
 
-	pub fn free_page<Transaction>(&self, t: &mut Transaction, page_id: PageId) -> Result<(), Error>
+impl<SegmentManagerFactory> AllocManagerApi for AllocManager<SegmentManagerFactory>
+where
+	SegmentManagerFactory: SegmentManagerFactoryApi,
+{
+	fn free_page<Transaction>(&self, t: &mut Transaction, page_id: PageId) -> Result<(), Error>
 	where
 		Transaction: TransactionApi,
 	{
@@ -54,7 +75,7 @@ where
 		Ok(())
 	}
 
-	pub fn alloc_page<Transaction>(&self, t: &mut Transaction) -> Result<PageId, Error>
+	fn alloc_page<Transaction>(&self, t: &mut Transaction) -> Result<PageId, Error>
 	where
 		Transaction: TransactionApi,
 	{
@@ -63,7 +84,12 @@ where
 		}
 		self.alloc_in_new_segment(t)
 	}
+}
 
+impl<SegmentManagerFactory> AllocManager<SegmentManagerFactory>
+where
+	SegmentManagerFactory: SegmentManagerFactoryApi,
+{
 	fn alloc_in_new_segment<Transaction>(&self, t: &mut Transaction) -> Result<PageId, Error>
 	where
 		Transaction: TransactionApi,
