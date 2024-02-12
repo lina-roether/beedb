@@ -2,23 +2,28 @@ use std::{collections::HashSet, num::NonZeroU16, sync::Arc};
 
 use parking_lot::Mutex;
 
-use crate::{cache::PageCacheApi, id::PageId, utils::array_map::ArrayMap};
+use crate::{id::PageId, utils::array_map::ArrayMap};
 
-use super::{err::Error, read::ReadManager, segment::SegmentManager, transaction::TransactionApi};
+use super::{
+	err::Error,
+	read::{ReadManager, ReadManagerApi},
+	segment::SegmentManager,
+	transaction::TransactionApi,
+};
 
-pub(super) struct AllocManager<PageCache>
+pub(super) struct AllocManager<ReadManager = self::ReadManager>
 where
-	PageCache: PageCacheApi,
+	ReadManager: ReadManagerApi,
 {
-	state: Mutex<State<PageCache>>,
-	rm: Arc<ReadManager<PageCache>>,
+	state: Mutex<State<ReadManager>>,
+	rm: Arc<ReadManager>,
 }
 
-impl<PageCache> AllocManager<PageCache>
+impl<ReadManager> AllocManager<ReadManager>
 where
-	PageCache: PageCacheApi,
+	ReadManager: ReadManagerApi,
 {
-	pub fn new(rm: Arc<ReadManager<PageCache>>) -> Result<Self, Error> {
+	pub fn new(rm: Arc<ReadManager>) -> Result<Self, Error> {
 		let mut state = State {
 			segments: ArrayMap::new(),
 			free_cache: HashSet::new(),
@@ -96,24 +101,24 @@ where
 	}
 }
 
-struct State<PageCache>
+struct State<ReadManager>
 where
-	PageCache: PageCacheApi,
+	ReadManager: ReadManagerApi,
 {
-	segments: ArrayMap<SegmentManager<PageCache>>,
+	segments: ArrayMap<SegmentManager<ReadManager>>,
 	free_cache: HashSet<u32>,
 	next_segment: u32,
 }
 
-impl<PageCache> State<PageCache>
+impl<ReadManager> State<ReadManager>
 where
-	PageCache: PageCacheApi,
+	ReadManager: ReadManagerApi,
 {
 	fn try_alloc_in<Transaction>(
 		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
-		rm: Arc<ReadManager<PageCache>>,
+		rm: Arc<ReadManager>,
 	) -> Result<Option<PageId>, Error>
 	where
 		Transaction: TransactionApi,
@@ -146,7 +151,7 @@ where
 		&mut self,
 		t: &mut Transaction,
 		segment_num: u32,
-		rm: Arc<ReadManager<PageCache>>,
+		rm: Arc<ReadManager>,
 	) -> Result<Option<PageId>, Error>
 	where
 		Transaction: TransactionApi,
@@ -165,8 +170,8 @@ where
 	fn add_segment(
 		&mut self,
 		segment_num: u32,
-		rm: Arc<ReadManager<PageCache>>,
-	) -> Result<&mut SegmentManager<PageCache>, Error> {
+		rm: Arc<ReadManager>,
+	) -> Result<&mut SegmentManager<ReadManager>, Error> {
 		let segment_alloc = SegmentManager::new(rm, segment_num)?;
 		if segment_alloc.has_free_pages() {
 			self.free_cache.insert(segment_num);
@@ -178,7 +183,7 @@ where
 		Ok(self.segments.get_mut(segment_num as usize).unwrap())
 	}
 
-	fn get_segment(&mut self, segment_num: u32) -> Option<&mut SegmentManager<PageCache>> {
+	fn get_segment(&mut self, segment_num: u32) -> Option<&mut SegmentManager<ReadManager>> {
 		self.segments.get_mut(segment_num as usize)
 	}
 

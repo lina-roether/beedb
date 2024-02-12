@@ -1,10 +1,27 @@
 use std::sync::Arc;
 
-use crate::{cache::PageCacheApi, id::PageId, pages::ReadOp};
+#[cfg(test)]
+use mockall::automock;
+
+use crate::{
+	cache::{PageCache, PageCacheApi},
+	id::PageId,
+	pages::ReadOp,
+};
 
 use super::err::Error;
 
-pub(super) struct ReadManager<PageCache>
+#[allow(clippy::needless_lifetimes)]
+#[cfg_attr(test, automock)]
+pub(super) trait ReadManagerApi {
+	fn page_size(&self) -> u16;
+
+	fn segment_nums(&self) -> Box<[u32]>;
+
+	fn read<'a>(&self, page_id: PageId, op: ReadOp<'a>) -> Result<(), Error>;
+}
+
+pub(super) struct ReadManager<PageCache = self::PageCache>
 where
 	PageCache: PageCacheApi,
 {
@@ -18,18 +35,23 @@ where
 	pub fn new(cache: Arc<PageCache>) -> Self {
 		Self { cache }
 	}
+}
 
+impl<PageCache> ReadManagerApi for ReadManager<PageCache>
+where
+	PageCache: PageCacheApi,
+{
 	#[inline]
-	pub fn page_size(&self) -> u16 {
+	fn page_size(&self) -> u16 {
 		self.cache.page_size()
 	}
 
 	#[inline]
-	pub fn segment_nums(&self) -> Box<[u32]> {
+	fn segment_nums(&self) -> Box<[u32]> {
 		self.cache.segment_nums()
 	}
 
-	pub fn read(&self, page_id: PageId, op: ReadOp) -> Result<(), Error> {
+	fn read(&self, page_id: PageId, op: ReadOp) -> Result<(), Error> {
 		let page = self.cache.read_page(page_id)?;
 		debug_assert!(op.range().end <= page.len());
 

@@ -3,28 +3,31 @@ use std::{num::NonZeroU16, sync::Arc};
 use byte_view::{BufError, ViewBuf};
 
 use crate::{
-	cache::PageCacheApi,
 	id::PageId,
 	pages::{FreelistPage, HeaderPage, WriteOp},
 };
 
-use super::{err::Error, read::ReadManager, transaction::TransactionApi};
+use super::{
+	err::Error,
+	read::{ReadManager, ReadManagerApi},
+	transaction::TransactionApi,
+};
 
-pub(super) struct SegmentManager<PageCache>
+pub(super) struct SegmentManager<ReadManager = self::ReadManager>
 where
-	PageCache: PageCacheApi,
+	ReadManager: ReadManagerApi,
 {
 	segment_num: u32,
-	rm: Arc<ReadManager<PageCache>>,
+	rm: Arc<ReadManager>,
 	header: ViewBuf<HeaderPage>,
 	freelist_stack: Vec<FreelistStackEntry>,
 }
 
-impl<PageCache> SegmentManager<PageCache>
+impl<ReadManager> SegmentManager<ReadManager>
 where
-	PageCache: PageCacheApi,
+	ReadManager: ReadManagerApi,
 {
-	pub fn new(rm: Arc<ReadManager<PageCache>>, segment_num: u32) -> Result<Self, Error> {
+	pub fn new(rm: Arc<ReadManager>, segment_num: u32) -> Result<Self, Error> {
 		let mut header: ViewBuf<HeaderPage> = ViewBuf::new();
 		rm.read(PageId::new(segment_num, 0), HeaderPage::read(&mut header))?;
 
