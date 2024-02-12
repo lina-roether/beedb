@@ -234,6 +234,7 @@ where
 mod tests {
 	use std::{fs, sync::Arc};
 
+	use mockall::predicate::*;
 	use tempfile::tempdir;
 	use test::Bencher;
 
@@ -247,33 +248,132 @@ mod tests {
 		manage::{
 			read::ReadManager,
 			recovery::RecoveryManager,
-			transaction::{TransactionManager, TransactionManagerApi as _},
+			segment::{MockSegmentManagerApi, MockSegmentManagerFactoryApi},
+			transaction::{MockTransactionApi, TransactionManager, TransactionManagerApi as _},
 		},
 	};
 
 	use super::*;
 
 	#[test]
-	#[cfg_attr(miri, ignore)]
-	fn alloc_page() {
-		let dir = tempdir().unwrap();
-		fs::create_dir(dir.path().join("storage")).unwrap();
-		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
+	fn alloc_page_simple() {
+		// expect
+		let mut segment_factory = MockSegmentManagerFactoryApi::new();
+		segment_factory
+			.expect_build_existing()
+			.returning(|| vec![].into_iter());
+		segment_factory.expect_build().with(eq(0)).returning(|_| {
+			let mut segment = MockSegmentManagerApi::new();
+			segment.expect_has_free_pages().returning(|| true);
+			segment.expect_segment_num().returning(|| 0);
+			segment
+				.expect_alloc_page()
+				.returning(|_| Ok(NonZeroU16::new(1)));
+			Ok(segment)
+		});
 
-		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
+		// given
+		let alloc_mgr = AllocManager::new(segment_factory).unwrap();
 
-		let mut t = tm.begin();
-		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
-		t.commit().unwrap();
+		// when
+		let page_id = alloc_mgr
+			.alloc_page(&mut MockTransactionApi::new())
+			.unwrap();
 
+		// then
 		assert_eq!(page_id, PageId::new(0, 1));
+	}
+
+	#[test]
+	fn alloc_page_in_new_segment() {
+		// expect
+		let mut segment_factory = MockSegmentManagerFactoryApi::new();
+		segment_factory.expect_build_existing().returning(|| {
+			let mut segment_0 = MockSegmentManagerApi::new();
+			segment_0.expect_segment_num().returning(|| 0);
+			segment_0.expect_has_free_pages().returning(|| false);
+
+			let mut segment_1 = MockSegmentManagerApi::new();
+			segment_1.expect_segment_num().returning(|| 1);
+			segment_1.expect_has_free_pages().returning(|| false);
+
+			vec![Ok(segment_0), Ok(segment_1)].into_iter()
+		});
+		segment_factory.expect_build().with(eq(2)).returning(|_| {
+			let mut segment = MockSegmentManagerApi::new();
+			segment.expect_segment_num().returning(|| 2);
+			segment.expect_has_free_pages().returning(|| true);
+			segment
+				.expect_alloc_page()
+				.returning(|_| Ok(NonZeroU16::new(4)));
+			Ok(segment)
+		});
+
+		// given
+		let alloc_mgr = AllocManager::new(segment_factory).unwrap();
+
+		// when
+		let page_id = alloc_mgr
+			.alloc_page(&mut MockTransactionApi::new())
+			.unwrap();
+
+		// then
+		assert_eq!(page_id, PageId::new(2, 4))
+	}
+
+	#[test]
+	fn alloc_page_in_existing_segment() {
+		// expect
+		let mut segment_factory = MockSegmentManagerFactoryApi::new();
+		segment_factory.expect_build_existing().returning(|| {
+			let mut segment_0 = MockSegmentManagerApi::new();
+			segment_0.expect_segment_num().returning(|| 0);
+			segment_0.expect_has_free_pages().returning(|| false);
+
+			let mut segment_1 = MockSegmentManagerApi::new();
+			segment_1.expect_segment_num().returning(|| 1);
+			segment_1.expect_has_free_pages().returning(|| true);
+			segment_1
+				.expect_alloc_page()
+				.returning(|_| Ok(NonZeroU16::new(69)));
+
+			vec![Ok(segment_0), Ok(segment_1)].into_iter()
+		});
+
+		// given
+		let alloc_mgr = AllocManager::new(segment_factory).unwrap();
+
+		// when
+		let page_id = alloc_mgr
+			.alloc_page(&mut MockTransactionApi::new())
+			.unwrap();
+
+		// then
+		assert_eq!(page_id, PageId::new(1, 69))
+	}
+
+	#[test]
+	fn free_page() {
+		// expect
+		let mut segment_factory = MockSegmentManagerFactoryApi::new();
+		segment_factory.expect_build_existing().returning(|| {
+			let mut segment_0 = MockSegmentManagerApi::new();
+			segment_0.expect_segment_num().returning(|| 0);
+			segment_0.expect_has_free_pages().returning(|| false);
+			segment_0
+				.expect_free_page()
+				.withf(|_, page_num| page_num.get() == 25)
+				.returning(|_, _| Ok(()));
+			vec![Ok(segment_0)].into_iter()
+		});
+
+		// given
+		let alloc_mgr = AllocManager::new(segment_factory).unwrap();
+
+		// when
+		alloc_mgr
+			.free_page(&mut MockTransactionApi::new(), PageId::new(0, 25))
+			.unwrap();
 	}
 
 	#[bench]
@@ -307,61 +407,5 @@ mod tests {
 			alloc_mgr.free_page(&mut t, page_id).unwrap();
 			t.commit().unwrap();
 		});
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore)]
-	fn alloc_free_page() {
-		let dir = tempdir().unwrap();
-		fs::create_dir(dir.path().join("storage")).unwrap();
-		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
-
-		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
-
-		let mut t = tm.begin();
-		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
-		t.commit().unwrap();
-
-		let mut t = tm.begin();
-		alloc_mgr.free_page(&mut t, page_id).unwrap();
-		t.commit().unwrap();
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore)]
-	fn alloc_free_realloc_page() {
-		let dir = tempdir().unwrap();
-		fs::create_dir(dir.path().join("storage")).unwrap();
-		Storage::init(dir.path().join("storage"), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
-
-		let storage = Storage::load(dir.path().join("storage")).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let alloc_mgr = AllocManager::new(SegmentManagerFactory::new(rm)).unwrap();
-
-		let mut t = tm.begin();
-		let page_id = alloc_mgr.alloc_page(&mut t).unwrap();
-		t.commit().unwrap();
-
-		let mut t = tm.begin();
-		alloc_mgr.free_page(&mut t, page_id).unwrap();
-		t.commit().unwrap();
-
-		let mut t = tm.begin();
-		let page_id_2 = alloc_mgr.alloc_page(&mut t).unwrap();
-		t.commit().unwrap();
-
-		assert_eq!(page_id_2, PageId::new(0, 1));
 	}
 }
