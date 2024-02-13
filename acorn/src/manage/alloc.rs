@@ -376,6 +376,44 @@ mod tests {
 			.unwrap();
 	}
 
+	#[test]
+	fn realloc_page_from_free_cache() {
+		// expect
+		let mut segment_factory = MockSegmentManagerFactoryApi::new();
+		segment_factory.expect_build_existing().returning(|| {
+			let mut segment_0 = MockSegmentManagerApi::new();
+			segment_0.expect_segment_num().returning(|| 0);
+			segment_0.expect_has_free_pages().returning(|| false);
+			segment_0
+				.expect_free_page()
+				.withf(|_, page_num| page_num.get() == 20)
+				.returning(|_, _| Ok(()));
+			segment_0
+				.expect_alloc_page()
+				.returning(|_| Ok(NonZeroU16::new(69)));
+
+			let mut segment_1 = MockSegmentManagerApi::new();
+			segment_1.expect_segment_num().returning(|| 1);
+			segment_1.expect_has_free_pages().returning(|| false);
+
+			vec![Ok(segment_0), Ok(segment_1)].into_iter()
+		});
+
+		// given
+		let alloc_mgr = AllocManager::new(segment_factory).unwrap();
+		alloc_mgr
+			.free_page(&mut MockTransactionApi::new(), PageId::new(0, 20))
+			.unwrap();
+
+		// when
+		let page_id = alloc_mgr
+			.alloc_page(&mut MockTransactionApi::new())
+			.unwrap();
+
+		// then
+		assert_eq!(page_id, PageId::new(0, 69))
+	}
+
 	#[bench]
 	#[cfg_attr(miri, ignore)]
 	fn bench_alloc_and_free_page(b: &mut Bencher) {
