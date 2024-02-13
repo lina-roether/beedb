@@ -178,7 +178,7 @@ where
 	}
 
 	fn has_free_pages(&self) -> bool {
-		!self.freelist_stack.is_empty()
+		!self.freelist_stack.is_empty() || self.header.num_pages != u16::MAX
 	}
 }
 
@@ -417,141 +417,463 @@ impl<'a> FreelistPageManager<'a> {
 
 #[cfg(test)]
 mod tests {
-	use tempfile::tempdir;
+	use std::num::NonZeroU16;
+
+	use byte_view::ViewSlice;
+	use mockall::predicate::*;
 
 	use crate::{
-		cache::PageCache,
-		disk::{
-			storage::{self, Storage},
-			wal::Wal,
-		},
-		manage::{
-			read::ReadManager,
-			recovery::RecoveryManager,
-			transaction::{TransactionManager, TransactionManagerApi as _},
-		},
+		consts::{SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC},
+		manage::{read::MockReadManagerApi, transaction::MockTransactionApi},
+		utils::byte_order::ByteOrder,
 	};
 
 	use super::*;
 
+	const TEST_PAGE_SIZE: u16 = 16;
+
 	#[test]
-	fn simple_push() {
-		let dir = tempdir().unwrap();
-		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
+	fn factory_build_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.with(eq(PageId::new(69, 0)), always())
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: 1,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
 
-		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		// given
+		let factory = SegmentManagerFactory::new(Arc::new(rm));
 
-		let mut freelist_mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
+		// when
+		let segment_mgr = factory.build(69).unwrap();
 
-		let mut t = tm.begin();
-		freelist_mgr
-			.push_freelist(&mut t, NonZeroU16::new(69).unwrap())
-			.unwrap();
-		freelist_mgr
-			.push_freelist(&mut t, NonZeroU16::new(420).unwrap())
-			.unwrap();
-		t.commit().unwrap();
-
-		let mut header_page: ViewBuf<HeaderPage> = ViewBuf::new();
-		rm.read(PageId::new(0, 0), HeaderPage::read(&mut header_page))
-			.unwrap();
-
-		assert_eq!(header_page.freelist_trunk, NonZeroU16::new(69));
-
-		let mut freelist_page: ViewBuf<FreelistPage> =
-			ViewBuf::new_with_size(rm.page_size().into()).unwrap();
-		rm.read(PageId::new(0, 69), FreelistPage::read(&mut freelist_page))
-			.unwrap();
-
-		assert_eq!(freelist_page.length, 1);
-		assert_eq!(freelist_page.items[0], NonZeroU16::new(420));
+		// then
+		assert_eq!(segment_mgr.segment_num(), 69);
 	}
 
 	#[test]
-	fn simple_push_pop() {
-		let dir = tempdir().unwrap();
-		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
+	fn factory_build_existing() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: 1,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+		rm.expect_segment_nums().returning(|| [0, 1, 2].into());
 
-		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
+		// given
+		let factory = SegmentManagerFactory::new(Arc::new(rm));
 
-		let mut freelist_mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
+		// when
+		let segments = factory.build_existing().collect::<Vec<_>>();
 
-		let mut t = tm.begin();
-		freelist_mgr
-			.push_freelist(&mut t, NonZeroU16::new(69).unwrap())
-			.unwrap();
-		freelist_mgr
-			.push_freelist(&mut t, NonZeroU16::new(420).unwrap())
-			.unwrap();
-		t.commit().unwrap();
-
-		let mut t = tm.begin();
-		assert_eq!(
-			freelist_mgr.pop_freelist(&mut t).unwrap(),
-			NonZeroU16::new(420)
-		);
-		assert_eq!(
-			freelist_mgr.pop_freelist(&mut t).unwrap(),
-			NonZeroU16::new(69)
-		);
-		assert_eq!(freelist_mgr.pop_freelist(&mut t).unwrap(), None);
+		// then
+		assert_eq!(segments.len(), 3);
+		assert_eq!(segments[0].as_ref().unwrap().segment_num(), 0);
+		assert_eq!(segments[1].as_ref().unwrap().segment_num(), 1);
+		assert_eq!(segments[2].as_ref().unwrap().segment_num(), 2);
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore)]
-	fn alloc_page() {
-		let dir = tempdir().unwrap();
-		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
+	fn construct_segment_manager_for_new_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: 1,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
 
-		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let mut mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
+		// given
+		let segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
 
-		let mut t = tm.begin();
-		let page = mgr.alloc_page(&mut t).unwrap().unwrap();
-		t.commit().unwrap();
-
-		assert_eq!(page, NonZeroU16::new(1).unwrap());
+		// then
+		assert_eq!(segment_mgr.segment_num(), 69);
+		assert!(segment_mgr.has_free_pages());
 	}
 
 	#[test]
-	#[cfg_attr(miri, ignore)]
-	fn alloc_and_free_page() {
-		let dir = tempdir().unwrap();
-		Storage::init(dir.path(), storage::InitParams::default()).unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
+	fn construct_segment_manager_for_existing_full_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: u16::MAX,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
 
-		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-		let tm = TransactionManager::new(Arc::clone(&cache), recovery);
-		let rm = Arc::new(ReadManager::new(Arc::clone(&cache)));
-		let mut mgr = SegmentManager::new(Arc::clone(&rm), 0).unwrap();
+		// given
+		let segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
 
-		let mut t = tm.begin();
-		let page = mgr.alloc_page(&mut t).unwrap().unwrap();
-		t.commit().unwrap();
+		// then
+		assert_eq!(segment_mgr.segment_num(), 69);
+		assert!(!segment_mgr.has_free_pages());
+	}
 
-		let mut t = tm.begin();
-		mgr.free_page(&mut t, page).unwrap();
-		t.commit().unwrap();
+	#[test]
+	fn construct_segment_manager_for_existing_free_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: NonZeroU16::new(25),
+					num_pages: u16::MAX,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+		rm.expect_read()
+			.with(eq(PageId::new(69, 25)), always())
+			.returning(|_, op| {
+				let freelist_page: &mut ViewSlice<FreelistPage> =
+					ViewSlice::new_mut(op.bytes).unwrap();
+				freelist_page.next = NonZeroU16::new(420);
+				freelist_page.length = freelist_page.items.len() as u16;
+				freelist_page.items.fill(NonZeroU16::new(7897));
+				Ok(())
+			});
+		rm.expect_read()
+			.with(eq(PageId::new(69, 420)), always())
+			.returning(|_, op| {
+				let freelist_page: &mut ViewSlice<FreelistPage> =
+					ViewSlice::new_mut(op.bytes).unwrap();
+				freelist_page.next = None;
+				freelist_page.length = 2;
+				freelist_page.items[0] = NonZeroU16::new(24);
+				freelist_page.items[1] = NonZeroU16::new(25);
+				Ok(())
+			});
+
+		// given
+		let segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// then
+		assert_eq!(segment_mgr.segment_num(), 69);
+		assert!(segment_mgr.has_free_pages());
+	}
+
+	#[test]
+	fn alloc_in_new_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: 1,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+
+		let mut t = MockTransactionApi::new();
+		t.expect_write()
+			.withf(|page_id, op: &WriteOp| {
+				*page_id == PageId::new(69, 0)
+					&& **ViewSlice::<HeaderPage>::new(op.bytes).unwrap()
+						== HeaderPage {
+							magic: SEGMENT_MAGIC,
+							byte_order: ByteOrder::NATIVE as u8,
+							format_version: SEGMENT_FORMAT_VERSION,
+							freelist_trunk: None,
+							num_pages: 2,
+							page_size: TEST_PAGE_SIZE,
+						}
+			})
+			.returning(|_, _| Ok(()));
+
+		// given
+		let mut segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// when
+		let page_num = segment_mgr.alloc_page(&mut t).unwrap();
+
+		// then
+		assert_eq!(page_num, NonZeroU16::new(1));
+	}
+
+	#[test]
+	fn try_alloc_in_existing_full_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: u16::MAX,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+
+		// given
+		let mut segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// when
+		let page_num = segment_mgr
+			.alloc_page(&mut MockTransactionApi::new())
+			.unwrap();
+
+		// then
+		assert_eq!(page_num, None);
+	}
+
+	#[test]
+	fn alloc_in_existing_free_segment() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: NonZeroU16::new(420),
+					num_pages: u16::MAX,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+		rm.expect_read()
+			.with(eq(PageId::new(69, 420)), always())
+			.returning(|_, op| {
+				let freelist_page: &mut ViewSlice<FreelistPage> =
+					ViewSlice::new_mut(op.bytes).unwrap();
+				freelist_page.next = None;
+				freelist_page.length = 2;
+				freelist_page.items[0] = NonZeroU16::new(24);
+				freelist_page.items[1] = NonZeroU16::new(25);
+				Ok(())
+			});
+
+		let mut t = MockTransactionApi::new();
+		t.expect_write()
+			.withf(|page_id, op: &WriteOp| {
+				*page_id == PageId::new(69, 420)
+					&& op.start == 0 && op.bytes == [0_u16.to_ne_bytes(), 1_u16.to_ne_bytes()].concat()
+			})
+			.returning(|_, _| Ok(()));
+
+		// given
+		let mut segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// when
+		let page_num = segment_mgr.alloc_page(&mut t).unwrap();
+
+		// then
+		assert_eq!(page_num, NonZeroU16::new(25));
+	}
+
+	#[test]
+	fn alloc_empty_freelist_page() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: NonZeroU16::new(420),
+					num_pages: u16::MAX,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+		rm.expect_read()
+			.with(eq(PageId::new(69, 420)), always())
+			.returning(|_, op| {
+				let freelist_page: &mut ViewSlice<FreelistPage> =
+					ViewSlice::new_mut(op.bytes).unwrap();
+				freelist_page.next = None;
+				freelist_page.length = 0;
+				Ok(())
+			});
+
+		let mut t = MockTransactionApi::new();
+		t.expect_write()
+			.withf(|page_id, op: &WriteOp| {
+				*page_id == PageId::new(69, 0)
+					&& op.start == 0 && **ViewSlice::<HeaderPage>::new(op.bytes).unwrap()
+					== HeaderPage {
+						magic: SEGMENT_MAGIC,
+						byte_order: ByteOrder::NATIVE as u8,
+						format_version: SEGMENT_FORMAT_VERSION,
+						freelist_trunk: None,
+						num_pages: u16::MAX,
+						page_size: TEST_PAGE_SIZE,
+					}
+			})
+			.returning(|_, _| Ok(()));
+
+		// given
+		let mut segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// when
+		let page_num = segment_mgr.alloc_page(&mut t).unwrap();
+
+		// then
+		assert_eq!(page_num, NonZeroU16::new(420));
+	}
+
+	#[test]
+	fn free_page_with_empty_freelist() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: None,
+					num_pages: 2,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+
+		let mut t = MockTransactionApi::new();
+		t.expect_write()
+			.withf(|page_id, op| {
+				*page_id == PageId::new(69, 1)
+					&& op.start == 0 && op.bytes == [0_u16.to_ne_bytes(), 0_u16.to_ne_bytes()].concat()
+			})
+			.returning(|_, _| Ok(()));
+		t.expect_write()
+			.withf(|page_id, op| {
+				*page_id == PageId::new(69, 0)
+					&& op.start == 0 && **ViewSlice::<HeaderPage>::new(op.bytes).unwrap()
+					== HeaderPage {
+						magic: SEGMENT_MAGIC,
+						byte_order: ByteOrder::NATIVE as u8,
+						format_version: SEGMENT_FORMAT_VERSION,
+						freelist_trunk: NonZeroU16::new(1),
+						num_pages: 2,
+						page_size: TEST_PAGE_SIZE,
+					}
+			})
+			.returning(|_, _| Ok(()));
+
+		// given
+		let mut segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// when
+		segment_mgr
+			.free_page(&mut t, NonZeroU16::new(1).unwrap())
+			.unwrap();
+	}
+
+	#[test]
+	fn free_page_with_filled_freelist_page() {
+		// expect
+		let mut rm = MockReadManagerApi::new();
+		rm.expect_page_size().returning(|| TEST_PAGE_SIZE);
+		rm.expect_read()
+			.withf(|page_id, _| page_id.page_num == 0)
+			.returning(|_, op| {
+				**ViewSlice::new_mut(op.bytes).unwrap() = HeaderPage {
+					magic: SEGMENT_MAGIC,
+					byte_order: ByteOrder::NATIVE as u8,
+					format_version: SEGMENT_FORMAT_VERSION,
+					freelist_trunk: NonZeroU16::new(420),
+					num_pages: 2,
+					page_size: TEST_PAGE_SIZE,
+				};
+				Ok(())
+			});
+		rm.expect_read()
+			.with(eq(PageId::new(69, 420)), always())
+			.returning(|_, op| {
+				let freelist_page: &mut ViewSlice<FreelistPage> =
+					ViewSlice::new_mut(op.bytes).unwrap();
+				freelist_page.next = None;
+				freelist_page.length = 2;
+				freelist_page.items[0] = NonZeroU16::new(1);
+				freelist_page.items[0] = NonZeroU16::new(2);
+
+				Ok(())
+			});
+
+		let mut t = MockTransactionApi::new();
+		t.expect_write()
+			.withf(|page_id, op| {
+				*page_id == PageId::new(69, 420)
+					&& op.start == 0 && op.bytes == [0_u16.to_ne_bytes(), 3_u16.to_ne_bytes()].concat()
+			})
+			.returning(|_, _| Ok(()));
+		t.expect_write()
+			.withf(|page_id, op| {
+				*page_id == PageId::new(69, 420) && op.start == 8 && op.bytes == 1_u16.to_ne_bytes()
+			})
+			.returning(|_, _| Ok(()));
+
+		// given
+		let mut segment_mgr = SegmentManager::new(Arc::new(rm), 69).unwrap();
+
+		// when
+		segment_mgr
+			.free_page(&mut t, NonZeroU16::new(1).unwrap())
+			.unwrap();
 	}
 }

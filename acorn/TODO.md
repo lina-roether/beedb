@@ -5,7 +5,7 @@
   - [x] acorn::manage::alloc
   - [ ] acorn::manage::read
   - [ ] acorn::manage::recovery
-  - [ ] acorn::manage::segment
+  - [x] acorn::manage::segment
   - [ ] acorn::manage::transaction
 
 - Rework error structure once the public api is more established

@@ -4,7 +4,7 @@ use byte_view::{ByteView, ViewBuf};
 
 use super::{ReadOp, WriteOp};
 
-#[derive(Debug, ByteView)]
+#[derive(Debug, ByteView, PartialEq, Eq)]
 #[repr(C)]
 pub(crate) struct HeaderPage {
 	pub magic: [u8; 4],
