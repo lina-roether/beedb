@@ -3,7 +3,7 @@
 - Overhaul Tests
 
   - [x] acorn::manage::alloc
-  - [ ] acorn::manage::read
+  - [x] acorn::manage::read
   - [ ] acorn::manage::recovery
   - [x] acorn::manage::segment
   - [ ] acorn::manage::transaction

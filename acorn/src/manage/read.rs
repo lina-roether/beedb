@@ -59,3 +59,68 @@ where
 		Ok(())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::cache::MockPageCacheApi;
+
+	use mockall::predicate::*;
+
+	use super::*;
+
+	#[test]
+	fn get_page_size() {
+		// expect
+		let mut page_cache = MockPageCacheApi::new();
+		page_cache.expect_page_size().returning(|| 420);
+
+		// given
+		let rm = ReadManager::new(Arc::new(page_cache));
+
+		// when
+		let page_size = rm.page_size();
+
+		// then
+		assert_eq!(page_size, 420);
+	}
+
+	#[test]
+	fn get_segment_nums() {
+		// expect
+		let mut page_cache = MockPageCacheApi::new();
+		page_cache
+			.expect_segment_nums()
+			.returning(|| vec![25, 69, 420].into());
+
+		// given
+		let rm = ReadManager::new(Arc::new(page_cache));
+
+		// when
+		let segment_nums = rm.segment_nums();
+
+		// then
+		assert_eq!(segment_nums, vec![25, 69, 420].into());
+	}
+
+	#[test]
+	fn read() {
+		// expect
+		let mut page_cache = MockPageCacheApi::new();
+		page_cache.expect_page_size().returning(|| 16);
+		page_cache
+			.expect_read_page()
+			.with(eq(PageId::new(69, 420)))
+			.returning(|_| Ok((0..16).collect()));
+
+		// given
+		let rm = ReadManager::new(Arc::new(page_cache));
+		let mut buf = vec![0; 4];
+
+		// when
+		rm.read(PageId::new(69, 420), ReadOp::new(3, &mut buf))
+			.unwrap();
+
+		// then
+		assert_eq!(buf, vec![3, 4, 5, 6]);
+	}
+}
