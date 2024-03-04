@@ -6,6 +6,9 @@
   - [x] acorn::manage::read
   - [ ] acorn::manage::recovery
   - [x] acorn::manage::segment
-  - [ ] acorn::manage::transaction
+  - [x] acorn::manage::transaction
+
+- MIRI tests
+- Concurrency tests
 
 - Rework error structure once the public api is more established

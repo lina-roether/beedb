@@ -264,105 +264,239 @@ mod tests {
 
 	use tempfile::tempdir;
 
+	use mockall::predicate::*;
+
 	use crate::{
+		cache::{MockPageCacheApi, MockWriteGuard},
 		consts::PAGE_SIZE_RANGE,
 		disk::storage::Storage,
-		manage::transaction::tests::wal::{Wal, WalApi as _},
+		manage::{
+			recovery::MockRecoveryManagerApi,
+			transaction::tests::wal::{Wal, WalApi as _},
+		},
 	};
 
 	use super::*;
 
 	#[test]
-	// There seems to be some sort of bug in the standard library that breaks this test under miri
-	// :/
-	#[cfg_attr(miri, ignore)]
-	fn simple_transaction() {
-		const PAGE_SIZE: u16 = *PAGE_SIZE_RANGE.start();
-
-		let dir = tempdir().unwrap();
-		Storage::init(
-			dir.path(),
-			storage::InitParams {
-				page_size: PAGE_SIZE,
-			},
-		)
-		.unwrap();
-		Wal::init_file(dir.path().join("writes.acnl")).unwrap();
-
-		let storage = Storage::load(dir.path().into()).unwrap();
-		let wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let cache = Arc::new(PageCache::new(storage, 100));
-		let recovery = RecoveryManager::new(Arc::clone(&cache), wal);
-
-		cache.write_page(PageId::new(0, 1)).unwrap().fill(0);
-		cache.write_page(PageId::new(0, 2)).unwrap().fill(0);
-
-		let tm = TransactionManager::new(cache, recovery);
-		let mut t = tm.begin();
-		let mut buf = vec![0; PAGE_SIZE as usize];
-
-		t.write(
-			PageId::new(0, 1),
-			WriteOp::new(0, &[25; PAGE_SIZE as usize]),
-		)
-		.unwrap();
-		t.read(PageId::new(0, 1), ReadOp::new(0, &mut buf)).unwrap();
-		assert!(buf.iter().all(|b| *b == 25));
-
-		t.write(
-			PageId::new(0, 1),
-			WriteOp::new(10, &[69; PAGE_SIZE as usize - 10]),
-		)
-		.unwrap();
-		t.read(PageId::new(0, 1), ReadOp::new(0, &mut buf)).unwrap();
-
-		assert!(buf[0..10].iter().all(|b| *b == 25));
-		assert!(buf[10..].iter().all(|b| *b == 69));
-
-		t.commit().unwrap();
-
-		mem::drop(tm);
-
-		let mut wal = Wal::load_file(dir.path().join("writes.acnl")).unwrap();
-		let wal_items: Vec<wal::Item> = wal.iter().unwrap().map(|i| i.unwrap()).collect();
-		assert_eq!(
-			wal_items,
-			vec![
-				wal::Item {
-					info: wal::ItemInfo {
+	fn write_to_transaction() {
+		// expect
+		let mut cache = MockPageCacheApi::new();
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(123, 456)))
+			.return_once(|_| Ok(MockWriteGuard::new(vec![25; 16].into())));
+		cache
+			.expect_read_page()
+			.with(eq(PageId::new(123, 456)))
+			.returning(|_| Ok(vec![0; 16]));
+		cache.expect_page_size().returning(|| 16);
+		let mut recovery = MockRecoveryManagerApi::new();
+		recovery
+			.expect_track_write()
+			.withf(|item_info, write_info| {
+				item_info
+					== &wal::ItemInfo {
 						tid: 0,
 						seq: NonZeroU64::new(1).unwrap(),
-						prev_seq: None
-					},
-					data: wal::ItemData::Write {
-						page_id: PageId::new(0, 1),
+						prev_seq: None,
+					} && write_info
+					== &wal::WriteInfo {
+						page_id: PageId::new(123, 456),
 						start: 0,
-						before: [0; PAGE_SIZE as usize].into(),
-						after: [25; PAGE_SIZE as usize].into()
+						before: &[0; 16],
+						after: &[25; 16],
 					}
-				},
-				wal::Item {
-					info: wal::ItemInfo {
+			})
+			.returning(|_, _| Ok(()));
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let mut t = tm.begin();
+
+		// when
+		t.write(PageId::new(123, 456), WriteOp::new(0, &[25; 16]))
+			.unwrap();
+	}
+
+	#[test]
+	fn read_from_transaction() {
+		// expect
+		let mut cache = MockPageCacheApi::new();
+		cache
+			.expect_read_page()
+			.with(eq(PageId::new(69, 420)))
+			.returning(|_| Ok(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]));
+		cache.expect_page_size().returning(|| 16);
+		let recovery = MockRecoveryManagerApi::new();
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let mut t = tm.begin();
+
+		// when
+		let mut data = [0; 3];
+		t.read(PageId::new(69, 420), ReadOp::new(2, &mut data))
+			.unwrap();
+
+		// then
+		assert_eq!(data, [3, 4, 5]);
+	}
+
+	#[test]
+	fn read_from_transaction_after_write() {
+		// expect
+		let mut cache = MockPageCacheApi::new();
+		cache
+			.expect_read_page()
+			.with(eq(PageId::new(69, 420)))
+			.returning(|_| Ok(vec![25; 16]));
+		cache
+			.expect_write_page()
+			.returning(|_| Ok(MockWriteGuard::new(vec![25; 16].into())));
+		cache.expect_page_size().returning(|| 16);
+
+		let mut recovery = MockRecoveryManagerApi::new();
+		recovery.expect_track_write().returning(|_, _| Ok(()));
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let mut t = tm.begin();
+
+		// when
+		t.write(PageId::new(69, 420), WriteOp::new(0, &[25; 16]))
+			.unwrap();
+		let mut data = [0; 3];
+		t.read(PageId::new(69, 420), ReadOp::new(2, &mut data))
+			.unwrap();
+
+		// then
+		assert_eq!(data, [25, 25, 25]);
+	}
+
+	#[test]
+	fn commit_transaction() {
+		// expect
+		let cache = MockPageCacheApi::new();
+		let mut recovery = MockRecoveryManagerApi::new();
+		recovery
+			.expect_commit_transaction()
+			.with(eq(wal::ItemInfo {
+				tid: 0,
+				seq: NonZeroU64::new(1).unwrap(),
+				prev_seq: None,
+			}))
+			.returning(|_| Ok(()));
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let t = tm.begin();
+
+		// when
+		t.commit().unwrap();
+	}
+
+	#[test]
+	fn cancel_transaction() {
+		// expect
+		let cache = MockPageCacheApi::new();
+		let mut recovery = MockRecoveryManagerApi::new();
+		recovery
+			.expect_cancel_transaction()
+			.with(eq(wal::ItemInfo {
+				tid: 0,
+				seq: NonZeroU64::new(1).unwrap(),
+				prev_seq: None,
+			}))
+			.returning(|_| Ok(()));
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let t = tm.begin();
+
+		// when
+		t.cancel().unwrap();
+	}
+
+	#[test]
+	fn full_transaction() {
+		// expect
+		let mut cache = MockPageCacheApi::new();
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(123, 456)))
+			.return_once(|_| Ok(MockWriteGuard::new(vec![25; 16].into())));
+		cache
+			.expect_read_page()
+			.with(eq(PageId::new(123, 456)))
+			.returning(|_| Ok(vec![0; 16]));
+		cache.expect_page_size().returning(|| 16);
+		let mut recovery = MockRecoveryManagerApi::new();
+		recovery
+			.expect_track_write()
+			.withf(|item_info, write_info| {
+				item_info
+					== &wal::ItemInfo {
 						tid: 0,
-						seq: NonZeroU64::new(2).unwrap(),
-						prev_seq: NonZeroU64::new(1)
-					},
-					data: wal::ItemData::Write {
-						page_id: PageId::new(0, 1),
-						start: 10,
-						before: [25; PAGE_SIZE as usize - 10].into(),
-						after: [69; PAGE_SIZE as usize - 10].into()
+						seq: NonZeroU64::new(1).unwrap(),
+						prev_seq: None,
+					} && write_info
+					== &wal::WriteInfo {
+						page_id: PageId::new(123, 456),
+						start: 0,
+						before: &[0; 16],
+						after: &[25; 16],
 					}
-				},
-				wal::Item {
-					info: wal::ItemInfo {
-						tid: 0,
-						seq: NonZeroU64::new(3).unwrap(),
-						prev_seq: NonZeroU64::new(2)
-					},
-					data: wal::ItemData::Commit
-				},
-			]
-		)
+			})
+			.returning(|_, _| Ok(()));
+		recovery
+			.expect_commit_transaction()
+			.with(eq(wal::ItemInfo {
+				tid: 0,
+				seq: NonZeroU64::new(2).unwrap(),
+				prev_seq: NonZeroU64::new(1),
+			}))
+			.returning(|_| Ok(()));
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let mut t = tm.begin();
+
+		// when
+		t.write(PageId::new(123, 456), WriteOp::new(0, &[25; 16]))
+			.unwrap();
+		t.commit().unwrap();
+	}
+
+	#[test]
+	fn multiple_transactions() {
+		// expect
+		let cache = MockPageCacheApi::new();
+		let mut recovery = MockRecoveryManagerApi::new();
+		recovery
+			.expect_commit_transaction()
+			.with(eq(wal::ItemInfo {
+				tid: 0,
+				seq: NonZeroU64::new(1).unwrap(),
+				prev_seq: None,
+			}))
+			.returning(|_| Ok(()));
+		recovery
+			.expect_commit_transaction()
+			.with(eq(wal::ItemInfo {
+				tid: 1,
+				seq: NonZeroU64::new(2).unwrap(),
+				prev_seq: None,
+			}))
+			.returning(|_| Ok(()));
+
+		// given
+		let tm = TransactionManager::new(Arc::new(cache), recovery);
+		let t0 = tm.begin();
+		let t1 = tm.begin();
+
+		// when
+		t0.commit().unwrap();
+		t1.commit().unwrap();
 	}
 }

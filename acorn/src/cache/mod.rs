@@ -8,6 +8,9 @@ use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
 
 #[cfg(test)]
+use std::thread::panicking;
+
+#[cfg(test)]
 use mockall::automock;
 
 use self::{buffer::PageBuffer, manager::CacheManager};
@@ -22,10 +25,65 @@ mod manager;
 
 pub(crate) use buffer::{PageReadGuard, PageWriteGuard};
 
+#[cfg(test)]
+pub(crate) struct MockWriteGuard {
+	expected: Box<[u8]>,
+	actual: Box<[u8]>,
+}
+
+#[cfg(test)]
+impl MockWriteGuard {
+	pub fn new(expected: Box<[u8]>) -> Self {
+		let mut actual = expected.clone();
+		actual.fill(0);
+		Self { expected, actual }
+	}
+}
+
+#[cfg(test)]
+impl Drop for MockWriteGuard {
+	fn drop(&mut self) {
+		if panicking() {
+			return;
+		}
+		assert_eq!(self.actual, self.expected);
+	}
+}
+
+#[cfg(test)]
+impl Deref for MockWriteGuard {
+	type Target = [u8];
+
+	fn deref(&self) -> &Self::Target {
+		&self.actual
+	}
+}
+
+#[cfg(test)]
+impl DerefMut for MockWriteGuard {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.actual
+	}
+}
+
+#[cfg(test)]
+impl AsRef<[u8]> for MockWriteGuard {
+	fn as_ref(&self) -> &[u8] {
+		&*self
+	}
+}
+
+#[cfg(test)]
+impl AsMut<[u8]> for MockWriteGuard {
+	fn as_mut(&mut self) -> &mut [u8] {
+		&mut *self
+	}
+}
+
 #[allow(clippy::needless_lifetimes)]
 #[cfg_attr(test, automock(
     type ReadGuard<'a> = Vec<u8>;
-    type WriteGuard<'a> = Vec<u8>;
+    type WriteGuard<'a> = MockWriteGuard;
 ))]
 pub(crate) trait PageCacheApi {
 	type ReadGuard<'a>: Deref<Target = [u8]> + AsRef<[u8]>

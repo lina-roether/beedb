@@ -132,6 +132,7 @@ pub(crate) struct ItemInfo {
 	pub prev_seq: Option<NonZeroU64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteInfo<'a> {
 	pub page_id: PageId,
 	pub start: u16,
