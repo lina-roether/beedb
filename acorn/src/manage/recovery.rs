@@ -158,3 +158,121 @@ where
 		Ok(())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::cache::{MockPageCacheApi, MockWriteGuard};
+
+	use self::wal::MockWalApi;
+
+	use super::*;
+
+	use mockall::{predicate::*, Sequence};
+
+	#[test]
+	fn recover() {
+		// expect
+		let mut wal = MockWalApi::new();
+		wal.expect_iter().returning(|| {
+			Ok(vec![
+				Ok(wal::Item {
+					info: wal::ItemInfo {
+						tid: 0,
+						seq: NonZeroU64::new(1).unwrap(),
+						prev_seq: None,
+					},
+					data: wal::ItemData::Write {
+						page_id: PageId::new(69, 420),
+						start: 0,
+						before: vec![1; 16].into(),
+						after: vec![2; 16].into(),
+					},
+				}),
+				Ok(wal::Item {
+					info: wal::ItemInfo {
+						tid: 1,
+						seq: NonZeroU64::new(2).unwrap(),
+						prev_seq: None,
+					},
+					data: wal::ItemData::Write {
+						page_id: PageId::new(25, 24),
+						start: 0,
+						before: vec![3; 16].into(),
+						after: vec![4; 16].into(),
+					},
+				}),
+				Ok(wal::Item {
+					info: wal::ItemInfo {
+						tid: 3,
+						seq: NonZeroU64::new(3).unwrap(),
+						prev_seq: None,
+					},
+					data: wal::ItemData::Write {
+						page_id: PageId::new(1, 2),
+						start: 0,
+						before: vec![5; 16].into(),
+						after: vec![6; 16].into(),
+					},
+				}),
+				Ok(wal::Item {
+					info: wal::ItemInfo {
+						tid: 0,
+						seq: NonZeroU64::new(4).unwrap(),
+						prev_seq: NonZeroU64::new(3),
+					},
+					data: wal::ItemData::Cancel,
+				}),
+				Ok(wal::Item {
+					info: wal::ItemInfo {
+						tid: 0,
+						seq: NonZeroU64::new(5).unwrap(),
+						prev_seq: NonZeroU64::new(1),
+					},
+					data: wal::ItemData::Commit,
+				}),
+			]
+			.into_iter())
+		});
+
+		let mut cache = MockPageCacheApi::new();
+		cache.expect_page_size().returning(|| 16);
+
+		let mut write_seq = Sequence::new();
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(69, 420)))
+			.returning(|_| Ok(MockWriteGuard::new(vec![2; 16].into())))
+			.once()
+			.in_sequence(&mut write_seq);
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(25, 24)))
+			.returning(|_| Ok(MockWriteGuard::new(vec![4; 16].into())))
+			.once()
+			.in_sequence(&mut write_seq);
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(1, 2)))
+			.returning(|_| Ok(MockWriteGuard::new(vec![6; 16].into())))
+			.once()
+			.in_sequence(&mut write_seq);
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(1, 2)))
+			.returning(|_| Ok(MockWriteGuard::new(vec![5; 16].into())))
+			.once()
+			.in_sequence(&mut write_seq);
+		cache
+			.expect_write_page()
+			.with(eq(PageId::new(25, 24)))
+			.returning(|_| Ok(MockWriteGuard::new(vec![3; 16].into())))
+			.once()
+			.in_sequence(&mut write_seq);
+
+		// given
+		let mut recv = RecoveryManager::new(Arc::new(cache), wal);
+
+		// when
+		recv.recover().unwrap();
+	}
+}

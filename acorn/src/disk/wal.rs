@@ -59,17 +59,62 @@ pub(crate) enum ReadError {
 	Io(#[from] io::Error),
 }
 
+pub(crate) trait CursorApi {
+	fn next(&mut self) -> Result<Option<Item>, ReadError>;
+	fn prev(&mut self) -> Result<Option<Item>, ReadError>;
+	fn seek_to_start(&mut self) -> Result<(), ReadError>;
+	fn seek_to_end(&mut self) -> Result<(), ReadError>;
+}
+
+#[cfg(test)]
+pub(crate) struct MockCursorApi {
+	items: Vec<Item>,
+	index: usize,
+}
+
+#[cfg(test)]
+impl From<Vec<Item>> for MockCursorApi {
+	fn from(items: Vec<Item>) -> Self {
+		Self { items, index: 0 }
+	}
+}
+
+#[cfg(test)]
+impl CursorApi for MockCursorApi {
+	fn next(&mut self) -> Result<Option<Item>, ReadError> {
+		let Some(item) = self.items.get(self.index) else {
+			return Ok(None);
+		};
+		self.index += 1;
+		Ok(Some(item.clone()))
+	}
+
+	fn prev(&mut self) -> Result<Option<Item>, ReadError> {
+		self.index -= 1;
+		let Some(item) = self.items.get(self.index) else {
+			self.index += 1;
+			return Ok(None);
+		};
+		Ok(Some(item.clone()))
+	}
+
+	fn seek_to_start(&mut self) -> Result<(), ReadError> {
+		self.index = 0;
+		Ok(())
+	}
+
+	fn seek_to_end(&mut self) -> Result<(), ReadError> {
+		self.index = self.items.len();
+		Ok(())
+	}
+}
+
 #[allow(clippy::needless_lifetimes)]
 #[cfg_attr(test, automock(
-    type Iter<'a> = vec::IntoIter<Result<Item, ReadError>>;
-    type Retrace<'a> = vec::IntoIter<Result<Item, ReadError>>;
+    type Cursor<'a> = MockCursorApi;
 ))]
 pub(crate) trait WalApi {
-	type Iter<'a>: Iterator<Item = Result<Item, ReadError>> + 'a
-	where
-		Self: 'a;
-
-	type Retrace<'a>: Iterator<Item = Result<Item, ReadError>> + 'a
+	type Cursor<'a>: CursorApi
 	where
 		Self: 'a;
 
@@ -85,12 +130,7 @@ pub(crate) trait WalApi {
 
 	fn flush(&mut self) -> Result<(), io::Error>;
 
-	fn iter<'a>(&'a mut self) -> Result<Self::Iter<'a>, ReadError>;
-
-	fn retrace_transaction<'a>(
-		&'a mut self,
-		seq: NonZeroU64,
-	) -> Result<Self::Retrace<'a>, ReadError>;
+	fn cursor<'a>(&'a mut self) -> Self::Cursor<'a>;
 }
 
 #[repr(u8)]
@@ -208,8 +248,7 @@ impl<T: Seek + Read + Write> Wal<T> {
 }
 
 impl<T: Seek + Read + Write> WalApi for Wal<T> {
-	type Iter<'a> = Iter<'a, T> where T: 'a;
-	type Retrace<'a> = Retrace<'a, T> where T: 'a;
+	type Cursor<'a> = Cursor<'a, T> where T: 'a;
 
 	fn push_write(
 		&mut self,
@@ -268,12 +307,8 @@ impl<T: Seek + Read + Write> WalApi for Wal<T> {
 		Ok(())
 	}
 
-	fn iter(&mut self) -> Result<Iter<T>, ReadError> {
-		Iter::new(&mut self.file, self.log_start)
-	}
-
-	fn retrace_transaction(&mut self, seq: NonZeroU64) -> Result<Retrace<T>, ReadError> {
-		Retrace::new(&mut self.file, self.log_start, seq)
+	fn cursor(&mut self) -> Cursor<T> {
+		Cursor::new(&mut self.file, self.log_start)
 	}
 }
 
@@ -339,35 +374,17 @@ pub(crate) struct Item {
 	pub data: ItemData,
 }
 
-struct WalReader<'a, T: Read + Seek> {
+pub(crate) struct Cursor<'a, T: Read + Seek> {
 	log_start: u64,
 	file: BufReader<&'a mut T>,
 }
 
-impl<'a, T: Read + Seek> WalReader<'a, T> {
-	fn new(file: &'a mut T, log_start: u64) -> Self {
+impl<'a, T: Read + Seek> Cursor<'a, T> {
+	pub fn new(file: &'a mut T, log_start: u64) -> Self {
 		Self {
 			log_start,
 			file: BufReader::new(file),
 		}
-	}
-
-	fn seek_back_to_seq(&mut self, seq: NonZeroU64) -> Result<(), ReadError> {
-		let mut header_buf: ViewBuf<ItemHeader> = ViewBuf::new();
-		let mut footer_buf: ViewBuf<ItemFooter> = ViewBuf::new();
-
-		while self.file.stream_position()? > self.log_start {
-			self.file.seek_relative(-(size_of::<ItemFooter>() as i64))?;
-			self.file.read_exact(footer_buf.as_bytes_mut())?;
-			self.file.seek_relative(-(footer_buf.length as i64))?;
-			self.file.read_exact(header_buf.as_bytes_mut())?;
-			self.file.seek_relative(-(size_of::<ItemHeader>() as i64))?;
-			if header_buf.seq == Some(seq) {
-				return Ok(());
-			}
-		}
-
-		Err(ReadError::MissingSeq(seq))
 	}
 
 	fn read_next_item(&mut self, advance: bool) -> Result<Option<Item>, ReadError> {
@@ -419,55 +436,43 @@ impl<'a, T: Read + Seek> WalReader<'a, T> {
 			data,
 		}))
 	}
-}
 
-pub(crate) struct Iter<'a, T: Read + Seek>(WalReader<'a, T>);
+	fn seek_back(&mut self) -> Result<(), ReadError> {
+		let mut header_buf: ViewBuf<ItemHeader> = ViewBuf::new();
+		let mut footer_buf: ViewBuf<ItemFooter> = ViewBuf::new();
 
-impl<'a, T: Read + Seek> Iter<'a, T> {
-	fn new(file: &'a mut T, log_start: u64) -> Result<Self, ReadError> {
-		file.seek(SeekFrom::Start(log_start))?;
-		Ok(Self(WalReader::new(file, log_start)))
+		self.file.seek_relative(-(size_of::<ItemFooter>() as i64))?;
+		self.file.read_exact(footer_buf.as_bytes_mut())?;
+		self.file.seek_relative(-(footer_buf.length as i64))?;
+		self.file.read_exact(header_buf.as_bytes_mut())?;
+		self.file.seek_relative(-(size_of::<ItemHeader>() as i64))?;
+
+		Ok(())
+	}
+
+	fn is_at_start(&self) -> Result<bool, ReadError> {
+		Ok(self.file.stream_position()? == self.log_start)
 	}
 }
 
-impl<'a, T: Read + Seek> Iterator for Iter<'a, T> {
-	type Item = Result<Item, ReadError>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		self.0.read_next_item(true).transpose()
+impl<'a, T: Read + Seek> CursorApi for Cursor<'a, T> {
+	fn next(&mut self) -> Result<Option<Item>, ReadError> {
+		self.read_next_item(true)
 	}
-}
 
-pub(crate) struct Retrace<'a, T: Read + Seek> {
-	seq: Option<NonZeroU64>,
-	reader: WalReader<'a, T>,
-}
-
-impl<'a, T: Read + Seek> Retrace<'a, T> {
-	fn new(file: &'a mut T, log_start: u64, seq: NonZeroU64) -> Result<Self, ReadError> {
-		file.seek(SeekFrom::End(0))?;
-
-		Ok(Self {
-			seq: Some(seq),
-			reader: WalReader::new(file, log_start),
-		})
+	fn prev(&mut self) -> Result<Option<Item>, ReadError> {
+		self.seek_back()?;
+		self.read_next_item(false)
 	}
-}
 
-impl<'a, T: Read + Seek> Iterator for Retrace<'a, T> {
-	type Item = Result<Item, ReadError>;
+	fn seek_to_start(&mut self) -> Result<(), ReadError> {
+		self.file.seek(SeekFrom::Start(0))?;
+		Ok(())
+	}
 
-	fn next(&mut self) -> Option<Self::Item> {
-		if let Err(err) = self.reader.seek_back_to_seq(self.seq?) {
-			return Some(Err(err));
-		}
-
-		let item = match self.reader.read_next_item(false) {
-			Ok(item) => item.unwrap(),
-			Err(err) => return Some(Err(err)),
-		};
-		self.seq = item.info.prev_seq;
-		Some(Ok(item))
+	fn seek_to_end(&mut self) -> Result<(), ReadError> {
+		self.file.seek(SeekFrom::End(0))?;
+		Ok(())
 	}
 }
 
@@ -705,9 +710,9 @@ mod tests {
 		.unwrap();
 		wal.flush().unwrap();
 
-		let mut iter = wal.iter().unwrap();
+		let mut cursor = wal.cursor();
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.next().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 0,
@@ -723,7 +728,7 @@ mod tests {
 			},
 		);
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.next().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 1,
@@ -739,7 +744,7 @@ mod tests {
 			},
 		);
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.next().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 0,
@@ -755,7 +760,7 @@ mod tests {
 			},
 		);
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.next().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 0,
@@ -766,7 +771,7 @@ mod tests {
 			}
 		);
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.next().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 1,
@@ -776,11 +781,11 @@ mod tests {
 				data: ItemData::Commit
 			}
 		);
-		assert!(iter.next().is_none());
+		assert!(cursor.next().unwrap().is_none());
 	}
 
 	#[test]
-	fn retrace_transaction() {
+	fn iter_logs_backwards() {
 		let mut data: Vec<u8> = Vec::new();
 		let mut file = Cursor::new(&mut data);
 		Wal::init(&mut file).unwrap();
@@ -842,11 +847,10 @@ mod tests {
 		.unwrap();
 		wal.flush().unwrap();
 
-		let mut iter = wal
-			.retrace_transaction(NonZeroU64::new(5).unwrap())
-			.unwrap();
+		let mut cursor = wal.cursor();
+		cursor.seek_to_end().unwrap();
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.prev().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 1,
@@ -857,7 +861,34 @@ mod tests {
 			}
 		);
 		assert_eq!(
-			iter.next().unwrap().unwrap(),
+			cursor.prev().unwrap().unwrap(),
+			Item {
+				info: ItemInfo {
+					tid: 0,
+					seq: NonZeroU64::new(4).unwrap(),
+					prev_seq: NonZeroU64::new(3)
+				},
+				data: ItemData::Commit
+			}
+		);
+		assert_eq!(
+			cursor.prev().unwrap().unwrap(),
+			Item {
+				info: ItemInfo {
+					tid: 0,
+					seq: NonZeroU64::new(3).unwrap(),
+					prev_seq: NonZeroU64::new(1)
+				},
+				data: ItemData::Write {
+					page_id: PageId::new(0, 10),
+					start: 0,
+					before: vec![69; 8].into(),
+					after: vec![15; 8].into()
+				}
+			},
+		);
+		assert_eq!(
+			cursor.prev().unwrap().unwrap(),
 			Item {
 				info: ItemInfo {
 					tid: 1,
@@ -872,6 +903,22 @@ mod tests {
 				}
 			},
 		);
-		assert!(iter.next().is_none());
+		assert_eq!(
+			cursor.prev().unwrap().unwrap(),
+			Item {
+				info: ItemInfo {
+					tid: 0,
+					seq: NonZeroU64::new(1).unwrap(),
+					prev_seq: None
+				},
+				data: ItemData::Write {
+					page_id: PageId::new(0, 10),
+					start: 0,
+					before: vec![0; 8].into(),
+					after: vec![10; 8].into()
+				}
+			},
+		);
+		assert!(cursor.prev().unwrap().is_none());
 	}
 }

@@ -1,4 +1,5 @@
 use std::{
+	borrow::Borrow,
 	collections::{hash_map::Entry, HashMap},
 	num::NonZeroU64,
 	sync::{
@@ -180,7 +181,7 @@ where
 			e.insert(self.cache.write_page(page_id)?);
 		}
 		let lock = self.locks.get_mut(&page_id).unwrap();
-		lock[op.range()].copy_from_slice(op.bytes);
+		lock[op.range()].copy_from_slice(&op.bytes);
 		Ok(())
 	}
 
@@ -242,7 +243,7 @@ where
 					page_id,
 					start: op.start as u16,
 					before,
-					after: op.bytes,
+					after: op.bytes.borrow(),
 				},
 			)
 			.unwrap();
@@ -260,20 +261,13 @@ where
 #[cfg(test)]
 mod tests {
 
-	use std::mem;
-
-	use tempfile::tempdir;
+	use std::borrow::Cow;
 
 	use mockall::predicate::*;
 
 	use crate::{
 		cache::{MockPageCacheApi, MockWriteGuard},
-		consts::PAGE_SIZE_RANGE,
-		disk::storage::Storage,
-		manage::{
-			recovery::MockRecoveryManagerApi,
-			transaction::tests::wal::{Wal, WalApi as _},
-		},
+		manage::recovery::MockRecoveryManagerApi,
 	};
 
 	use super::*;
@@ -315,8 +309,11 @@ mod tests {
 		let mut t = tm.begin();
 
 		// when
-		t.write(PageId::new(123, 456), WriteOp::new(0, &[25; 16]))
-			.unwrap();
+		t.write(
+			PageId::new(123, 456),
+			WriteOp::new(0, Cow::Owned(vec![25; 16])),
+		)
+		.unwrap();
 	}
 
 	#[test]
@@ -364,8 +361,11 @@ mod tests {
 		let mut t = tm.begin();
 
 		// when
-		t.write(PageId::new(69, 420), WriteOp::new(0, &[25; 16]))
-			.unwrap();
+		t.write(
+			PageId::new(69, 420),
+			WriteOp::new(0, Cow::Owned(vec![25; 16])),
+		)
+		.unwrap();
 		let mut data = [0; 3];
 		t.read(PageId::new(69, 420), ReadOp::new(2, &mut data))
 			.unwrap();
@@ -463,8 +463,11 @@ mod tests {
 		let mut t = tm.begin();
 
 		// when
-		t.write(PageId::new(123, 456), WriteOp::new(0, &[25; 16]))
-			.unwrap();
+		t.write(
+			PageId::new(123, 456),
+			WriteOp::new(0, Cow::Owned(vec![25; 16])),
+		)
+		.unwrap();
 		t.commit().unwrap();
 	}
 
