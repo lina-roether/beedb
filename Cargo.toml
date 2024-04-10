@@ -1,7 +1,5 @@
 [workspace]
 resolver = "2"
 members = [
-	"acorn",
-	"byte_view",
-	"byte_view_macros"
+	"acorn"
 ]
