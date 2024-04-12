@@ -6,7 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aligned = "0.4.2"
-num_enum = "0.7.2"
+musli-zerocopy = "0.0.112"
 thiserror = "1.0.58"
-zerocopy = { version = "0.7.32", features = ["derive"] }
