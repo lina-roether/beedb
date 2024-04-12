@@ -21,6 +21,12 @@ struct ItemHeader {
 	sequence_num: u64,
 }
 
+#[derive(Debug, AsBytes, FromZeroes, FromBytes)]
+#[repr(C)]
+struct ItemFooter {
+	start_offset: i16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsBytes, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub(super) enum ItemType {
