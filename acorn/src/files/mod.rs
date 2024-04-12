@@ -1,9 +1,12 @@
 use std::{io, mem::size_of};
 
+use crc::Crc;
 use musli_zerocopy::ZeroCopy;
 use thiserror::Error;
 
 pub(crate) mod wal;
+
+pub(super) const CRC16: Crc<u16> = Crc::<u16>::new(&crc::CRC_16_IBM_SDLC);
 
 #[derive(Debug, Error)]
 pub(crate) enum FileError {
@@ -81,7 +84,7 @@ impl GenericHeader {
 		if self.byte_order != NATIVE_BYTE_ORDER {
 			return Err(FileError::ByteOrderMismatch);
 		}
-		return Ok(());
+		Ok(())
 	}
 }
 
@@ -93,8 +96,8 @@ mod tests {
 	fn verify_header() {
 		let header = GenericHeader {
 			magic: *b"ACRN",
-			byte_order: NATIVE_BYTE_ORDER.into(),
-			file_type: FileType::Wal.into(),
+			byte_order: NATIVE_BYTE_ORDER,
+			file_type: FileType::Wal,
 			content_offset: 69,
 		};
 		assert!(header.validate().is_ok());
@@ -104,8 +107,8 @@ mod tests {
 	fn try_verify_header_with_missing_magic() {
 		let header = GenericHeader {
 			magic: *b"KEKW",
-			byte_order: NATIVE_BYTE_ORDER.into(),
-			file_type: FileType::Wal.into(),
+			byte_order: NATIVE_BYTE_ORDER,
+			file_type: FileType::Wal,
 			content_offset: 69,
 		};
 		let err = header.validate().unwrap_err();
@@ -117,10 +120,10 @@ mod tests {
 		let header = GenericHeader {
 			magic: *b"ACRN",
 			byte_order: match NATIVE_BYTE_ORDER {
-				ByteOrder::BigEndian => ByteOrder::LittleEndian.into(),
-				ByteOrder::LittleEndian => ByteOrder::BigEndian.into(),
+				ByteOrder::BigEndian => ByteOrder::LittleEndian,
+				ByteOrder::LittleEndian => ByteOrder::BigEndian,
 			},
-			file_type: FileType::Wal.into(),
+			file_type: FileType::Wal,
 			content_offset: 69,
 		};
 		let err = header.validate().unwrap_err();
