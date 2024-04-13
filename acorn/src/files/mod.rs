@@ -22,6 +22,12 @@ pub(crate) enum FileError {
 	#[error("Unexpected file type {0:?}")]
 	WrongFileType(FileType),
 
+	#[error("Unexpected end of file")]
+	UnexpectedEof,
+
+	#[error("The file is corrupted; a checksum mismatch occurred")]
+	ChecksumMismatch,
+
 	#[error(transparent)]
 	Io(#[from] io::Error),
 }
