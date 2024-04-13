@@ -647,4 +647,172 @@ mod tests {
 		);
 		assert_eq!(item_5, None);
 	}
+
+	#[test]
+	fn read_item_meta_back_to_front() {
+		// given
+		let mut wal = WalFile::create(Cursor::new(Vec::new())).unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 0,
+			sequence_num: 0,
+			data: WalItemData::Write(WalWriteItemData {
+				segment_id: 69,
+				page_id: 420,
+				offset: 25,
+				data: vec![1, 2, 3, 4].into(),
+			}),
+		})
+		.unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 1,
+			sequence_num: 1,
+			data: WalItemData::Write(WalWriteItemData {
+				segment_id: 123,
+				page_id: 456,
+				offset: 24,
+				data: vec![5, 6, 7, 8].into(),
+			}),
+		})
+		.unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 1,
+			sequence_num: 2,
+			data: WalItemData::Undo,
+		})
+		.unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 0,
+			sequence_num: 3,
+			data: WalItemData::Commit,
+		})
+		.unwrap();
+
+		// when
+		let mut cursor = wal.cursor();
+		cursor.seek_to_back().unwrap();
+		let item_1 = cursor.read_next_meta().unwrap();
+		let item_2 = cursor.read_next_meta().unwrap();
+		let item_3 = cursor.read_next_meta().unwrap();
+		let item_4 = cursor.read_next_meta().unwrap();
+		let item_5 = cursor.read_next_meta().unwrap();
+
+		// then
+		assert_eq!(
+			item_1,
+			Some(WalItemMeta {
+				kind: WalItemKind::Write,
+				transaction_id: 0,
+				sequence_num: 0,
+			})
+		);
+		assert_eq!(
+			item_2,
+			Some(WalItemMeta {
+				kind: WalItemKind::Write,
+				transaction_id: 1,
+				sequence_num: 1,
+			})
+		);
+		assert_eq!(
+			item_3,
+			Some(WalItemMeta {
+				kind: WalItemKind::Undo,
+				transaction_id: 1,
+				sequence_num: 2,
+			})
+		);
+		assert_eq!(
+			item_4,
+			Some(WalItemMeta {
+				kind: WalItemKind::Commit,
+				transaction_id: 0,
+				sequence_num: 3,
+			})
+		);
+		assert_eq!(item_5, None);
+	}
+
+	#[test]
+	fn read_item_meta_front_to_back() {
+		// given
+		let mut wal = WalFile::create(Cursor::new(Vec::new())).unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 0,
+			sequence_num: 0,
+			data: WalItemData::Write(WalWriteItemData {
+				segment_id: 69,
+				page_id: 420,
+				offset: 25,
+				data: vec![1, 2, 3, 4].into(),
+			}),
+		})
+		.unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 1,
+			sequence_num: 1,
+			data: WalItemData::Write(WalWriteItemData {
+				segment_id: 123,
+				page_id: 456,
+				offset: 24,
+				data: vec![5, 6, 7, 8].into(),
+			}),
+		})
+		.unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 1,
+			sequence_num: 2,
+			data: WalItemData::Undo,
+		})
+		.unwrap();
+		wal.push_item(WalItem {
+			transaction_id: 0,
+			sequence_num: 3,
+			data: WalItemData::Commit,
+		})
+		.unwrap();
+
+		// when
+		let mut cursor = wal.cursor();
+		cursor.seek_to_front().unwrap();
+		let item_1 = cursor.read_prev_meta().unwrap();
+		let item_2 = cursor.read_prev_meta().unwrap();
+		let item_3 = cursor.read_prev_meta().unwrap();
+		let item_4 = cursor.read_prev_meta().unwrap();
+		let item_5 = cursor.read_prev_meta().unwrap();
+
+		// then
+		assert_eq!(
+			item_1,
+			Some(WalItemMeta {
+				kind: WalItemKind::Commit,
+				transaction_id: 0,
+				sequence_num: 3,
+			})
+		);
+		assert_eq!(
+			item_2,
+			Some(WalItemMeta {
+				kind: WalItemKind::Undo,
+				transaction_id: 1,
+				sequence_num: 2,
+			})
+		);
+		assert_eq!(
+			item_3,
+			Some(WalItemMeta {
+				kind: WalItemKind::Write,
+				transaction_id: 1,
+				sequence_num: 1,
+			})
+		);
+		assert_eq!(
+			item_4,
+			Some(WalItemMeta {
+				kind: WalItemKind::Write,
+				transaction_id: 0,
+				sequence_num: 0,
+			})
+		);
+		assert_eq!(item_5, None);
+	}
 }
