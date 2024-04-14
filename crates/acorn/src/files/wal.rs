@@ -1,7 +1,6 @@
 use std::{
-	borrow::Cow,
+	borrow::{BorrowMut, Cow},
 	io::{self, BufReader, Read, Seek, SeekFrom, Write},
-	iter,
 	mem::size_of,
 };
 
@@ -94,7 +93,8 @@ pub(crate) struct WalWriteItemData<'a> {
 	pub segment_id: u32,
 	pub page_id: u16,
 	pub offset: u16,
-	pub data: Cow<'a, [u8]>,
+	pub from: Cow<'a, [u8]>,
+	pub to: Cow<'a, [u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,7 +148,9 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		};
 
 		let body_size: usize = match &item.data {
-			WalItemData::Write(write_data) => size_of::<WriteItemHeader>() + write_data.data.len(),
+			WalItemData::Write(write_data) => {
+				size_of::<WriteItemHeader>() + 2 * write_data.to.len()
+			}
 			_ => 0,
 		};
 		let item_length: u16 = (size_of::<ItemHeader>() + body_size + size_of::<ItemFooter>())
@@ -163,19 +165,24 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		});
 
 		if let WalItemData::Write(write_data) = &item.data {
+			assert_eq!(write_data.from.len(), write_data.to.len());
+
+			let crc = write_item_crc(&write_data.from, &write_data.to);
+
 			let write_item_header = WriteItemHeader {
 				segment_id: write_data.segment_id,
 				page_id: write_data.page_id,
 				offset: write_data.offset,
 				write_length: write_data
-					.data
+					.to
 					.len()
 					.try_into()
 					.expect("Data length written in WAL item must be a 16-bit number!"),
-				crc: CRC16.checksum(&write_data.data),
+				crc,
 			};
 			self.buffer.store(&write_item_header);
-			self.buffer.store_unsized::<[u8]>(&write_data.data);
+			self.buffer.store_unsized::<[u8]>(&write_data.from);
+			self.buffer.store_unsized::<[u8]>(&write_data.to);
 		}
 
 		self.buffer.store(&ItemFooter { item_length });
@@ -235,12 +242,19 @@ impl<'a, F: Seek + Read> WalCursor<'a, F> {
 			read_exact_from(&mut self.buffer, &mut self.file)?;
 		let write_header = self.buffer.load(write_header_ref)?;
 
-		let mut data: Vec<u8> = iter::repeat(0)
+		let mut from: Vec<u8> = Vec::with_capacity(write_header.write_length.into());
+		self.file
+			.borrow_mut()
 			.take(write_header.write_length.into())
-			.collect();
-		self.file.read_exact(&mut data)?;
+			.read_to_end(&mut from)?;
 
-		if CRC16.checksum(&data) != write_header.crc {
+		let mut to: Vec<u8> = Vec::with_capacity(write_header.write_length.into());
+		self.file
+			.borrow_mut()
+			.take(write_header.write_length.into())
+			.read_to_end(&mut to)?;
+
+		if write_item_crc(&from, &to) != write_header.crc {
 			return Err(FileError::ChecksumMismatch);
 		}
 
@@ -248,7 +262,8 @@ impl<'a, F: Seek + Read> WalCursor<'a, F> {
 			segment_id: write_header.segment_id,
 			page_id: write_header.page_id,
 			offset: write_header.offset,
-			data: Cow::Owned(data),
+			from: from.into(),
+			to: to.into(),
 		})
 	}
 }
@@ -329,6 +344,13 @@ impl<'a, F: Seek + Read> WalCursorApi for WalCursor<'a, F> {
 	}
 }
 
+fn write_item_crc(from: &[u8], to: &[u8]) -> u16 {
+	let mut digest = CRC16.digest();
+	digest.update(from);
+	digest.update(to);
+	digest.finalize()
+}
+
 fn read_from<T: ZeroCopy>(
 	buf: &mut OwnedBuf,
 	mut read: impl Read,
@@ -400,7 +422,8 @@ mod tests {
 				segment_id: 25,
 				page_id: 24,
 				offset: 12,
-				data: Cow::Owned(vec![1, 2, 3, 4]),
+				from: Cow::Owned(vec![1, 2, 3, 4]),
+				to: Cow::Owned(vec![4, 3, 2, 1]),
 			}),
 		})
 		.unwrap();
@@ -409,7 +432,7 @@ mod tests {
 		let expected = [
 			ItemHeader {
 				kind: WalItemKind::Write,
-				item_length: 42,
+				item_length: 46,
 				transaction_id: 69,
 				sequence_num: 420,
 			}
@@ -419,11 +442,12 @@ mod tests {
 				page_id: 24,
 				offset: 12,
 				write_length: 4,
-				crc: 0x3991,
+				crc: 0x6f22,
 			}
 			.to_bytes(),
 			&[1, 2, 3, 4],
-			ItemFooter { item_length: 42 }.to_bytes(),
+			&[4, 3, 2, 1],
+			ItemFooter { item_length: 46 }.to_bytes(),
 		]
 		.concat();
 
@@ -471,7 +495,8 @@ mod tests {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
-				data: vec![1, 2, 3, 4].into(),
+				from: vec![1, 2, 3, 4].into(),
+				to: vec![4, 3, 2, 1].into(),
 			}),
 		})
 		.unwrap();
@@ -482,7 +507,8 @@ mod tests {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
-				data: vec![5, 6, 7, 8].into(),
+				from: vec![5, 6, 7, 8].into(),
+				to: vec![8, 7, 6, 5].into(),
 			}),
 		})
 		.unwrap();
@@ -518,7 +544,8 @@ mod tests {
 					segment_id: 69,
 					page_id: 420,
 					offset: 25,
-					data: vec![1, 2, 3, 4].into(),
+					from: vec![1, 2, 3, 4].into(),
+					to: vec![4, 3, 2, 1].into(),
 				}),
 			})
 		);
@@ -531,7 +558,8 @@ mod tests {
 					segment_id: 123,
 					page_id: 456,
 					offset: 24,
-					data: vec![5, 6, 7, 8].into(),
+					from: vec![5, 6, 7, 8].into(),
+					to: vec![8, 7, 6, 5].into(),
 				}),
 			})
 		);
@@ -565,7 +593,8 @@ mod tests {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
-				data: vec![1, 2, 3, 4].into(),
+				from: vec![1, 2, 3, 4].into(),
+				to: vec![4, 3, 2, 1].into(),
 			}),
 		})
 		.unwrap();
@@ -576,7 +605,8 @@ mod tests {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
-				data: vec![5, 6, 7, 8].into(),
+				from: vec![5, 6, 7, 8].into(),
+				to: vec![8, 7, 6, 5].into(),
 			}),
 		})
 		.unwrap();
@@ -628,7 +658,8 @@ mod tests {
 					segment_id: 123,
 					page_id: 456,
 					offset: 24,
-					data: vec![5, 6, 7, 8].into(),
+					from: vec![5, 6, 7, 8].into(),
+					to: vec![8, 7, 6, 5].into(),
 				}),
 			})
 		);
@@ -641,7 +672,8 @@ mod tests {
 					segment_id: 69,
 					page_id: 420,
 					offset: 25,
-					data: vec![1, 2, 3, 4].into(),
+					from: vec![1, 2, 3, 4].into(),
+					to: vec![4, 3, 2, 1].into(),
 				}),
 			})
 		);
@@ -659,7 +691,8 @@ mod tests {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
-				data: vec![1, 2, 3, 4].into(),
+				from: vec![1, 2, 3, 4].into(),
+				to: vec![4, 3, 2, 1].into(),
 			}),
 		})
 		.unwrap();
@@ -670,7 +703,8 @@ mod tests {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
-				data: vec![5, 6, 7, 8].into(),
+				from: vec![5, 6, 7, 8].into(),
+				to: vec![8, 7, 6, 5].into(),
 			}),
 		})
 		.unwrap();
@@ -743,7 +777,8 @@ mod tests {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
-				data: vec![1, 2, 3, 4].into(),
+				from: vec![1, 2, 3, 4].into(),
+				to: vec![4, 3, 2, 1].into(),
 			}),
 		})
 		.unwrap();
@@ -754,7 +789,8 @@ mod tests {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
-				data: vec![5, 6, 7, 8].into(),
+				from: vec![5, 6, 7, 8].into(),
+				to: vec![8, 7, 6, 5].into(),
 			}),
 		})
 		.unwrap();

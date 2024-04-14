@@ -4,3 +4,4 @@
 
 mod files;
 mod utils;
+mod wal;
