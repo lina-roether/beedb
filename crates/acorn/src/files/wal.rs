@@ -13,35 +13,41 @@ use super::{FileError, FileType, GenericHeader, GenericHeaderInit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ZeroCopy)]
 #[repr(u8)]
-pub(crate) enum WalItemKind {
+pub(crate) enum ItemKind {
 	Write = 0,
 	Commit = 1,
 	Undo = 2,
+	Fuzzy = 3,
+	Revert = 4,
+	Checkpoint = 5,
 }
+
+const FLAG_BEGIN_TRANSACTION: u8 = 0b00000001;
 
 #[derive(Debug, ZeroCopy)]
 #[repr(C)]
 struct ItemHeader {
-	kind: WalItemKind,
-	item_length: u16,
+	kind: ItemKind,
+	flags: u8,
+	body_length: u16,
+	crc: u32,
+	prev_item: u32,
+}
+
+#[derive(Debug, ZeroCopy)]
+#[repr(C)]
+struct TransactionData {
 	transaction_id: u64,
-	sequence_num: u64,
+	prev_transaction_item: u32,
 }
 
 #[derive(Debug, ZeroCopy)]
 #[repr(C)]
-struct ItemFooter {
-	item_length: u16,
-}
-
-#[derive(Debug, ZeroCopy)]
-#[repr(C)]
-struct WriteItemHeader {
+struct WriteDataHeader {
 	segment_id: u32,
 	page_id: u16,
 	offset: u16,
 	write_length: u16,
-	crc: u16,
 }
 
 pub(crate) struct WalFile<F: Seek + Read + Write> {
@@ -99,6 +105,7 @@ pub(crate) struct WalWriteItemData<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WalItemData<'a> {
+	Begin,
 	Write(WalWriteItemData<'a>),
 	Commit,
 	Undo,
@@ -115,7 +122,7 @@ pub(crate) struct WalItem<'a> {
 pub(crate) struct WalItemMeta {
 	pub transaction_id: u64,
 	pub sequence_num: u64,
-	pub kind: WalItemKind,
+	pub kind: ItemKind,
 }
 
 #[automock(
@@ -141,15 +148,16 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 		self.buffer.clear();
 
-		let kind: WalItemKind = match &item.data {
-			WalItemData::Write(..) => WalItemKind::Write,
-			WalItemData::Commit => WalItemKind::Commit,
-			WalItemData::Undo => WalItemKind::Undo,
+		let kind: ItemKind = match &item.data {
+			WalItemData::Begin => ItemKind::Begin,
+			WalItemData::Write(..) => ItemKind::Write,
+			WalItemData::Commit => ItemKind::Commit,
+			WalItemData::Undo => ItemKind::Undo,
 		};
 
 		let body_size: usize = match &item.data {
 			WalItemData::Write(write_data) => {
-				size_of::<WriteItemHeader>() + 2 * write_data.to.len()
+				size_of::<WriteDataHeader>() + 2 * write_data.to.len()
 			}
 			_ => 0,
 		};
@@ -169,7 +177,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 			let crc = write_item_crc(&write_data.from, &write_data.to);
 
-			let write_item_header = WriteItemHeader {
+			let write_item_header = WriteDataHeader {
 				segment_id: write_data.segment_id,
 				page_id: write_data.page_id,
 				offset: write_data.offset,
@@ -238,7 +246,7 @@ impl<'a, F: Seek + Read> WalCursor<'a, F> {
 	}
 
 	fn read_write_item_data(&mut self) -> Result<WalWriteItemData<'static>, FileError> {
-		let write_header_ref: Ref<WriteItemHeader> =
+		let write_header_ref: Ref<WriteDataHeader> =
 			read_exact_from(&mut self.buffer, &mut self.file)?;
 		let write_header = self.buffer.load(write_header_ref)?;
 
@@ -292,9 +300,10 @@ impl<'a, F: Seek + Read> WalCursorApi for WalCursor<'a, F> {
 		let sequence_num = header.sequence_num;
 
 		let data = match header.kind {
-			WalItemKind::Commit => WalItemData::Commit,
-			WalItemKind::Undo => WalItemData::Undo,
-			WalItemKind::Write => WalItemData::Write(self.read_write_item_data()?),
+			ItemKind::Begin => WalItemData::Begin,
+			ItemKind::Commit => WalItemData::Commit,
+			ItemKind::Undo => WalItemData::Undo,
+			ItemKind::Write => WalItemData::Write(self.read_write_item_data()?),
 		};
 
 		self.file
@@ -431,13 +440,13 @@ mod tests {
 		// then
 		let expected = [
 			ItemHeader {
-				kind: WalItemKind::Write,
+				kind: ItemKind::Write,
 				item_length: 46,
 				transaction_id: 69,
 				sequence_num: 420,
 			}
 			.to_bytes(),
-			WriteItemHeader {
+			WriteDataHeader {
 				segment_id: 25,
 				page_id: 24,
 				offset: 12,
@@ -471,7 +480,7 @@ mod tests {
 		// then
 		let expected = [
 			ItemHeader {
-				kind: WalItemKind::Commit,
+				kind: ItemKind::Commit,
 				item_length: 26,
 				transaction_id: 69,
 				sequence_num: 420,
@@ -734,7 +743,7 @@ mod tests {
 		assert_eq!(
 			item_1,
 			Some(WalItemMeta {
-				kind: WalItemKind::Write,
+				kind: ItemKind::Write,
 				transaction_id: 0,
 				sequence_num: 0,
 			})
@@ -742,7 +751,7 @@ mod tests {
 		assert_eq!(
 			item_2,
 			Some(WalItemMeta {
-				kind: WalItemKind::Write,
+				kind: ItemKind::Write,
 				transaction_id: 1,
 				sequence_num: 1,
 			})
@@ -750,7 +759,7 @@ mod tests {
 		assert_eq!(
 			item_3,
 			Some(WalItemMeta {
-				kind: WalItemKind::Undo,
+				kind: ItemKind::Undo,
 				transaction_id: 1,
 				sequence_num: 2,
 			})
@@ -758,7 +767,7 @@ mod tests {
 		assert_eq!(
 			item_4,
 			Some(WalItemMeta {
-				kind: WalItemKind::Commit,
+				kind: ItemKind::Commit,
 				transaction_id: 0,
 				sequence_num: 3,
 			})
@@ -820,7 +829,7 @@ mod tests {
 		assert_eq!(
 			item_1,
 			Some(WalItemMeta {
-				kind: WalItemKind::Commit,
+				kind: ItemKind::Commit,
 				transaction_id: 0,
 				sequence_num: 3,
 			})
@@ -828,7 +837,7 @@ mod tests {
 		assert_eq!(
 			item_2,
 			Some(WalItemMeta {
-				kind: WalItemKind::Undo,
+				kind: ItemKind::Undo,
 				transaction_id: 1,
 				sequence_num: 2,
 			})
@@ -836,7 +845,7 @@ mod tests {
 		assert_eq!(
 			item_3,
 			Some(WalItemMeta {
-				kind: WalItemKind::Write,
+				kind: ItemKind::Write,
 				transaction_id: 1,
 				sequence_num: 1,
 			})
@@ -844,7 +853,7 @@ mod tests {
 		assert_eq!(
 			item_4,
 			Some(WalItemMeta {
-				kind: WalItemKind::Write,
+				kind: ItemKind::Write,
 				transaction_id: 0,
 				sequence_num: 0,
 			})
