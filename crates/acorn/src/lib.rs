@@ -3,5 +3,6 @@
 #![allow(dead_code)]
 
 mod files;
+mod model;
 mod utils;
 mod wal;

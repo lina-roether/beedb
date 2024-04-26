@@ -1,5 +1,6 @@
 use std::{
 	borrow::{BorrowMut, Cow},
+	collections::HashMap,
 	io::{self, BufReader, Read, Seek, SeekFrom, Write},
 	mem::size_of,
 };
@@ -7,7 +8,7 @@ use std::{
 use mockall::automock;
 use musli_zerocopy::{OwnedBuf, Ref, ZeroCopy};
 
-use crate::{files::CRC16, utils::KIB};
+use crate::{files::CRC16, model::PageId, utils::KIB};
 
 use super::{FileError, FileType, GenericHeader, GenericHeaderInit};
 
@@ -16,10 +17,9 @@ use super::{FileError, FileType, GenericHeader, GenericHeaderInit};
 pub(crate) enum ItemKind {
 	Write = 0,
 	Commit = 1,
-	Undo = 2,
-	Fuzzy = 3,
-	Revert = 4,
-	Checkpoint = 5,
+	Fuzzy = 4,
+	Revert = 5,
+	Checkpoint = 6,
 }
 
 const FLAG_BEGIN_TRANSACTION: u8 = 0b00000001;
@@ -44,10 +44,16 @@ struct TransactionData {
 #[derive(Debug, ZeroCopy)]
 #[repr(C)]
 struct WriteDataHeader {
-	segment_id: u32,
-	page_id: u16,
+	page_id: PageId,
 	offset: u16,
 	write_length: u16,
+}
+
+#[derive(Debug, ZeroCopy)]
+#[repr(C)]
+struct CheckpointDataHeader {
+	num_transactions: u64,
+	num_dirty_pages: u64,
 }
 
 pub(crate) struct WalFile<F: Seek + Read + Write> {
@@ -95,27 +101,46 @@ impl<F: Seek + Read + Write> WalFile<F> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WalWriteItemData<'a> {
-	pub segment_id: u32,
-	pub page_id: u16,
+pub(crate) struct BasicItemData {
+	pub transaction_id: u64,
+	pub prev_transaction_item: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteItemData<'a> {
+	pub transaction_id: u64,
+	pub prev_transaction_item: u32,
+	pub page_id: PageId,
 	pub offset: u16,
 	pub from: Cow<'a, [u8]>,
 	pub to: Cow<'a, [u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WalItemData<'a> {
-	Begin,
-	Write(WalWriteItemData<'a>),
-	Commit,
-	Undo,
+pub(crate) struct RevertItemData<'a> {
+	pub transaction_id: u64,
+	pub prev_transaction_item: u32,
+	pub page_id: PageId,
+	pub offset: u16,
+	pub to: Cow<'a, [u8]>,
+}
+
+pub(crate) struct CheckpointItemData<'a> {
+	pub dirty_pages: Cow<'a, HashMap<PageId, u64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ItemData<'a> {
+	Write(WriteItemData<'a>),
+	Commit(BasicItemData),
+	Fuzzy,
+	Revert(RevertItemData<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalItem<'a> {
-	pub transaction_id: u64,
 	pub sequence_num: u64,
-	pub data: WalItemData<'a>,
+	pub data: ItemData<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,18 +174,18 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		self.buffer.clear();
 
 		let kind: ItemKind = match &item.data {
-			WalItemData::Begin => ItemKind::Begin,
-			WalItemData::Write(..) => ItemKind::Write,
-			WalItemData::Commit => ItemKind::Commit,
-			WalItemData::Undo => ItemKind::Undo,
+			ItemData::Write(..) => ItemKind::Write,
+			ItemData::Commit(..) => ItemKind::Commit,
+			ItemData::Fuzzy => ItemKind::Fuzzy,
+			ItemData::Revert(..) => ItemKind::Revert,
 		};
 
 		let body_size: usize = match &item.data {
-			WalItemData::Write(write_data) => {
-				size_of::<WriteDataHeader>() + 2 * write_data.to.len()
-			}
+			ItemData::Write(write_data) => size_of::<WriteDataHeader>() + 2 * write_data.to.len(),
 			_ => 0,
 		};
+
+		todo!();
 		let item_length: u16 = (size_of::<ItemHeader>() + body_size + size_of::<ItemFooter>())
 			.try_into()
 			.expect("WAL item length must be a 16-bit number!");
@@ -172,7 +197,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 			sequence_num: item.sequence_num,
 		});
 
-		if let WalItemData::Write(write_data) = &item.data {
+		if let ItemData::Write(write_data) = &item.data {
 			assert_eq!(write_data.from.len(), write_data.to.len());
 
 			let crc = write_item_crc(&write_data.from, &write_data.to);
@@ -245,7 +270,7 @@ impl<'a, F: Seek + Read> WalCursor<'a, F> {
 		Ok(true)
 	}
 
-	fn read_write_item_data(&mut self) -> Result<WalWriteItemData<'static>, FileError> {
+	fn read_write_item_data(&mut self) -> Result<WriteItemData<'static>, FileError> {
 		let write_header_ref: Ref<WriteDataHeader> =
 			read_exact_from(&mut self.buffer, &mut self.file)?;
 		let write_header = self.buffer.load(write_header_ref)?;
@@ -266,7 +291,7 @@ impl<'a, F: Seek + Read> WalCursor<'a, F> {
 			return Err(FileError::ChecksumMismatch);
 		}
 
-		Ok(WalWriteItemData {
+		Ok(WriteItemData {
 			segment_id: write_header.segment_id,
 			page_id: write_header.page_id,
 			offset: write_header.offset,
@@ -300,10 +325,10 @@ impl<'a, F: Seek + Read> WalCursorApi for WalCursor<'a, F> {
 		let sequence_num = header.sequence_num;
 
 		let data = match header.kind {
-			ItemKind::Begin => WalItemData::Begin,
-			ItemKind::Commit => WalItemData::Commit,
-			ItemKind::Undo => WalItemData::Undo,
-			ItemKind::Write => WalItemData::Write(self.read_write_item_data()?),
+			ItemKind::Begin => ItemData::Begin,
+			ItemKind::Commit => ItemData::Commit,
+			ItemKind::Undo => ItemData::Undo,
+			ItemKind::Write => ItemData::Write(self.read_write_item_data()?),
 		};
 
 		self.file
@@ -351,13 +376,6 @@ impl<'a, F: Seek + Read> WalCursorApi for WalCursor<'a, F> {
 		self.seek_to_prev()?;
 		Ok(meta)
 	}
-}
-
-fn write_item_crc(from: &[u8], to: &[u8]) -> u16 {
-	let mut digest = CRC16.digest();
-	digest.update(from);
-	digest.update(to);
-	digest.finalize()
 }
 
 fn read_from<T: ZeroCopy>(
@@ -427,7 +445,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 69,
 			sequence_num: 420,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 25,
 				page_id: 24,
 				offset: 12,
@@ -473,7 +491,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 69,
 			sequence_num: 420,
-			data: WalItemData::Commit,
+			data: ItemData::Commit,
 		})
 		.unwrap();
 
@@ -500,7 +518,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 0,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
@@ -512,7 +530,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 1,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
@@ -524,13 +542,13 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 2,
-			data: WalItemData::Undo,
+			data: ItemData::Undo,
 		})
 		.unwrap();
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 3,
-			data: WalItemData::Commit,
+			data: ItemData::Commit,
 		})
 		.unwrap();
 
@@ -549,7 +567,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 0,
 				sequence_num: 0,
-				data: WalItemData::Write(WalWriteItemData {
+				data: ItemData::Write(WriteItemData {
 					segment_id: 69,
 					page_id: 420,
 					offset: 25,
@@ -563,7 +581,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 1,
 				sequence_num: 1,
-				data: WalItemData::Write(WalWriteItemData {
+				data: ItemData::Write(WriteItemData {
 					segment_id: 123,
 					page_id: 456,
 					offset: 24,
@@ -577,7 +595,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 1,
 				sequence_num: 2,
-				data: WalItemData::Undo,
+				data: ItemData::Undo,
 			})
 		);
 		assert_eq!(
@@ -585,7 +603,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 0,
 				sequence_num: 3,
-				data: WalItemData::Commit,
+				data: ItemData::Commit,
 			})
 		);
 		assert_eq!(item_5, None);
@@ -598,7 +616,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 0,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
@@ -610,7 +628,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 1,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
@@ -622,13 +640,13 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 2,
-			data: WalItemData::Undo,
+			data: ItemData::Undo,
 		})
 		.unwrap();
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 3,
-			data: WalItemData::Commit,
+			data: ItemData::Commit,
 		})
 		.unwrap();
 
@@ -647,7 +665,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 0,
 				sequence_num: 3,
-				data: WalItemData::Commit,
+				data: ItemData::Commit,
 			})
 		);
 		assert_eq!(
@@ -655,7 +673,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 1,
 				sequence_num: 2,
-				data: WalItemData::Undo,
+				data: ItemData::Undo,
 			})
 		);
 		assert_eq!(
@@ -663,7 +681,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 1,
 				sequence_num: 1,
-				data: WalItemData::Write(WalWriteItemData {
+				data: ItemData::Write(WriteItemData {
 					segment_id: 123,
 					page_id: 456,
 					offset: 24,
@@ -677,7 +695,7 @@ mod tests {
 			Some(WalItem {
 				transaction_id: 0,
 				sequence_num: 0,
-				data: WalItemData::Write(WalWriteItemData {
+				data: ItemData::Write(WriteItemData {
 					segment_id: 69,
 					page_id: 420,
 					offset: 25,
@@ -696,7 +714,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 0,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
@@ -708,7 +726,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 1,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
@@ -720,13 +738,13 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 2,
-			data: WalItemData::Undo,
+			data: ItemData::Undo,
 		})
 		.unwrap();
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 3,
-			data: WalItemData::Commit,
+			data: ItemData::Commit,
 		})
 		.unwrap();
 
@@ -782,7 +800,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 0,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 69,
 				page_id: 420,
 				offset: 25,
@@ -794,7 +812,7 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 1,
-			data: WalItemData::Write(WalWriteItemData {
+			data: ItemData::Write(WriteItemData {
 				segment_id: 123,
 				page_id: 456,
 				offset: 24,
@@ -806,13 +824,13 @@ mod tests {
 		wal.push_item(WalItem {
 			transaction_id: 1,
 			sequence_num: 2,
-			data: WalItemData::Undo,
+			data: ItemData::Undo,
 		})
 		.unwrap();
 		wal.push_item(WalItem {
 			transaction_id: 0,
 			sequence_num: 3,
-			data: WalItemData::Commit,
+			data: ItemData::Commit,
 		})
 		.unwrap();
 
