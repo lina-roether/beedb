@@ -1,13 +1,13 @@
 use std::{
 	borrow::Cow,
-	io::{BufReader, Read, Seek, SeekFrom, Write},
+	io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write},
 	num::NonZeroU32,
 };
 
 use mockall::automock;
 use serde::{Deserialize, Serialize};
 
-use crate::model::PageId;
+use crate::{files::CRC32, model::PageId};
 
 use super::{FileError, FileTypeRepr, GenericHeaderInit, GenericHeaderRepr};
 
@@ -29,6 +29,7 @@ struct ItemHeaderRepr {
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU32>,
+	sequence_num: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -134,6 +135,67 @@ impl<F: Read + Seek> ItemReader<F> {
 			reader: BufReader::new(file),
 		}
 	}
+
+	fn read_transaction_data(mut body: impl Read, flags: u8) -> Result<TransactionData, FileError> {
+		let begins_transaction = (flags & FLAG_BEGIN_TRANSACTION) != 0;
+		let transaction_data: TransactionDataRepr = bincode::deserialize_from(&mut body)?;
+
+		Ok(TransactionData {
+			transaction_id: transaction_data.transaction_id,
+			prev_transaction_item: transaction_data.prev_transaction_item,
+			begins_transaction,
+		})
+	}
+
+	fn read_write_data(mut body: impl Read, flags: u8) -> Result<WriteData<'static>, FileError> {
+		let transaction_data = Self::read_transaction_data(&mut body, flags)?;
+
+		let write_header: WriteDataHeaderRepr = bincode::deserialize_from(&mut body)?;
+		let mut from: Vec<u8> = vec![0; write_header.write_length.into()];
+		body.read_exact(&mut from)?;
+		let mut to: Vec<u8> = vec![0; write_header.write_length.into()];
+		body.read_exact(&mut to)?;
+
+		Ok(WriteData {
+			transaction_data,
+			page_id: write_header.page_id,
+			offset: write_header.offset,
+			from: Cow::Owned(from),
+			to: Cow::Owned(to),
+		})
+	}
+
+	fn read_item(&mut self) -> Result<Option<Item<'static>>, FileError> {
+		if !self.reader.has_data_left()? {
+			return Ok(None);
+		}
+		let header: ItemHeaderRepr = bincode::deserialize_from(&mut self.reader)?;
+		let mut body_buf: Box<[u8]> = vec![0; header.body_length.into()].into();
+		self.reader.read_exact(&mut body_buf)?;
+
+		if CRC32.checksum(&body_buf) != header.crc {
+			return Err(FileError::ChecksumMismatch);
+		}
+
+		let mut body_cursor = Cursor::new(body_buf);
+		let data = match header.kind {
+			ItemKindRepr::Write => {
+				ItemData::Write(Self::read_write_data(&mut body_cursor, header.flags)?)
+			}
+			ItemKindRepr::Commit => {
+				ItemData::Commit(Self::read_transaction_data(&mut body_cursor, header.flags)?)
+			}
+			ItemKindRepr::Undo => {
+				ItemData::Undo(Self::read_transaction_data(&mut body_cursor, header.flags)?)
+			}
+			ItemKindRepr::Checkpoint => ItemData::Checkpoint,
+		};
+
+		Ok(Some(Item {
+			data,
+			sequence_num: header.sequence_num,
+		}))
+	}
 }
 
 struct ReadItems<F: Read + Seek> {
@@ -145,5 +207,13 @@ impl<F: Read + Seek> ReadItems<F> {
 		Self {
 			reader: ItemReader::new(file),
 		}
+	}
+}
+
+impl<F: Read + Seek> Iterator for ReadItems<F> {
+	type Item = Result<Item<'static>, FileError>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		self.reader.read_item().transpose()
 	}
 }

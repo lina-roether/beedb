@@ -6,7 +6,9 @@ use thiserror::Error;
 
 pub(crate) mod wal;
 
-pub(super) const CRC16: Crc<u16> = Crc::<u16>::new(&crc::CRC_16_ARC);
+// TODO: there are tradeoffs here. Perhaps I should look more into selecting an
+// algorithm.
+pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
 
 #[derive(Debug, Error)]
 pub(crate) enum FileError {
