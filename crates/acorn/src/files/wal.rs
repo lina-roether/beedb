@@ -5,13 +5,13 @@ use std::{
 };
 
 use mockall::automock;
-use musli_zerocopy::{OwnedBuf, ZeroCopy};
+use serde::{Deserialize, Serialize};
 
-use crate::{model::PageId, utils::KIB};
+use crate::model::PageId;
 
-use super::{FileError, FileType, GenericHeader, GenericHeaderInit};
+use super::{FileError, FileTypeRepr, GenericHeaderInit, GenericHeaderRepr};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ZeroCopy)]
+#[derive(Debug, Serialize, Deserialize)]
 #[repr(u8)]
 enum ItemKindRepr {
 	Write = 0,
@@ -22,8 +22,7 @@ enum ItemKindRepr {
 
 const FLAG_BEGIN_TRANSACTION: u8 = 0b00000001;
 
-#[derive(Debug, ZeroCopy)]
-#[repr(C)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ItemHeaderRepr {
 	kind: ItemKindRepr,
 	flags: u8,
@@ -32,15 +31,13 @@ struct ItemHeaderRepr {
 	prev_item: Option<NonZeroU32>,
 }
 
-#[derive(Debug, ZeroCopy)]
-#[repr(C)]
+#[derive(Debug, Serialize, Deserialize)]
 struct TransactionDataRepr {
 	transaction_id: u64,
 	prev_transaction_item: u32,
 }
 
-#[derive(Debug, ZeroCopy)]
-#[repr(C)]
+#[derive(Debug, Serialize, Deserialize)]
 struct WriteDataHeaderRepr {
 	page_id: PageId,
 	offset: u16,
@@ -50,30 +47,24 @@ struct WriteDataHeaderRepr {
 pub(crate) struct WalFile<F: Seek + Read + Write> {
 	body_start: u64,
 	file: F,
-	buffer: OwnedBuf,
 }
 
 impl<F: Seek + Read + Write> WalFile<F> {
 	pub fn create(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
-		let mut meta = GenericHeader::new(GenericHeaderInit {
-			file_type: FileType::Wal,
+		let meta = GenericHeaderRepr::new(GenericHeaderInit {
+			file_type: FileTypeRepr::Wal,
 			header_size: 0,
 		});
-		file.write_all(meta.to_bytes())?;
-
+		bincode::serialize_into(&mut file, &meta)?;
 		Ok(Self::new(file, meta.content_offset.into()))
 	}
 
 	pub fn open(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
-		let mut header_buf = OwnedBuf::with_alignment::<GenericHeader>();
-		header_buf.store_uninit::<GenericHeader>();
-		file.read_exact(header_buf.as_mut_slice())?;
-
-		let header: &GenericHeader = header_buf.load_at(0)?;
+		let header: GenericHeaderRepr = bincode::deserialize_from(&mut file)?;
 		header.validate()?;
-		if header.file_type != FileType::Wal {
+		if header.file_type != FileTypeRepr::Wal {
 			return Err(FileError::WrongFileType(header.file_type));
 		}
 
@@ -81,11 +72,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 	}
 
 	fn new(file: F, body_start: u64) -> Self {
-		Self {
-			body_start,
-			file,
-			buffer: OwnedBuf::with_capacity(8 * KIB),
-		}
+		Self { body_start, file }
 	}
 }
 

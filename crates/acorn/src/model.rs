@@ -1,6 +1,6 @@
-use musli_zerocopy::ZeroCopy;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, ZeroCopy, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct PageId {
 	pub segment_num: u32,

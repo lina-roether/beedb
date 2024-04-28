@@ -1,7 +1,7 @@
 use std::{io, mem::size_of};
 
 use crc::Crc;
-use musli_zerocopy::ZeroCopy;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub(crate) mod wal;
@@ -17,10 +17,10 @@ pub(crate) enum FileError {
 	ByteOrderMismatch,
 
 	#[error("The file is corrupted: {0}")]
-	Corrupted(#[from] musli_zerocopy::Error),
+	Corrupted(#[from] bincode::Error),
 
 	#[error("Unexpected file type {0:?}")]
-	WrongFileType(FileType),
+	WrongFileType(FileTypeRepr),
 
 	#[error("Unexpected end of file")]
 	UnexpectedEof,
@@ -32,43 +32,41 @@ pub(crate) enum FileError {
 	Io(#[from] io::Error),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ZeroCopy)]
-#[repr(u8)]
-pub(super) enum FileType {
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) enum FileTypeRepr {
 	Wal = 0,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ZeroCopy)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(u8)]
-enum ByteOrder {
+enum ByteOrderRepr {
 	BigEndian = 0,
 	LittleEndian = 1,
 }
 
-#[derive(Debug, ZeroCopy)]
-#[repr(C)]
-pub(super) struct GenericHeader {
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct GenericHeaderRepr {
 	magic: [u8; 4],
-	byte_order: ByteOrder,
-	file_type: FileType,
+	byte_order: ByteOrderRepr,
+	file_type: FileTypeRepr,
 	content_offset: u16,
 }
 
 const MAGIC: [u8; 4] = *b"ACRN";
 
 #[cfg(target_endian = "big")]
-const NATIVE_BYTE_ORDER: ByteOrder = ByteOrder::BigEndian;
+const NATIVE_BYTE_ORDER: ByteOrder = ByteOrderRepr::BigEndian;
 
 #[cfg(target_endian = "little")]
-const NATIVE_BYTE_ORDER: ByteOrder = ByteOrder::LittleEndian;
+const NATIVE_BYTE_ORDER: ByteOrderRepr = ByteOrderRepr::LittleEndian;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct GenericHeaderInit {
-	file_type: FileType,
+	file_type: FileTypeRepr,
 	header_size: u16,
 }
 
-impl GenericHeader {
+impl GenericHeaderRepr {
 	pub fn new(
 		GenericHeaderInit {
 			file_type,
@@ -100,10 +98,10 @@ mod tests {
 
 	#[test]
 	fn verify_header() {
-		let header = GenericHeader {
+		let header = GenericHeaderRepr {
 			magic: *b"ACRN",
 			byte_order: NATIVE_BYTE_ORDER,
-			file_type: FileType::Wal,
+			file_type: FileTypeRepr::Wal,
 			content_offset: 69,
 		};
 		assert!(header.validate().is_ok());
@@ -111,10 +109,10 @@ mod tests {
 
 	#[test]
 	fn try_verify_header_with_missing_magic() {
-		let header = GenericHeader {
+		let header = GenericHeaderRepr {
 			magic: *b"KEKW",
 			byte_order: NATIVE_BYTE_ORDER,
-			file_type: FileType::Wal,
+			file_type: FileTypeRepr::Wal,
 			content_offset: 69,
 		};
 		let err = header.validate().unwrap_err();
@@ -123,13 +121,13 @@ mod tests {
 
 	#[test]
 	fn try_verify_header_with_byte_order_mismatch() {
-		let header = GenericHeader {
+		let header = GenericHeaderRepr {
 			magic: *b"ACRN",
 			byte_order: match NATIVE_BYTE_ORDER {
-				ByteOrder::BigEndian => ByteOrder::LittleEndian,
-				ByteOrder::LittleEndian => ByteOrder::BigEndian,
+				ByteOrderRepr::BigEndian => ByteOrderRepr::LittleEndian,
+				ByteOrderRepr::LittleEndian => ByteOrderRepr::BigEndian,
 			},
-			file_type: FileType::Wal,
+			file_type: FileTypeRepr::Wal,
 			content_offset: 69,
 		};
 		let err = header.validate().unwrap_err();
