@@ -109,30 +109,32 @@ pub(crate) struct Item<'a> {
 
 #[automock(
     type ReadItems<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
-    type RetraceTransaction<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
+    type ReadItemsReverse<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
 )]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait WalFileApi {
 	type ReadItems<'a>: Iterator<Item = Result<Item<'static>, FileError>> + 'a
 	where
 		Self: 'a;
-	type RetraceTransaction<'a>: Iterator<Item = Result<Item<'static>, FileError>> + 'a
+	type ReadItemsReverse<'a>: Iterator<Item = Result<Item<'static>, FileError>> + 'a
 	where
 		Self: 'a;
 
 	fn push_item<'a>(&mut self, item: Item<'a>) -> Result<(), FileError>;
 	fn read_items<'a>(&'a mut self) -> Self::ReadItems<'a>;
-	fn retrace_transaction<'a>(&'a mut self) -> Self::RetraceTransaction<'a>;
+	fn read_items_reverse<'a>(&'a mut self) -> Self::ReadItemsReverse<'a>;
 }
 
 struct ItemReader<F: Read + Seek> {
 	reader: BufReader<F>,
+	prev_item: Option<NonZeroU32>,
 }
 
 impl<F: Read + Seek> ItemReader<F> {
-	fn new(file: F) -> Self {
+	fn new(file: F, prev_item: Option<NonZeroU32>) -> Self {
 		Self {
 			reader: BufReader::new(file),
+			prev_item,
 		}
 	}
 
@@ -172,6 +174,7 @@ impl<F: Read + Seek> ItemReader<F> {
 		let header: ItemHeaderRepr = bincode::deserialize_from(&mut self.reader)?;
 		let mut body_buf: Box<[u8]> = vec![0; header.body_length.into()].into();
 		self.reader.read_exact(&mut body_buf)?;
+		self.prev_item = header.prev_item;
 
 		if CRC32.checksum(&body_buf) != header.crc {
 			return Err(FileError::ChecksumMismatch);
@@ -196,6 +199,14 @@ impl<F: Read + Seek> ItemReader<F> {
 			sequence_num: header.sequence_num,
 		}))
 	}
+
+	fn read_prev_item(&mut self) -> Result<Option<Item<'static>>, FileError> {
+		let Some(prev_item) = self.prev_item else {
+			return Ok(None);
+		};
+		self.reader.seek(SeekFrom::Start(prev_item.get().into()))?;
+		self.read_item()
+	}
 }
 
 struct ReadItems<F: Read + Seek> {
@@ -203,10 +214,11 @@ struct ReadItems<F: Read + Seek> {
 }
 
 impl<F: Read + Seek> ReadItems<F> {
-	fn new(file: F) -> Self {
-		Self {
-			reader: ItemReader::new(file),
-		}
+	fn new(mut file: F) -> Result<Self, FileError> {
+		file.seek(SeekFrom::Start(0))?;
+		Ok(Self {
+			reader: ItemReader::new(file, None),
+		})
 	}
 }
 
@@ -215,5 +227,26 @@ impl<F: Read + Seek> Iterator for ReadItems<F> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.reader.read_item().transpose()
+	}
+}
+
+struct ReadItemsReverse<F: Read + Seek> {
+	reader: ItemReader<F>,
+}
+
+impl<F: Read + Seek> ReadItemsReverse<F> {
+	fn new(mut file: F, prev_item: Option<NonZeroU32>) -> Result<Self, FileError> {
+		file.seek(SeekFrom::End(0))?;
+		Ok(Self {
+			reader: ItemReader::new(file, prev_item),
+		})
+	}
+}
+
+impl<F: Read + Seek> Iterator for ReadItemsReverse<F> {
+	type Item = Result<Item<'static>, FileError>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		self.reader.read_prev_item().transpose()
 	}
 }
