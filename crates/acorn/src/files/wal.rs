@@ -1,6 +1,7 @@
 use std::{
 	borrow::Cow,
-	io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write},
+	io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+	mem::size_of,
 	num::NonZeroU32,
 };
 
@@ -33,6 +34,11 @@ struct ItemHeaderRepr {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct ItemFooterRepr {
+	item_start: NonZeroU32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct TransactionDataRepr {
 	transaction_id: u64,
 	prev_transaction_item: u32,
@@ -47,6 +53,7 @@ struct WriteDataHeaderRepr {
 
 pub(crate) struct WalFile<F: Seek + Read + Write> {
 	body_start: u64,
+	prev_item: Option<NonZeroU32>,
 	file: F,
 }
 
@@ -58,7 +65,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			header_size: 0,
 		});
 		bincode::serialize_into(&mut file, &meta)?;
-		Ok(Self::new(file, meta.content_offset.into()))
+		Self::new(file, meta.content_offset.into())
 	}
 
 	pub fn open(mut file: F) -> Result<Self, FileError> {
@@ -69,11 +76,59 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			return Err(FileError::WrongFileType(header.file_type));
 		}
 
-		Ok(Self::new(file, header.content_offset.into()))
+		Self::new(file, header.content_offset.into())
 	}
 
-	fn new(file: F, body_start: u64) -> Self {
-		Self { body_start, file }
+	fn new(mut file: F, body_start: u64) -> Result<Self, FileError> {
+		// FIXME: this might break, because the size of the bincode representation is
+		// not guaranteed to match
+		let end_pos = file.seek(SeekFrom::End(-(size_of::<ItemFooterRepr>() as i64)))?;
+		let prev_item = if end_pos != body_start {
+			let footer: ItemFooterRepr = bincode::deserialize_from(&mut file)?;
+			Some(footer.item_start)
+		} else {
+			None
+		};
+		Ok(Self {
+			body_start,
+			file,
+			prev_item,
+		})
+	}
+
+	fn write_transaction_data(
+		mut writer: impl Write,
+		data: TransactionData,
+	) -> Result<(), FileError> {
+		bincode::serialize_into(
+			&mut writer,
+			&TransactionDataRepr {
+				transaction_id: data.transaction_id,
+				prev_transaction_item: data.prev_transaction_item,
+			},
+		)?;
+		Ok(())
+	}
+
+	fn write_write_data(mut writer: impl Write, data: WriteData) -> Result<(), FileError> {
+		assert_eq!(data.from.len(), data.to.len());
+
+		Self::write_transaction_data(&mut writer, data.transaction_data)?;
+		bincode::serialize_into(
+			&mut writer,
+			&WriteDataHeaderRepr {
+				page_id: data.page_id,
+				offset: data.offset,
+				write_length: data
+					.from
+					.len()
+					.try_into()
+					.expect("Write length must be 16 bit!"),
+			},
+		)?;
+		writer.write_all(&data.from)?;
+		writer.write_all(&data.to)?;
+		Ok(())
 	}
 }
 
@@ -121,24 +176,70 @@ pub(crate) trait WalFileApi {
 		Self: 'a;
 
 	fn push_item<'a>(&mut self, item: Item<'a>) -> Result<(), FileError>;
-	fn read_items<'a>(&'a mut self) -> Self::ReadItems<'a>;
-	fn read_items_reverse<'a>(&'a mut self) -> Self::ReadItemsReverse<'a>;
+	fn read_items<'a>(&'a mut self) -> Result<Self::ReadItems<'a>, FileError>;
+	fn read_items_reverse<'a>(&'a mut self) -> Result<Self::ReadItemsReverse<'a>, FileError>;
 }
 
 impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 	type ReadItems<'a> = ReadItems<&'a mut F> where F: 'a;
 	type ReadItemsReverse<'a> = ReadItemsReverse<&'a mut F> where F: 'a;
 
-	fn push_item<'a>(&mut self, item: Item<'a>) -> Result<(), FileError> {
-		todo!()
+	fn push_item(&mut self, item: Item<'_>) -> Result<(), FileError> {
+		let current_pos = self.file.seek(SeekFrom::End(0))?;
+		let mut writer = BufWriter::new(&mut self.file);
+
+		let mut body_buffer: Vec<u8> = vec![];
+		let kind: ItemKindRepr;
+		let mut flags: u8 = 0;
+		match item.data {
+			ItemData::Write(write_data) => {
+				kind = ItemKindRepr::Write;
+				Self::write_write_data(&mut body_buffer, write_data)?;
+			}
+			ItemData::Commit(transaction_data) => {
+				kind = ItemKindRepr::Commit;
+				if transaction_data.begins_transaction {
+					flags |= FLAG_BEGIN_TRANSACTION;
+				}
+				Self::write_transaction_data(&mut body_buffer, transaction_data)?
+			}
+			ItemData::Undo(transaction_data) => {
+				kind = ItemKindRepr::Undo;
+				Self::write_transaction_data(&mut body_buffer, transaction_data)?
+			}
+			ItemData::Checkpoint => {
+				kind = ItemKindRepr::Checkpoint;
+			}
+		};
+		let crc = CRC32.checksum(&body_buffer);
+
+		bincode::serialize_into(
+			&mut writer,
+			&ItemHeaderRepr {
+				kind,
+				flags,
+				body_length: body_buffer
+					.len()
+					.try_into()
+					.expect("Body length must be 16-bit!"),
+				crc,
+				prev_item: self.prev_item,
+				sequence_num: item.sequence_num,
+			},
+		)?;
+		self.prev_item = Some(
+			NonZeroU32::new(current_pos as u32).expect("Cannot write log entries at position 0"),
+		);
+
+		Ok(())
 	}
 
-	fn read_items<'a>(&'a mut self) -> Self::ReadItems<'a> {
-		todo!()
+	fn read_items(&mut self) -> Result<Self::ReadItems<'_>, FileError> {
+		ReadItems::new(&mut self.file)
 	}
 
-	fn read_items_reverse<'a>(&'a mut self) -> Self::ReadItemsReverse<'a> {
-		todo!()
+	fn read_items_reverse(&mut self) -> Result<Self::ReadItemsReverse<'_>, FileError> {
+		ReadItemsReverse::new(&mut self.file, self.prev_item)
 	}
 }
 
@@ -211,6 +312,8 @@ impl<F: Read + Seek> ItemReader<F> {
 			ItemKindRepr::Checkpoint => ItemData::Checkpoint,
 		};
 
+		let _: ItemFooterRepr = bincode::deserialize_from(&mut self.reader)?;
+
 		Ok(Some(Item {
 			data,
 			sequence_num: header.sequence_num,
@@ -252,8 +355,7 @@ pub(crate) struct ReadItemsReverse<F: Read + Seek> {
 }
 
 impl<F: Read + Seek> ReadItemsReverse<F> {
-	fn new(mut file: F, prev_item: Option<NonZeroU32>) -> Result<Self, FileError> {
-		file.seek(SeekFrom::End(0))?;
+	fn new(file: F, prev_item: Option<NonZeroU32>) -> Result<Self, FileError> {
 		Ok(Self {
 			reader: ItemReader::new(file, prev_item),
 		})
