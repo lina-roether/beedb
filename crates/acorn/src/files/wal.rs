@@ -235,11 +235,13 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 	}
 
 	fn read_items(&mut self) -> Result<Self::ReadItems<'_>, FileError> {
-		ReadItems::new(&mut self.file)
+		self.file.seek(SeekFrom::Start(self.body_start))?;
+		Ok(ReadItems::new(&mut self.file))
 	}
 
 	fn read_items_reverse(&mut self) -> Result<Self::ReadItemsReverse<'_>, FileError> {
-		ReadItemsReverse::new(&mut self.file, self.prev_item)
+		self.file.seek(SeekFrom::End(0))?;
+		Ok(ReadItemsReverse::new(&mut self.file, self.prev_item))
 	}
 }
 
@@ -334,11 +336,10 @@ pub(crate) struct ReadItems<F: Read + Seek> {
 }
 
 impl<F: Read + Seek> ReadItems<F> {
-	fn new(mut file: F) -> Result<Self, FileError> {
-		file.seek(SeekFrom::Start(0))?;
-		Ok(Self {
+	fn new(file: F) -> Self {
+		Self {
 			reader: ItemReader::new(file, None),
-		})
+		}
 	}
 }
 
@@ -355,10 +356,10 @@ pub(crate) struct ReadItemsReverse<F: Read + Seek> {
 }
 
 impl<F: Read + Seek> ReadItemsReverse<F> {
-	fn new(file: F, prev_item: Option<NonZeroU32>) -> Result<Self, FileError> {
-		Ok(Self {
+	fn new(file: F, prev_item: Option<NonZeroU32>) -> Self {
+		Self {
 			reader: ItemReader::new(file, prev_item),
-		})
+		}
 	}
 }
 
