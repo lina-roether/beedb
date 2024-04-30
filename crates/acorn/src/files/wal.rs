@@ -126,8 +126,8 @@ pub(crate) trait WalFileApi {
 }
 
 impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
-	type ReadItems<'a> = ReadItems<'a, F>;
-	type ReadItemsReverse<'a> = ReadItemsReverse<'a, F>;
+	type ReadItems<'a> = ReadItems<&'a mut F> where F: 'a;
+	type ReadItemsReverse<'a> = ReadItemsReverse<&'a mut F> where F: 'a;
 
 	fn push_item<'a>(&mut self, item: Item<'a>) -> Result<(), FileError> {
 		todo!()
@@ -226,7 +226,7 @@ impl<F: Read + Seek> ItemReader<F> {
 	}
 }
 
-struct ReadItems<F: Read + Seek> {
+pub(crate) struct ReadItems<F: Read + Seek> {
 	reader: ItemReader<F>,
 }
 
@@ -247,7 +247,7 @@ impl<F: Read + Seek> Iterator for ReadItems<F> {
 	}
 }
 
-struct ReadItemsReverse<F: Read + Seek> {
+pub(crate) struct ReadItemsReverse<F: Read + Seek> {
 	reader: ItemReader<F>,
 }
 
