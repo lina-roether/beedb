@@ -125,6 +125,23 @@ pub(crate) trait WalFileApi {
 	fn read_items_reverse<'a>(&'a mut self) -> Self::ReadItemsReverse<'a>;
 }
 
+impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
+	type ReadItems<'a> = ReadItems<'a, F>;
+	type ReadItemsReverse<'a> = ReadItemsReverse<'a, F>;
+
+	fn push_item<'a>(&mut self, item: Item<'a>) -> Result<(), FileError> {
+		todo!()
+	}
+
+	fn read_items<'a>(&'a mut self) -> Self::ReadItems<'a> {
+		todo!()
+	}
+
+	fn read_items_reverse<'a>(&'a mut self) -> Self::ReadItemsReverse<'a> {
+		todo!()
+	}
+}
+
 struct ItemReader<F: Read + Seek> {
 	reader: BufReader<F>,
 	prev_item: Option<NonZeroU32>,
