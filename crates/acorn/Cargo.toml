@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 crc = "3.2.1"
 memmap2 = "0.9.4"
-mockall = { version = "0.12.1", features = ["nightly"] }
-thiserror = "1.0.58"
 zerocopy = { version = "0.7.32", features = ["derive"] }
+thiserror = "1.0.58"
+
+[dev-dependencies]
+mockall = { version = "0.12.1", features = ["nightly"] }

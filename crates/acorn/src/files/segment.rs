@@ -6,6 +6,8 @@ use std::{
 };
 
 use memmap2::MmapMut;
+
+#[cfg(test)]
 use mockall::automock;
 
 use super::{generic::GenericHeader, utils::Serialized, FileError};
@@ -14,7 +16,7 @@ use crate::{consts::PAGE_SIZE, files::generic::FileType};
 // 1 GiB for PAGE_SIZE = 16 KiB
 const SEGMENT_SIZE: usize = PAGE_SIZE << 16;
 
-struct SegmentFile<F = MmapMut>
+pub(crate) struct SegmentFile<F = MmapMut>
 where
 	F: Deref<Target = [u8]> + DerefMut,
 {
@@ -96,7 +98,7 @@ where
 	}
 }
 
-#[automock]
+#[cfg_attr(test, automock)]
 pub(crate) trait SegmentFileApi {
 	fn read(&self, page_id: NonZeroU16, offset: u16, buf: &mut [u8]);
 	fn write(&mut self, page_id: NonZeroU16, offset: u16, buf: &[u8]);

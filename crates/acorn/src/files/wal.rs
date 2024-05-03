@@ -6,8 +6,10 @@ use std::{
 	path::Path,
 };
 
-use mockall::automock;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
+
+#[cfg(test)]
+use mockall::automock;
 
 use super::{
 	generic::{FileType, GenericHeader},
@@ -273,10 +275,10 @@ pub(crate) struct Item<'a> {
 	pub data: ItemData<'a>,
 }
 
-#[automock(
+#[cfg_attr(test, automock(
     type IterItems<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
     type IterItemsReverse<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
-)]
+))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait WalFileApi {
 	type IterItems<'a>: Iterator<Item = Result<Item<'static>, FileError>> + 'a
