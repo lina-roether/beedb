@@ -5,14 +5,16 @@ use std::{
 	num::NonZeroU32,
 };
 
+use bincode::Options;
 use mockall::automock;
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::{files::CRC32, model::PageId};
 
-use super::{FileError, FileTypeRepr, GenericHeaderInit, GenericHeaderRepr};
+use super::{serializer, FileError, FileTypeRepr, GenericHeaderInit, GenericHeaderRepr};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 enum ItemKindRepr {
 	Write = 0,
@@ -29,7 +31,7 @@ struct ItemHeaderRepr {
 	flags: u8,
 	body_length: u16,
 	crc: u32,
-	prev_item: Option<NonZeroU32>,
+	prev_item: u32,
 	sequence_num: u64,
 }
 
@@ -64,13 +66,13 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			file_type: FileTypeRepr::Wal,
 			header_size: 0,
 		});
-		bincode::serialize_into(&mut file, &meta)?;
+		serializer().serialize_into(&mut file, &meta)?;
 		Self::new(file, meta.content_offset.into())
 	}
 
 	pub fn open(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
-		let header: GenericHeaderRepr = bincode::deserialize_from(&mut file)?;
+		let header: GenericHeaderRepr = serializer().deserialize_from(&mut file)?;
 		header.validate()?;
 		if header.file_type != FileTypeRepr::Wal {
 			return Err(FileError::WrongFileType(header.file_type));
@@ -84,7 +86,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		// not guaranteed to match
 		let end_pos = file.seek(SeekFrom::End(-(size_of::<ItemFooterRepr>() as i64)))?;
 		let prev_item = if end_pos != body_start {
-			let footer: ItemFooterRepr = bincode::deserialize_from(&mut file)?;
+			let footer: ItemFooterRepr = serializer().deserialize_from(&mut file)?;
 			Some(footer.item_start)
 		} else {
 			None
@@ -99,22 +101,33 @@ impl<F: Seek + Read + Write> WalFile<F> {
 	fn write_transaction_data(
 		mut writer: impl Write,
 		data: TransactionData,
+		flags: &mut u8,
 	) -> Result<(), FileError> {
-		bincode::serialize_into(
+		if data.begins_transaction {
+			*flags |= FLAG_BEGIN_TRANSACTION;
+		}
+		serializer().serialize_into(
 			&mut writer,
 			&TransactionDataRepr {
 				transaction_id: data.transaction_id,
-				prev_transaction_item: data.prev_transaction_item,
+				prev_transaction_item: data
+					.prev_transaction_item
+					.map(NonZeroU32::get)
+					.unwrap_or_default(),
 			},
 		)?;
 		Ok(())
 	}
 
-	fn write_write_data(mut writer: impl Write, data: WriteData) -> Result<(), FileError> {
+	fn write_write_data(
+		mut writer: impl Write,
+		data: WriteData,
+		flags: &mut u8,
+	) -> Result<(), FileError> {
 		assert_eq!(data.from.len(), data.to.len());
 
-		Self::write_transaction_data(&mut writer, data.transaction_data)?;
-		bincode::serialize_into(
+		Self::write_transaction_data(&mut writer, data.transaction_data, flags)?;
+		serializer().serialize_into(
 			&mut writer,
 			&WriteDataHeaderRepr {
 				page_id: data.page_id,
@@ -135,7 +148,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransactionData {
 	pub transaction_id: u64,
-	pub prev_transaction_item: u32,
+	pub prev_transaction_item: Option<NonZeroU32>,
 	pub begins_transaction: bool,
 }
 
@@ -185,7 +198,8 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 	type ReadItemsReverse<'a> = ReadItemsReverse<&'a mut F> where F: 'a;
 
 	fn push_item(&mut self, item: Item<'_>) -> Result<(), FileError> {
-		let current_pos = self.file.seek(SeekFrom::End(0))?;
+		let current_pos = NonZeroU32::new(self.file.seek(SeekFrom::End(0))? as u32)
+			.expect("Cannot write log entries at position 0!");
 		let mut writer = BufWriter::new(&mut self.file);
 
 		let mut body_buffer: Vec<u8> = vec![];
@@ -194,18 +208,15 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		match item.data {
 			ItemData::Write(write_data) => {
 				kind = ItemKindRepr::Write;
-				Self::write_write_data(&mut body_buffer, write_data)?;
+				Self::write_write_data(&mut body_buffer, write_data, &mut flags)?;
 			}
 			ItemData::Commit(transaction_data) => {
 				kind = ItemKindRepr::Commit;
-				if transaction_data.begins_transaction {
-					flags |= FLAG_BEGIN_TRANSACTION;
-				}
-				Self::write_transaction_data(&mut body_buffer, transaction_data)?
+				Self::write_transaction_data(&mut body_buffer, transaction_data, &mut flags)?
 			}
 			ItemData::Undo(transaction_data) => {
 				kind = ItemKindRepr::Undo;
-				Self::write_transaction_data(&mut body_buffer, transaction_data)?
+				Self::write_transaction_data(&mut body_buffer, transaction_data, &mut flags)?
 			}
 			ItemData::Checkpoint => {
 				kind = ItemKindRepr::Checkpoint;
@@ -213,7 +224,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		};
 		let crc = CRC32.checksum(&body_buffer);
 
-		bincode::serialize_into(
+		serializer().serialize_into(
 			&mut writer,
 			&ItemHeaderRepr {
 				kind,
@@ -223,14 +234,21 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 					.try_into()
 					.expect("Body length must be 16-bit!"),
 				crc,
-				prev_item: self.prev_item,
+				prev_item: self.prev_item.map(NonZeroU32::get).unwrap_or_default(),
 				sequence_num: item.sequence_num,
 			},
 		)?;
-		self.prev_item = Some(
-			NonZeroU32::new(current_pos as u32).expect("Cannot write log entries at position 0"),
-		);
+		writer.write_all(&body_buffer)?;
+		serializer().serialize_into(
+			&mut writer,
+			&ItemFooterRepr {
+				item_start: current_pos,
+			},
+		)?;
 
+		self.prev_item = Some(current_pos);
+
+		writer.flush()?;
 		Ok(())
 	}
 
@@ -260,11 +278,11 @@ impl<F: Read + Seek> ItemReader<F> {
 
 	fn read_transaction_data(mut body: impl Read, flags: u8) -> Result<TransactionData, FileError> {
 		let begins_transaction = (flags & FLAG_BEGIN_TRANSACTION) != 0;
-		let transaction_data: TransactionDataRepr = bincode::deserialize_from(&mut body)?;
+		let transaction_data: TransactionDataRepr = serializer().deserialize_from(&mut body)?;
 
 		Ok(TransactionData {
 			transaction_id: transaction_data.transaction_id,
-			prev_transaction_item: transaction_data.prev_transaction_item,
+			prev_transaction_item: NonZeroU32::new(transaction_data.prev_transaction_item),
 			begins_transaction,
 		})
 	}
@@ -272,7 +290,7 @@ impl<F: Read + Seek> ItemReader<F> {
 	fn read_write_data(mut body: impl Read, flags: u8) -> Result<WriteData<'static>, FileError> {
 		let transaction_data = Self::read_transaction_data(&mut body, flags)?;
 
-		let write_header: WriteDataHeaderRepr = bincode::deserialize_from(&mut body)?;
+		let write_header: WriteDataHeaderRepr = serializer().deserialize_from(&mut body)?;
 		let mut from: Vec<u8> = vec![0; write_header.write_length.into()];
 		body.read_exact(&mut from)?;
 		let mut to: Vec<u8> = vec![0; write_header.write_length.into()];
@@ -291,10 +309,10 @@ impl<F: Read + Seek> ItemReader<F> {
 		if !self.reader.has_data_left()? {
 			return Ok(None);
 		}
-		let header: ItemHeaderRepr = bincode::deserialize_from(&mut self.reader)?;
+		let header: ItemHeaderRepr = serializer().deserialize_from(&mut self.reader)?;
 		let mut body_buf: Box<[u8]> = vec![0; header.body_length.into()].into();
 		self.reader.read_exact(&mut body_buf)?;
-		self.prev_item = header.prev_item;
+		self.prev_item = NonZeroU32::new(header.prev_item);
 
 		if CRC32.checksum(&body_buf) != header.crc {
 			return Err(FileError::ChecksumMismatch);
@@ -314,7 +332,7 @@ impl<F: Read + Seek> ItemReader<F> {
 			ItemKindRepr::Checkpoint => ItemData::Checkpoint,
 		};
 
-		let _: ItemFooterRepr = bincode::deserialize_from(&mut self.reader)?;
+		let _: ItemFooterRepr = serializer().deserialize_from(&mut self.reader)?;
 
 		Ok(Some(Item {
 			data,
@@ -368,5 +386,147 @@ impl<F: Read + Seek> Iterator for ReadItemsReverse<F> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.reader.read_prev_item().transpose()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::files::NATIVE_BYTE_ORDER;
+
+	use super::*;
+
+	#[test]
+	fn create_wal() {
+		// given
+		let mut file = Vec::<u8>::new();
+
+		// when
+		WalFile::create(Cursor::new(&mut file)).unwrap();
+
+		// then
+		let mut expected_data = Vec::<u8>::new();
+		serializer()
+			.serialize_into(
+				&mut expected_data,
+				&GenericHeaderRepr {
+					magic: *b"ACRN",
+					byte_order: NATIVE_BYTE_ORDER,
+					file_type: FileTypeRepr::Wal,
+					content_offset: 8,
+				},
+			)
+			.unwrap();
+
+		assert_eq!(file.len(), size_of::<GenericHeaderRepr>());
+		assert_eq!(file, expected_data);
+	}
+
+	#[test]
+	fn open_wal() {
+		// given
+		let mut file = Vec::<u8>::new();
+		serializer()
+			.serialize_into(
+				&mut file,
+				&GenericHeaderRepr {
+					magic: *b"ACRN",
+					byte_order: NATIVE_BYTE_ORDER,
+					file_type: FileTypeRepr::Wal,
+					content_offset: 8,
+				},
+			)
+			.unwrap();
+
+		// when
+		let result = WalFile::open(Cursor::new(&mut file));
+
+		// then
+		assert!(result.is_ok());
+	}
+
+	#[test]
+	fn push_write_item() {
+		// given
+		let mut file = Vec::<u8>::new();
+		let mut wal_file = WalFile::create(Cursor::new(&mut file)).unwrap();
+
+		// when
+		wal_file
+			.push_item(Item {
+				sequence_num: 69,
+				data: ItemData::Write(WriteData {
+					transaction_data: TransactionData {
+						transaction_id: 25,
+						prev_transaction_item: NonZeroU32::new(24),
+						begins_transaction: true,
+					},
+					page_id: PageId {
+						page_num: 123,
+						segment_num: 232,
+					},
+					offset: 445,
+					from: Cow::Owned(vec![1, 2, 3, 4]),
+					to: Cow::Owned(vec![4, 5, 6, 7]),
+				}),
+			})
+			.unwrap();
+
+		// then
+		let mut expected_body = Vec::<u8>::new();
+		serializer()
+			.serialize_into(
+				&mut expected_body,
+				&ItemHeaderRepr {
+					kind: ItemKindRepr::Write,
+					flags: FLAG_BEGIN_TRANSACTION,
+					body_length: 40,
+					crc: 0,
+					prev_item: 0,
+					sequence_num: 69,
+				},
+			)
+			.unwrap();
+		serializer()
+			.serialize_into(
+				&mut expected_body,
+				&TransactionDataRepr {
+					prev_transaction_item: 24,
+					transaction_id: 25,
+				},
+			)
+			.unwrap();
+		serializer()
+			.serialize_into(
+				&mut expected_body,
+				&WriteDataHeaderRepr {
+					page_id: PageId {
+						page_num: 123,
+						segment_num: 232,
+					},
+					offset: 445,
+					write_length: 4,
+				},
+			)
+			.unwrap();
+		expected_body.extend([1, 2, 3, 4]);
+		expected_body.extend([4, 5, 6, 7]);
+		serializer()
+			.serialize_into(
+				&mut expected_body,
+				&ItemFooterRepr {
+					item_start: NonZeroU32::new(8).unwrap(),
+				},
+			)
+			.unwrap();
+
+		assert_eq!(
+			file.len(),
+			size_of::<GenericHeaderRepr>()
+				+ size_of::<ItemHeaderRepr>()
+				+ size_of::<TransactionDataRepr>()
+				+ size_of::<WriteDataHeaderRepr>()
+				+ 8 + size_of::<ItemFooterRepr>()
+		);
+		assert_eq!(file[8..], expected_body);
 	}
 }

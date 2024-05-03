@@ -1,7 +1,9 @@
 use std::{io, mem::size_of};
 
+use bincode::Options;
 use crc::Crc;
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use thiserror::Error;
 
 pub(crate) mod wal;
@@ -9,6 +11,13 @@ pub(crate) mod wal;
 // TODO: there are tradeoffs here. Perhaps I should look more into selecting an
 // algorithm.
 pub(super) const CRC32: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+
+#[inline]
+pub(super) fn serializer() -> impl bincode::Options {
+	bincode::DefaultOptions::new()
+		.with_native_endian()
+		.with_fixint_encoding()
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum FileError {
@@ -34,12 +43,13 @@ pub(crate) enum FileError {
 	Io(#[from] io::Error),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize_repr, Deserialize_repr, PartialEq, Eq)]
+#[repr(u8)]
 pub(super) enum FileTypeRepr {
 	Wal = 0,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize_repr, Deserialize_repr, PartialEq, Eq)]
 #[repr(u8)]
 enum ByteOrderRepr {
 	BigEndian = 0,
