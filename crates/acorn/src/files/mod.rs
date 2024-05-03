@@ -5,6 +5,7 @@ use thiserror::Error;
 use self::generic::FileType;
 
 pub(super) mod generic;
+pub(crate) mod segment;
 pub(super) mod utils;
 pub(crate) mod wal;
 

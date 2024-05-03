@@ -1,5 +1,6 @@
 use std::{
 	borrow::Cow,
+	fs::File,
 	io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
 	num::NonZeroU64,
 };
@@ -13,13 +14,11 @@ use super::{
 	FileError,
 };
 
-const FLAG_BEGIN_TRANSACTION: u8 = 0b00000001;
-
 #[derive(Debug, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 struct ItemHeaderRepr {
 	kind: u8,
-	flags: u8,
+	_padding: u8,
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU64>,
@@ -72,33 +71,9 @@ impl TryFrom<u8> for ItemKind {
 	}
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct ItemFlags {
-	begins_transaction: bool,
-}
-
-impl From<u8> for ItemFlags {
-	fn from(value: u8) -> Self {
-		Self {
-			begins_transaction: value & FLAG_BEGIN_TRANSACTION != 0,
-		}
-	}
-}
-
-impl From<ItemFlags> for u8 {
-	fn from(value: ItemFlags) -> Self {
-		let mut flags = 0;
-		if value.begins_transaction {
-			flags |= FLAG_BEGIN_TRANSACTION;
-		}
-		flags
-	}
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemHeader {
 	kind: ItemKind,
-	flags: ItemFlags,
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU64>,
@@ -109,7 +84,7 @@ impl From<ItemHeader> for ItemHeaderRepr {
 	fn from(value: ItemHeader) -> Self {
 		Self {
 			kind: value.kind as u8,
-			flags: value.flags.into(),
+			_padding: 0,
 			body_length: value.body_length,
 			crc: value.crc,
 			prev_item: value.prev_item,
@@ -124,7 +99,6 @@ impl TryFrom<ItemHeaderRepr> for ItemHeader {
 	fn try_from(value: ItemHeaderRepr) -> Result<Self, Self::Error> {
 		Ok(Self {
 			kind: ItemKind::try_from(value.kind)?,
-			flags: ItemFlags::from(value.flags),
 			body_length: value.body_length,
 			crc: value.crc,
 			prev_item: value.prev_item,
@@ -179,7 +153,7 @@ impl Serialized for WriteBlock {
 	type Repr = WriteBlockRepr;
 }
 
-pub(crate) struct WalFile<F: Seek + Read + Write> {
+pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
 	file: F,
@@ -222,14 +196,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		})
 	}
 
-	fn write_transaction_block(
-		writer: impl Write,
-		data: TransactionData,
-		flags: &mut ItemFlags,
-	) -> Result<(), FileError> {
-		if data.begins_transaction {
-			flags.begins_transaction = true
-		}
+	fn write_transaction_block(writer: impl Write, data: TransactionData) -> Result<(), FileError> {
 		let block = TransactionBlock {
 			transaction_id: data.transaction_id,
 			prev_transaction_item: data.prev_transaction_item,
@@ -238,14 +205,10 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		Ok(())
 	}
 
-	fn write_write_block(
-		mut writer: impl Write,
-		data: WriteData,
-		flags: &mut ItemFlags,
-	) -> Result<(), FileError> {
+	fn write_write_block(mut writer: impl Write, data: WriteData) -> Result<(), FileError> {
 		assert_eq!(data.from.len(), data.to.len());
 
-		Self::write_transaction_block(&mut writer, data.transaction_data, flags)?;
+		Self::write_transaction_block(&mut writer, data.transaction_data)?;
 
 		let block = WriteBlock {
 			page_id: data.page_id,
@@ -267,7 +230,6 @@ impl<F: Seek + Read + Write> WalFile<F> {
 pub(crate) struct TransactionData {
 	pub transaction_id: u64,
 	pub prev_transaction_item: Option<NonZeroU64>,
-	pub begins_transaction: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,19 +284,18 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 		let mut body_buffer: Vec<u8> = vec![];
 		let kind: ItemKind;
-		let mut flags = ItemFlags::default();
 		match item.data {
 			ItemData::Write(write_data) => {
 				kind = ItemKind::Write;
-				Self::write_write_block(&mut body_buffer, write_data, &mut flags)?;
+				Self::write_write_block(&mut body_buffer, write_data)?;
 			}
 			ItemData::Commit(transaction_data) => {
 				kind = ItemKind::Commit;
-				Self::write_transaction_block(&mut body_buffer, transaction_data, &mut flags)?
+				Self::write_transaction_block(&mut body_buffer, transaction_data)?
 			}
 			ItemData::Undo(transaction_data) => {
 				kind = ItemKind::Undo;
-				Self::write_transaction_block(&mut body_buffer, transaction_data, &mut flags)?
+				Self::write_transaction_block(&mut body_buffer, transaction_data)?
 			}
 			ItemData::Checkpoint => {
 				kind = ItemKind::Checkpoint;
@@ -344,7 +305,6 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 		let item_header = ItemHeader {
 			kind,
-			flags,
 			body_length: body_buffer
 				.len()
 				.try_into()
@@ -392,24 +352,17 @@ impl<F: Read + Seek> ItemReader<F> {
 		}
 	}
 
-	fn read_transaction_data(
-		body: impl Read,
-		flags: &ItemFlags,
-	) -> Result<TransactionData, FileError> {
+	fn read_transaction_data(body: impl Read) -> Result<TransactionData, FileError> {
 		let transaction_block = TransactionBlock::deserialize(body)?;
 
 		Ok(TransactionData {
 			transaction_id: transaction_block.transaction_id,
 			prev_transaction_item: transaction_block.prev_transaction_item,
-			begins_transaction: flags.begins_transaction,
 		})
 	}
 
-	fn read_write_data(
-		mut body: impl Read,
-		flags: &ItemFlags,
-	) -> Result<WriteData<'static>, FileError> {
-		let transaction_data = Self::read_transaction_data(&mut body, flags)?;
+	fn read_write_data(mut body: impl Read) -> Result<WriteData<'static>, FileError> {
+		let transaction_data = Self::read_transaction_data(&mut body)?;
 
 		let write_block = WriteBlock::deserialize(&mut body)?;
 		let mut from: Vec<u8> = vec![0; write_block.write_length.into()];
@@ -441,17 +394,9 @@ impl<F: Read + Seek> ItemReader<F> {
 
 		let mut body_cursor = Cursor::new(body_buf);
 		let data = match header.kind {
-			ItemKind::Write => {
-				ItemData::Write(Self::read_write_data(&mut body_cursor, &header.flags)?)
-			}
-			ItemKind::Commit => ItemData::Commit(Self::read_transaction_data(
-				&mut body_cursor,
-				&header.flags,
-			)?),
-			ItemKind::Undo => ItemData::Undo(Self::read_transaction_data(
-				&mut body_cursor,
-				&header.flags,
-			)?),
+			ItemKind::Write => ItemData::Write(Self::read_write_data(&mut body_cursor)?),
+			ItemKind::Commit => ItemData::Commit(Self::read_transaction_data(&mut body_cursor)?),
+			ItemKind::Undo => ItemData::Undo(Self::read_transaction_data(&mut body_cursor)?),
 			ItemKind::Checkpoint => ItemData::Checkpoint,
 		};
 
@@ -573,7 +518,6 @@ mod tests {
 					transaction_data: TransactionData {
 						transaction_id: 25,
 						prev_transaction_item: NonZeroU64::new(24),
-						begins_transaction: true,
 					},
 					page_id: 123,
 					offset: 445,
@@ -588,7 +532,7 @@ mod tests {
 		expected_body.extend(
 			ItemHeaderRepr {
 				kind: ItemKind::Write as u8,
-				flags: FLAG_BEGIN_TRANSACTION,
+				_padding: 0,
 				body_length: 36,
 				crc: 0xcef5c9ba,
 				prev_item: NonZeroU64::new(0),
@@ -615,14 +559,141 @@ mod tests {
 		expected_body.extend([4, 5, 6, 7]);
 		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
 
-		assert_eq!(
-			file.len(),
-			GenericHeader::REPR_SIZE
-				+ ItemHeader::REPR_SIZE
-				+ TransactionBlock::REPR_SIZE
-				+ WriteBlock::REPR_SIZE
-				+ 8 + ItemFooter::REPR_SIZE
-		);
 		assert_eq!(file[8..], expected_body);
+	}
+
+	#[test]
+	fn push_commit_item() {
+		// given
+		let mut file = Vec::<u8>::new();
+		let mut wal_file = WalFile::create(Cursor::new(&mut file)).unwrap();
+
+		// when
+		wal_file
+			.push_item(Item {
+				sequence_num: 69,
+				data: ItemData::Commit(TransactionData {
+					transaction_id: 69,
+					prev_transaction_item: NonZeroU64::new(25),
+				}),
+			})
+			.unwrap();
+
+		// then
+		let mut expected_body = Vec::<u8>::new();
+		expected_body.extend(
+			ItemHeaderRepr {
+				kind: ItemKind::Commit as u8,
+				_padding: 0,
+				body_length: 16,
+				crc: 0xdb684ab9,
+				prev_item: NonZeroU64::new(0),
+				sequence_num: 69,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(
+			TransactionBlockRepr {
+				prev_transaction_item: std::num::NonZeroU64::new(25),
+				transaction_id: 69,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+
+		assert_eq!(file[8..], expected_body);
+	}
+
+	#[test]
+	fn push_undo_item() {
+		// given
+		let mut file = Vec::<u8>::new();
+		let mut wal_file = WalFile::create(Cursor::new(&mut file)).unwrap();
+
+		// when
+		wal_file
+			.push_item(Item {
+				sequence_num: 69,
+				data: ItemData::Undo(TransactionData {
+					transaction_id: 69,
+					prev_transaction_item: NonZeroU64::new(25),
+				}),
+			})
+			.unwrap();
+
+		// then
+		let mut expected_body = Vec::<u8>::new();
+		expected_body.extend(
+			ItemHeaderRepr {
+				kind: ItemKind::Undo as u8,
+				_padding: 0,
+				body_length: 16,
+				crc: 0xdb684ab9,
+				prev_item: NonZeroU64::new(0),
+				sequence_num: 69,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(
+			TransactionBlockRepr {
+				prev_transaction_item: std::num::NonZeroU64::new(25),
+				transaction_id: 69,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+
+		assert_eq!(file[8..], expected_body);
+	}
+
+	#[test]
+	fn push_checkpoint_item() {
+		// given
+		let mut file = Vec::<u8>::new();
+		let mut wal_file = WalFile::create(Cursor::new(&mut file)).unwrap();
+
+		// when
+		wal_file
+			.push_item(Item {
+				sequence_num: 69,
+				data: ItemData::Checkpoint,
+			})
+			.unwrap();
+
+		// then
+		let mut expected_body = Vec::<u8>::new();
+		expected_body.extend(
+			ItemHeaderRepr {
+				kind: ItemKind::Checkpoint as u8,
+				_padding: 0,
+				body_length: 0,
+				crc: 0x00000000,
+				prev_item: NonZeroU64::new(0),
+				sequence_num: 69,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+
+		assert_eq!(file[8..], expected_body);
+	}
+
+	#[test]
+	fn write_and_read() {
+		// given
+		let mut wal_file = WalFile::create(Cursor::new(Vec::new())).unwrap();
+		let items = [Item {
+			sequence_num: 0,
+			data: ItemData::Write(WriteData {
+				transaction_data: TransactionData {
+					transaction_id: 0,
+					prev_transaction_item: None,
+				},
+				page_id: 69,
+				offset: 420,
+				from: Cow::Owned(vec![0, 0, 0, 0]),
+				to: Cow::Owned(vec![1, 2, 3, 4]),
+			}),
+		}];
 	}
 }
