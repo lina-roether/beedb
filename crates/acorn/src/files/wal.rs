@@ -714,4 +714,82 @@ mod tests {
 		// then
 		assert_eq!(wal_file.read_item_at(offset).unwrap(), item)
 	}
+
+	#[test]
+	fn write_and_iter() {
+		// given
+		let mut wal_file = WalFile::create(Cursor::new(Vec::new())).unwrap();
+		let items = [
+			Item {
+				sequence_num: 0,
+				data: ItemData::Write(WriteData {
+					transaction_data: TransactionData {
+						transaction_id: 0,
+						prev_transaction_item: None,
+					},
+					page_id: 69,
+					offset: 420,
+					from: Cow::Owned(vec![0, 0, 0, 0]),
+					to: Cow::Owned(vec![1, 2, 3, 4]),
+				}),
+			},
+			Item {
+				sequence_num: 1,
+				data: ItemData::Commit(TransactionData {
+					transaction_id: 0,
+					prev_transaction_item: None,
+				}),
+			},
+		];
+
+		// when
+		for item in &items {
+			wal_file.push_item(item.clone()).unwrap();
+		}
+
+		// then
+		let mut iter = wal_file.iter_items().unwrap();
+		assert_eq!(iter.next().unwrap().unwrap(), items[0]);
+		assert_eq!(iter.next().unwrap().unwrap(), items[1]);
+		assert!(iter.next().is_none());
+	}
+
+	#[test]
+	fn write_and_iter_reverse() {
+		// given
+		let mut wal_file = WalFile::create(Cursor::new(Vec::new())).unwrap();
+		let items = [
+			Item {
+				sequence_num: 0,
+				data: ItemData::Write(WriteData {
+					transaction_data: TransactionData {
+						transaction_id: 0,
+						prev_transaction_item: None,
+					},
+					page_id: 69,
+					offset: 420,
+					from: Cow::Owned(vec![0, 0, 0, 0]),
+					to: Cow::Owned(vec![1, 2, 3, 4]),
+				}),
+			},
+			Item {
+				sequence_num: 1,
+				data: ItemData::Commit(TransactionData {
+					transaction_id: 0,
+					prev_transaction_item: None,
+				}),
+			},
+		];
+
+		// when
+		for item in &items {
+			wal_file.push_item(item.clone()).unwrap();
+		}
+
+		// then
+		let mut iter = wal_file.iter_items_reverse().unwrap();
+		assert_eq!(iter.next().unwrap().unwrap(), items[1]);
+		assert_eq!(iter.next().unwrap().unwrap(), items[0]);
+		assert!(iter.next().is_none());
+	}
 }
