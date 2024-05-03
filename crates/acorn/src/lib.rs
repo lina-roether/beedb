@@ -4,6 +4,7 @@
 #![feature(buf_read_has_data_left)]
 #![feature(trait_alias)]
 
+mod consts;
 mod files;
 mod utils;
 mod wal;

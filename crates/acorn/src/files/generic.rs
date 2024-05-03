@@ -2,7 +2,7 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use super::{utils::Serialized, FileError};
 
-#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 pub(super) struct GenericHeaderRepr {
 	magic: [u8; 4],
@@ -15,6 +15,7 @@ pub(super) struct GenericHeaderRepr {
 #[repr(u8)]
 pub(crate) enum FileType {
 	Wal = 0,
+	Segment = 1,
 }
 
 impl TryFrom<u8> for FileType {
@@ -23,6 +24,7 @@ impl TryFrom<u8> for FileType {
 	fn try_from(value: u8) -> Result<Self, Self::Error> {
 		match value {
 			0 => Ok(Self::Wal),
+			1 => Ok(Self::Segment),
 			_ => Err(FileError::Corrupted(format!("Unknown file type {value}"))),
 		}
 	}

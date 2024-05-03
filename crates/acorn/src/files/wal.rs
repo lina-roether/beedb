@@ -1,8 +1,9 @@
 use std::{
 	borrow::Cow,
-	fs::File,
+	fs::{File, OpenOptions},
 	io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
 	num::NonZeroU64,
+	path::Path,
 };
 
 use mockall::automock;
@@ -14,7 +15,7 @@ use super::{
 	FileError,
 };
 
-#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 struct ItemHeaderRepr {
 	kind: u8,
@@ -25,20 +26,20 @@ struct ItemHeaderRepr {
 	sequence_num: u64,
 }
 
-#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 struct ItemFooterRepr {
 	item_start: u64,
 }
 
-#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 struct TransactionBlockRepr {
 	transaction_id: u64,
 	prev_transaction_item: Option<NonZeroU64>,
 }
 
-#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct WriteBlockRepr {
 	page_id: u64,
@@ -159,8 +160,25 @@ pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	file: F,
 }
 
+impl WalFile {
+	pub fn create_file(path: impl AsRef<Path>) -> Result<Self, FileError> {
+		Self::create(
+			OpenOptions::new()
+				.create(true)
+				.truncate(true)
+				.read(true)
+				.write(true)
+				.open(path)?,
+		)
+	}
+
+	pub fn open_file(path: impl AsRef<Path>) -> Result<Self, FileError> {
+		Self::open(OpenOptions::new().read(true).write(true).open(path)?)
+	}
+}
+
 impl<F: Seek + Read + Write> WalFile<F> {
-	pub fn create(mut file: F) -> Result<Self, FileError> {
+	fn create(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
 		let content_offset = GenericHeader::REPR_SIZE as u16;
 		let meta = GenericHeader {
@@ -171,7 +189,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		Self::new(file, content_offset.into())
 	}
 
-	pub fn open(mut file: F) -> Result<Self, FileError> {
+	fn open(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
 		let header = GenericHeader::deserialize(&mut file)?;
 		if header.file_type != FileType::Wal {

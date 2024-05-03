@@ -16,7 +16,7 @@ pub(crate) trait Serialized: Sized
 where
 	FileError: From<<Self::Repr as TryInto<Self>>::Error>,
 {
-	type Repr: AsBytes + FromBytes + FromZeroes + From<Self> + TryInto<Self>;
+	type Repr: Clone + AsBytes + FromBytes + FromZeroes + From<Self> + TryInto<Self>;
 
 	const REPR_SIZE: usize = size_of::<Self::Repr>();
 
@@ -31,5 +31,18 @@ where
 		reader.read_exact(repr.as_bytes_mut())?;
 		let value: Self = repr.try_into()?;
 		Ok(value)
+	}
+
+	fn from_repr_bytes(bytes: &[u8]) -> Result<Self, FileError> {
+		let Some(repr) = Self::Repr::ref_from_prefix(bytes) else {
+			return Err(FileError::UnexpectedEof);
+		};
+		let value: Self = repr.clone().try_into()?;
+		Ok(value)
+	}
+
+	fn write_repr_bytes(self, bytes: &mut [u8]) {
+		let repr = Self::Repr::from(self);
+		bytes[0..Self::REPR_SIZE].copy_from_slice(repr.as_bytes());
 	}
 }
