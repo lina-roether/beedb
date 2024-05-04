@@ -6,5 +6,5 @@
 
 mod consts;
 mod files;
+mod storage;
 mod utils;
-mod wal;
