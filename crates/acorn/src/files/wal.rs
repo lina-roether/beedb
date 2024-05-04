@@ -25,7 +25,6 @@ struct ItemHeaderRepr {
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU64>,
-	sequence_num: u64,
 }
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
@@ -80,7 +79,6 @@ struct ItemHeader {
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU64>,
-	sequence_num: u64,
 }
 
 impl From<ItemHeader> for ItemHeaderRepr {
@@ -91,7 +89,6 @@ impl From<ItemHeader> for ItemHeaderRepr {
 			body_length: value.body_length,
 			crc: value.crc,
 			prev_item: value.prev_item,
-			sequence_num: value.sequence_num,
 		}
 	}
 }
@@ -105,7 +102,6 @@ impl TryFrom<ItemHeaderRepr> for ItemHeader {
 			body_length: value.body_length,
 			crc: value.crc,
 			prev_item: value.prev_item,
-			sequence_num: value.sequence_num,
 		})
 	}
 }
@@ -262,17 +258,11 @@ pub(crate) struct WriteData<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ItemData<'a> {
+pub(crate) enum Item<'a> {
 	Write(WriteData<'a>),
 	Commit(TransactionData),
 	Undo(TransactionData),
 	Checkpoint,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Item<'a> {
-	pub sequence_num: u64,
-	pub data: ItemData<'a>,
 }
 
 #[cfg_attr(test, automock(
@@ -305,20 +295,20 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 		let mut body_buffer: Vec<u8> = vec![];
 		let kind: ItemKind;
-		match item.data {
-			ItemData::Write(write_data) => {
+		match item {
+			Item::Write(write_data) => {
 				kind = ItemKind::Write;
 				Self::write_write_block(&mut body_buffer, write_data)?;
 			}
-			ItemData::Commit(transaction_data) => {
+			Item::Commit(transaction_data) => {
 				kind = ItemKind::Commit;
 				Self::write_transaction_block(&mut body_buffer, transaction_data)?
 			}
-			ItemData::Undo(transaction_data) => {
+			Item::Undo(transaction_data) => {
 				kind = ItemKind::Undo;
 				Self::write_transaction_block(&mut body_buffer, transaction_data)?
 			}
-			ItemData::Checkpoint => {
+			Item::Checkpoint => {
 				kind = ItemKind::Checkpoint;
 			}
 		};
@@ -332,7 +322,6 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 				.expect("WAL item body length must be 16-bit!"),
 			crc,
 			prev_item: self.prev_item,
-			sequence_num: item.sequence_num,
 		};
 		item_header.serialize(&mut writer)?;
 
@@ -425,19 +414,16 @@ impl<F: Read + Seek> ItemReader<F> {
 		}
 
 		let mut body_cursor = Cursor::new(body_buf);
-		let data = match header.kind {
-			ItemKind::Write => ItemData::Write(Self::read_write_data(&mut body_cursor)?),
-			ItemKind::Commit => ItemData::Commit(Self::read_transaction_data(&mut body_cursor)?),
-			ItemKind::Undo => ItemData::Undo(Self::read_transaction_data(&mut body_cursor)?),
-			ItemKind::Checkpoint => ItemData::Checkpoint,
+		let item = match header.kind {
+			ItemKind::Write => Item::Write(Self::read_write_data(&mut body_cursor)?),
+			ItemKind::Commit => Item::Commit(Self::read_transaction_data(&mut body_cursor)?),
+			ItemKind::Undo => Item::Undo(Self::read_transaction_data(&mut body_cursor)?),
+			ItemKind::Checkpoint => Item::Checkpoint,
 		};
 
 		self.reader.seek_relative(ItemFooter::REPR_SIZE as i64)?;
 
-		Ok(Some(Item {
-			data,
-			sequence_num: header.sequence_num,
-		}))
+		Ok(Some(item))
 	}
 
 	fn read_prev_item(&mut self) -> Result<Option<Item<'static>>, FileError> {
@@ -544,19 +530,16 @@ mod tests {
 
 		// when
 		wal_file
-			.push_item(Item {
-				sequence_num: 69,
-				data: ItemData::Write(WriteData {
-					transaction_data: TransactionData {
-						transaction_id: 25,
-						prev_transaction_item: NonZeroU64::new(24),
-					},
-					page_id: 123,
-					offset: 445,
-					from: Cow::Owned(vec![1, 2, 3, 4]),
-					to: Cow::Owned(vec![4, 5, 6, 7]),
-				}),
-			})
+			.push_item(Item::Write(WriteData {
+				transaction_data: TransactionData {
+					transaction_id: 25,
+					prev_transaction_item: NonZeroU64::new(24),
+				},
+				page_id: 123,
+				offset: 445,
+				from: Cow::Owned(vec![1, 2, 3, 4]),
+				to: Cow::Owned(vec![4, 5, 6, 7]),
+			}))
 			.unwrap();
 
 		// then
@@ -568,7 +551,6 @@ mod tests {
 				body_length: 36,
 				crc: 0xcef5c9ba,
 				prev_item: NonZeroU64::new(0),
-				sequence_num: 69,
 			}
 			.as_bytes(),
 		);
@@ -602,13 +584,10 @@ mod tests {
 
 		// when
 		wal_file
-			.push_item(Item {
-				sequence_num: 69,
-				data: ItemData::Commit(TransactionData {
-					transaction_id: 69,
-					prev_transaction_item: NonZeroU64::new(25),
-				}),
-			})
+			.push_item(Item::Commit(TransactionData {
+				transaction_id: 69,
+				prev_transaction_item: NonZeroU64::new(25),
+			}))
 			.unwrap();
 
 		// then
@@ -620,7 +599,6 @@ mod tests {
 				body_length: 16,
 				crc: 0xdb684ab9,
 				prev_item: NonZeroU64::new(0),
-				sequence_num: 69,
 			}
 			.as_bytes(),
 		);
@@ -644,13 +622,10 @@ mod tests {
 
 		// when
 		wal_file
-			.push_item(Item {
-				sequence_num: 69,
-				data: ItemData::Undo(TransactionData {
-					transaction_id: 69,
-					prev_transaction_item: NonZeroU64::new(25),
-				}),
-			})
+			.push_item(Item::Undo(TransactionData {
+				transaction_id: 69,
+				prev_transaction_item: NonZeroU64::new(25),
+			}))
 			.unwrap();
 
 		// then
@@ -662,7 +637,6 @@ mod tests {
 				body_length: 16,
 				crc: 0xdb684ab9,
 				prev_item: NonZeroU64::new(0),
-				sequence_num: 69,
 			}
 			.as_bytes(),
 		);
@@ -685,12 +659,7 @@ mod tests {
 		let mut wal_file = WalFile::create(Cursor::new(&mut file)).unwrap();
 
 		// when
-		wal_file
-			.push_item(Item {
-				sequence_num: 69,
-				data: ItemData::Checkpoint,
-			})
-			.unwrap();
+		wal_file.push_item(Item::Checkpoint).unwrap();
 
 		// then
 		let mut expected_body = Vec::<u8>::new();
@@ -701,7 +670,6 @@ mod tests {
 				body_length: 0,
 				crc: 0x00000000,
 				prev_item: NonZeroU64::new(0),
-				sequence_num: 69,
 			}
 			.as_bytes(),
 		);
@@ -714,19 +682,16 @@ mod tests {
 	fn write_and_read() {
 		// given
 		let mut wal_file = WalFile::create(Cursor::new(Vec::new())).unwrap();
-		let item = Item {
-			sequence_num: 0,
-			data: ItemData::Write(WriteData {
-				transaction_data: TransactionData {
-					transaction_id: 0,
-					prev_transaction_item: None,
-				},
-				page_id: 69,
-				offset: 420,
-				from: Cow::Owned(vec![0, 0, 0, 0]),
-				to: Cow::Owned(vec![1, 2, 3, 4]),
-			}),
-		};
+		let item = Item::Write(WriteData {
+			transaction_data: TransactionData {
+				transaction_id: 0,
+				prev_transaction_item: None,
+			},
+			page_id: 69,
+			offset: 420,
+			from: Cow::Owned(vec![0, 0, 0, 0]),
+			to: Cow::Owned(vec![1, 2, 3, 4]),
+		});
 
 		// when
 		let offset = wal_file.push_item(item.clone()).unwrap();
@@ -740,26 +705,20 @@ mod tests {
 		// given
 		let mut wal_file = WalFile::create(Cursor::new(Vec::new())).unwrap();
 		let items = [
-			Item {
-				sequence_num: 0,
-				data: ItemData::Write(WriteData {
-					transaction_data: TransactionData {
-						transaction_id: 0,
-						prev_transaction_item: None,
-					},
-					page_id: 69,
-					offset: 420,
-					from: Cow::Owned(vec![0, 0, 0, 0]),
-					to: Cow::Owned(vec![1, 2, 3, 4]),
-				}),
-			},
-			Item {
-				sequence_num: 1,
-				data: ItemData::Commit(TransactionData {
+			Item::Write(WriteData {
+				transaction_data: TransactionData {
 					transaction_id: 0,
 					prev_transaction_item: None,
-				}),
-			},
+				},
+				page_id: 69,
+				offset: 420,
+				from: Cow::Owned(vec![0, 0, 0, 0]),
+				to: Cow::Owned(vec![1, 2, 3, 4]),
+			}),
+			Item::Commit(TransactionData {
+				transaction_id: 0,
+				prev_transaction_item: None,
+			}),
 		];
 
 		// when
@@ -779,26 +738,20 @@ mod tests {
 		// given
 		let mut wal_file = WalFile::create(Cursor::new(Vec::new())).unwrap();
 		let items = [
-			Item {
-				sequence_num: 0,
-				data: ItemData::Write(WriteData {
-					transaction_data: TransactionData {
-						transaction_id: 0,
-						prev_transaction_item: None,
-					},
-					page_id: 69,
-					offset: 420,
-					from: Cow::Owned(vec![0, 0, 0, 0]),
-					to: Cow::Owned(vec![1, 2, 3, 4]),
-				}),
-			},
-			Item {
-				sequence_num: 1,
-				data: ItemData::Commit(TransactionData {
+			Item::Write(WriteData {
+				transaction_data: TransactionData {
 					transaction_id: 0,
 					prev_transaction_item: None,
-				}),
-			},
+				},
+				page_id: 69,
+				offset: 420,
+				from: Cow::Owned(vec![0, 0, 0, 0]),
+				to: Cow::Owned(vec![1, 2, 3, 4]),
+			}),
+			Item::Commit(TransactionData {
+				transaction_id: 0,
+				prev_transaction_item: None,
+			}),
 		];
 
 		// when
@@ -820,46 +773,24 @@ mod tests {
 
 		// when
 		let mut wal_file = WalFile::create_file(tmpdir.path().join("0")).unwrap();
-		let offset = wal_file
-			.push_item(Item {
-				sequence_num: 0,
-				data: ItemData::Checkpoint,
-			})
-			.unwrap();
+		let offset = wal_file.push_item(Item::Checkpoint).unwrap();
 
 		// then
 		assert!(tmpdir.path().join("0").exists());
-		assert_eq!(
-			wal_file.read_item_at(offset).unwrap(),
-			Item {
-				sequence_num: 0,
-				data: ItemData::Checkpoint
-			}
-		);
+		assert_eq!(wal_file.read_item_at(offset).unwrap(), Item::Checkpoint);
 	}
 
 	#[test]
 	fn open_physical_file() {
 		// given
-		let tmpdir = dbg!(tempfile::tempdir().unwrap());
+		let tmpdir = tempfile::tempdir().unwrap();
 		WalFile::create_file(tmpdir.path().join("0")).unwrap();
 
 		// when
 		let mut wal_file = WalFile::open_file(tmpdir.path().join("0")).unwrap();
-		let offset = wal_file
-			.push_item(Item {
-				sequence_num: 0,
-				data: ItemData::Checkpoint,
-			})
-			.unwrap();
+		let offset = wal_file.push_item(Item::Checkpoint).unwrap();
 
 		// then
-		assert_eq!(
-			wal_file.read_item_at(offset).unwrap(),
-			Item {
-				sequence_num: 0,
-				data: ItemData::Checkpoint
-			}
-		);
+		assert_eq!(wal_file.read_item_at(offset).unwrap(), Item::Checkpoint);
 	}
 }
