@@ -88,7 +88,7 @@ mod tests {
 	fn verify_header() {
 		let header_repr = GenericHeaderRepr {
 			magic: *b"ACRN",
-			byte_order: NATIVE_BYTE_ORDER as u8,
+			byte_order: NATIVE_BYTE_ORDER,
 			file_type: FileType::Wal as u8,
 			content_offset: 69,
 			version: 1,
@@ -107,7 +107,7 @@ mod tests {
 	fn try_verify_header_with_missing_magic() {
 		let header_repr = GenericHeaderRepr {
 			magic: *b"KEKW",
-			byte_order: NATIVE_BYTE_ORDER as u8,
+			byte_order: NATIVE_BYTE_ORDER,
 			file_type: FileType::Wal as u8,
 			content_offset: 69,
 			version: 1,

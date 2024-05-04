@@ -21,28 +21,17 @@ where
 	const REPR_SIZE: usize = size_of::<Self::Repr>();
 
 	fn serialize(self, mut writer: impl Write) -> Result<(), FileError> {
-		let repr = Self::Repr::from(self);
-		writer.write_all(repr.as_bytes())?;
+		writer.write_all(self.into_repr().as_bytes())?;
 		Ok(())
 	}
 
 	fn deserialize(mut reader: impl Read) -> Result<Self, FileError> {
 		let mut repr = Self::Repr::new_zeroed();
 		reader.read_exact(repr.as_bytes_mut())?;
-		let value: Self = repr.try_into()?;
-		Ok(value)
+		Ok(repr.try_into()?)
 	}
 
-	fn from_repr_bytes(bytes: &[u8]) -> Result<Self, FileError> {
-		let Some(repr) = Self::Repr::ref_from_prefix(bytes) else {
-			return Err(FileError::UnexpectedEof);
-		};
-		let value: Self = repr.clone().try_into()?;
-		Ok(value)
-	}
-
-	fn write_repr_bytes(self, bytes: &mut [u8]) {
-		let repr = Self::Repr::from(self);
-		bytes[0..Self::REPR_SIZE].copy_from_slice(repr.as_bytes());
+	fn into_repr(self) -> Self::Repr {
+		Self::Repr::from(self)
 	}
 }

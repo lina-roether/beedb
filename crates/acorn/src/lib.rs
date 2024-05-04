@@ -2,7 +2,7 @@
 // process is complete
 #![allow(dead_code)]
 #![feature(buf_read_has_data_left)]
-#![feature(trait_alias)]
+#![feature(cfg_match)]
 
 mod consts;
 mod files;

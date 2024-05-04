@@ -6,6 +6,7 @@ use std::{
 	path::Path,
 };
 
+use static_assertions::assert_impl_all;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 const FORMAT_VERSION: u8 = 1;
@@ -159,6 +160,7 @@ pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	prev_item: Option<NonZeroU64>,
 	file: F,
 }
+assert_impl_all!(WalFile: Send, Sync);
 
 impl WalFile {
 	pub fn create_file(path: impl AsRef<Path>) -> Result<Self, FileError> {
