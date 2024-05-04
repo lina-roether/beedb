@@ -196,4 +196,36 @@ mod tests {
 		// then
 		assert_eq!(data, [4, 5, 6]);
 	}
+
+	#[test]
+	fn create_physical_file() {
+		// given
+		let tempdir = tempfile::tempdir().unwrap();
+
+		// when
+		let mut segment = SegmentFile::create_file(tempdir.path().join("0")).unwrap();
+		segment.write(NonZeroU16::new(2).unwrap(), 3, &[1, 2, 3]);
+
+		// then
+		assert!(tempdir.path().join("0").exists());
+		let mut data = [0; 3];
+		segment.read(NonZeroU16::new(2).unwrap(), 3, &mut data);
+		assert_eq!(data, [1, 2, 3]);
+	}
+
+	#[test]
+	fn open_physical_file() {
+		// given
+		let tempdir = tempfile::tempdir().unwrap();
+		SegmentFile::create_file(tempdir.path().join("0")).unwrap();
+
+		// when
+		let mut segment = SegmentFile::open_file(tempdir.path().join("0")).unwrap();
+		segment.write(NonZeroU16::new(2).unwrap(), 3, &[1, 2, 3]);
+
+		// then
+		let mut data = [0; 3];
+		segment.read(NonZeroU16::new(2).unwrap(), 3, &mut data);
+		assert_eq!(data, [1, 2, 3]);
+	}
 }

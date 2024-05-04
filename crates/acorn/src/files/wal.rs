@@ -812,4 +812,54 @@ mod tests {
 		assert_eq!(iter.next().unwrap().unwrap(), items[0]);
 		assert!(iter.next().is_none());
 	}
+
+	#[test]
+	fn create_physical_file() {
+		// given
+		let tmpdir = tempfile::tempdir().unwrap();
+
+		// when
+		let mut wal_file = WalFile::create_file(tmpdir.path().join("0")).unwrap();
+		let offset = wal_file
+			.push_item(Item {
+				sequence_num: 0,
+				data: ItemData::Checkpoint,
+			})
+			.unwrap();
+
+		// then
+		assert!(tmpdir.path().join("0").exists());
+		assert_eq!(
+			wal_file.read_item_at(offset).unwrap(),
+			Item {
+				sequence_num: 0,
+				data: ItemData::Checkpoint
+			}
+		);
+	}
+
+	#[test]
+	fn open_physical_file() {
+		// given
+		let tmpdir = dbg!(tempfile::tempdir().unwrap());
+		WalFile::create_file(tmpdir.path().join("0")).unwrap();
+
+		// when
+		let mut wal_file = WalFile::open_file(tmpdir.path().join("0")).unwrap();
+		let offset = wal_file
+			.push_item(Item {
+				sequence_num: 0,
+				data: ItemData::Checkpoint,
+			})
+			.unwrap();
+
+		// then
+		assert_eq!(
+			wal_file.read_item_at(offset).unwrap(),
+			Item {
+				sequence_num: 0,
+				data: ItemData::Checkpoint
+			}
+		);
+	}
 }

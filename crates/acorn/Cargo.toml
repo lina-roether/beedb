@@ -13,3 +13,4 @@ thiserror = "1.0.58"
 
 [dev-dependencies]
 mockall = { version = "0.12.1", features = ["nightly"] }
+tempfile = { version = "3.10.1", features = ["nightly"] }
