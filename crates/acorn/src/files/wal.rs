@@ -8,6 +8,8 @@ use std::{
 
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
+const FORMAT_VERSION: u8 = 1;
+
 #[cfg(test)]
 use mockall::automock;
 
@@ -182,6 +184,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		let meta = GenericHeader {
 			file_type: FileType::Wal,
 			content_offset,
+			version: FORMAT_VERSION,
 		};
 		meta.serialize(&mut file)?;
 		Self::new(file, content_offset.into())
@@ -192,6 +195,12 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		let header = GenericHeader::deserialize(&mut file)?;
 		if header.file_type != FileType::Wal {
 			return Err(FileError::WrongFileType(header.file_type));
+		}
+		if header.version != FORMAT_VERSION {
+			return Err(FileError::IncompatibleVersion(
+				header.file_type,
+				header.version,
+			));
 		}
 
 		Self::new(file, header.content_offset.into())
@@ -494,7 +503,8 @@ mod tests {
 		expected_data.extend(
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Wal,
-				content_offset: 8,
+				content_offset: GenericHeader::REPR_SIZE as u16,
+				version: FORMAT_VERSION,
 			})
 			.as_bytes(),
 		);
@@ -510,7 +520,8 @@ mod tests {
 		file.extend(
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Wal,
-				content_offset: 8,
+				content_offset: GenericHeader::REPR_SIZE as u16,
+				version: FORMAT_VERSION,
 			})
 			.as_bytes(),
 		);
@@ -571,9 +582,14 @@ mod tests {
 		);
 		expected_body.extend([1, 2, 3, 4]);
 		expected_body.extend([4, 5, 6, 7]);
-		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+		expected_body.extend(
+			ItemFooterRepr {
+				item_start: GenericHeader::REPR_SIZE as u64,
+			}
+			.as_bytes(),
+		);
 
-		assert_eq!(file[8..], expected_body);
+		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]
@@ -609,9 +625,14 @@ mod tests {
 			}
 			.as_bytes(),
 		);
-		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+		expected_body.extend(
+			ItemFooterRepr {
+				item_start: GenericHeader::REPR_SIZE as u64,
+			}
+			.as_bytes(),
+		);
 
-		assert_eq!(file[8..], expected_body);
+		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]
@@ -647,9 +668,14 @@ mod tests {
 			}
 			.as_bytes(),
 		);
-		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+		expected_body.extend(
+			ItemFooterRepr {
+				item_start: GenericHeader::REPR_SIZE as u64,
+			}
+			.as_bytes(),
+		);
 
-		assert_eq!(file[8..], expected_body);
+		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]
@@ -673,9 +699,14 @@ mod tests {
 			}
 			.as_bytes(),
 		);
-		expected_body.extend(ItemFooterRepr { item_start: 8 }.as_bytes());
+		expected_body.extend(
+			ItemFooterRepr {
+				item_start: GenericHeader::REPR_SIZE as u64,
+			}
+			.as_bytes(),
+		);
 
-		assert_eq!(file[8..], expected_body);
+		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]

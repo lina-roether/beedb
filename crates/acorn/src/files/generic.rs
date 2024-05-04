@@ -3,12 +3,13 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use super::{utils::Serialized, FileError};
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
-#[repr(C)]
+#[repr(C, packed)]
 pub(super) struct GenericHeaderRepr {
 	magic: [u8; 4],
 	byte_order: u8,
 	file_type: u8,
 	content_offset: u16,
+	version: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,7 @@ const MAGIC: [u8; 4] = *b"ACRN";
 pub(super) struct GenericHeader {
 	pub file_type: FileType,
 	pub content_offset: u16,
+	pub version: u8,
 }
 
 impl From<GenericHeader> for GenericHeaderRepr {
@@ -51,6 +53,7 @@ impl From<GenericHeader> for GenericHeaderRepr {
 			byte_order: NATIVE_BYTE_ORDER,
 			file_type: value.file_type as u8,
 			content_offset: value.content_offset,
+			version: value.version,
 		}
 	}
 }
@@ -68,6 +71,7 @@ impl TryFrom<GenericHeaderRepr> for GenericHeader {
 		Ok(Self {
 			file_type: value.file_type.try_into()?,
 			content_offset: value.content_offset,
+			version: value.version,
 		})
 	}
 }
@@ -87,12 +91,14 @@ mod tests {
 			byte_order: NATIVE_BYTE_ORDER as u8,
 			file_type: FileType::Wal as u8,
 			content_offset: 69,
+			version: 1,
 		};
 		assert_eq!(
 			GenericHeader::try_from(header_repr).unwrap(),
 			GenericHeader {
 				file_type: FileType::Wal,
-				content_offset: 69
+				content_offset: 69,
+				version: 1
 			}
 		);
 	}
@@ -104,6 +110,7 @@ mod tests {
 			byte_order: NATIVE_BYTE_ORDER as u8,
 			file_type: FileType::Wal as u8,
 			content_offset: 69,
+			version: 1,
 		};
 		let err = GenericHeader::try_from(header_repr).unwrap_err();
 		assert_eq!(err.to_string(), "The file is not an acorn database file");
@@ -116,6 +123,7 @@ mod tests {
 			byte_order: !NATIVE_BYTE_ORDER,
 			file_type: FileType::Wal as u8,
 			content_offset: 69,
+			version: 1,
 		};
 		let err = GenericHeader::try_from(header_repr).unwrap_err();
 		assert_eq!(

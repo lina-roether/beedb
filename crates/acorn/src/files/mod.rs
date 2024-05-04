@@ -33,6 +33,9 @@ pub(crate) enum FileError {
 	#[error("Unexpected file type {0:?}")]
 	WrongFileType(FileType),
 
+	#[error("Incompatible version of {0:?} file: {1}")]
+	IncompatibleVersion(FileType, u8),
+
 	#[error("Unexpected end of file")]
 	UnexpectedEof,
 

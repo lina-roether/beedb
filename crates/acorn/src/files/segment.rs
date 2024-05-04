@@ -13,6 +13,8 @@ use mockall::automock;
 use super::{generic::GenericHeader, utils::Serialized, FileError};
 use crate::{consts::PAGE_SIZE, files::generic::FileType};
 
+const FORMAT_VERSION: u8 = 1;
+
 // 1 GiB for PAGE_SIZE = 16 KiB
 const SEGMENT_SIZE: usize = PAGE_SIZE << 16;
 
@@ -59,6 +61,7 @@ where
 		let header = GenericHeader {
 			file_type: FileType::Segment,
 			content_offset: PAGE_SIZE as u16,
+			version: FORMAT_VERSION,
 		};
 		header.write_repr_bytes(&mut buffer);
 		Self { buffer }
@@ -68,6 +71,12 @@ where
 		let header = GenericHeader::from_repr_bytes(&buffer)?;
 		if header.file_type != FileType::Segment {
 			return Err(FileError::WrongFileType(header.file_type));
+		}
+		if header.version != FORMAT_VERSION {
+			return Err(FileError::IncompatibleVersion(
+				header.file_type,
+				FORMAT_VERSION,
+			));
 		}
 		if header.content_offset as usize != PAGE_SIZE {
 			return Err(FileError::Corrupted(format!(
@@ -143,6 +152,7 @@ mod tests {
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Segment,
 				content_offset: PAGE_SIZE as u16,
+				version: FORMAT_VERSION,
 			})
 			.as_bytes(),
 		);
@@ -157,6 +167,7 @@ mod tests {
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Segment,
 				content_offset: PAGE_SIZE as u16,
+				version: FORMAT_VERSION,
 			})
 			.as_bytes(),
 		);
