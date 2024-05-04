@@ -10,6 +10,7 @@ crc = "3.2.1"
 zerocopy = { version = "0.7.32", features = ["derive"] }
 thiserror = "1.0.58"
 static_assertions = { version = "1.1.0", features = ["nightly"] }
+parking_lot = { version = "0.12.2", features = ["nightly"] }
 
 [dev-dependencies]
 mockall = { version = "0.12.1", features = ["nightly"] }

@@ -98,29 +98,29 @@ impl SegmentFile {
 	}
 
 	#[inline]
-	fn get_page_offset(page_id: NonZeroU16) -> u64 {
-		page_id.get() as u64 * PAGE_SIZE as u64
+	fn get_page_offset(page_num: NonZeroU16) -> u64 {
+		page_num.get() as u64 * PAGE_SIZE as u64
 	}
 }
 
 #[cfg_attr(test, automock)]
 pub(crate) trait SegmentFileApi {
-	fn read(&self, page_id: NonZeroU16, offset: u16, buf: &mut [u8]) -> Result<(), FileError>;
-	fn write(&self, page_id: NonZeroU16, offset: u16, buf: &[u8]) -> Result<(), FileError>;
+	fn read(&self, page_num: NonZeroU16, offset: u16, buf: &mut [u8]) -> Result<(), FileError>;
+	fn write(&self, page_num: NonZeroU16, offset: u16, buf: &[u8]) -> Result<(), FileError>;
 }
 
 impl SegmentFileApi for SegmentFile {
-	fn read(&self, page_id: NonZeroU16, offset: u16, buf: &mut [u8]) -> Result<(), FileError> {
+	fn read(&self, page_num: NonZeroU16, offset: u16, buf: &mut [u8]) -> Result<(), FileError> {
 		assert!(offset as usize + buf.len() <= PAGE_SIZE);
 
-		self.read_exact_at(buf, Self::get_page_offset(page_id) + offset as u64)?;
+		self.read_exact_at(buf, Self::get_page_offset(page_num) + offset as u64)?;
 		Ok(())
 	}
 
-	fn write(&self, page_id: NonZeroU16, offset: u16, buf: &[u8]) -> Result<(), FileError> {
+	fn write(&self, page_num: NonZeroU16, offset: u16, buf: &[u8]) -> Result<(), FileError> {
 		assert!(offset as usize + buf.len() <= PAGE_SIZE);
 
-		self.write_all_at(buf, Self::get_page_offset(page_id) + offset as u64)?;
+		self.write_all_at(buf, Self::get_page_offset(page_num) + offset as u64)?;
 		Ok(())
 	}
 }

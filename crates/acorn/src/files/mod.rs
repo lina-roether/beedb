@@ -70,8 +70,8 @@ impl DatabaseFolder {
 		Ok(path)
 	}
 
-	fn segment_file_path(&self, segment_id: u32) -> Result<PathBuf, FileError> {
-		self.segments_dir().map(|p| p.join(segment_id.to_string()))
+	fn segment_file_path(&self, segment_num: u32) -> Result<PathBuf, FileError> {
+		self.segments_dir().map(|p| p.join(segment_num.to_string()))
 	}
 
 	fn wal_dir(&self) -> Result<PathBuf, FileError> {
@@ -93,41 +93,29 @@ pub(crate) trait DatabaseFolderApi {
 	type SegmentFile: SegmentFileApi;
 	type WalFile: WalFileApi;
 
-	fn create_segment_file(&self, segment_id: u32) -> Result<Self::SegmentFile, FileError>;
-	fn open_segment_file(&self, segment_id: u32) -> Result<Option<Self::SegmentFile>, FileError>;
-	fn create_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError>;
-	fn open_wal_file(&self, generation: u64) -> Result<Option<Self::WalFile>, FileError>;
+	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError>;
+	fn open_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError>;
 }
 
 impl DatabaseFolderApi for DatabaseFolder {
 	type SegmentFile = SegmentFile;
 	type WalFile = WalFile;
 
-	fn create_segment_file(&self, segment_id: u32) -> Result<Self::SegmentFile, FileError> {
-		SegmentFile::create_file(self.segment_file_path(segment_id)?)
-	}
-
-	fn open_segment_file(&self, segment_id: u32) -> Result<Option<Self::SegmentFile>, FileError> {
-		let path = self.segment_file_path(segment_id)?;
+	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError> {
+		let path = self.segment_file_path(segment_num)?;
 		if path.exists() {
-			let file = SegmentFile::open_file(path)?;
-			Ok(Some(file))
+			SegmentFile::open_file(path)
 		} else {
-			Ok(None)
+			SegmentFile::create_file(path)
 		}
 	}
 
-	fn create_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError> {
-		WalFile::create_file(self.wal_file_path(generation)?)
-	}
-
-	fn open_wal_file(&self, generation: u64) -> Result<Option<Self::WalFile>, FileError> {
+	fn open_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError> {
 		let path = self.wal_file_path(generation)?;
 		if path.exists() {
-			let file = WalFile::open_file(path)?;
-			Ok(Some(file))
+			WalFile::open_file(path)
 		} else {
-			Ok(None)
+			WalFile::create_file(path)
 		}
 	}
 }
