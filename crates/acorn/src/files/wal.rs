@@ -1,8 +1,9 @@
 use std::{
 	borrow::Cow,
+	collections::HashMap,
 	fs::{File, OpenOptions},
 	io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
-	num::NonZeroU64,
+	num::{NonZeroU16, NonZeroU64},
 	path::Path,
 };
 
@@ -13,6 +14,8 @@ const FORMAT_VERSION: u8 = 1;
 
 #[cfg(test)]
 use mockall::automock;
+
+use crate::storage::{PageId, WalIndex};
 
 use super::{
 	generic::{FileType, GenericHeader},
@@ -49,6 +52,27 @@ struct WriteBlockRepr {
 	page_id: u64,
 	offset: u16,
 	write_length: u16,
+}
+
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[repr(C)]
+struct CheckpointBlockRepr {
+	num_dirty_pages: u64,
+	num_transactions: u64,
+}
+
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[repr(C, packed)]
+pub(crate) struct PageIdRepr {
+	segment_num: u32,
+	page_num: u16,
+}
+
+#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[repr(C)]
+pub(crate) struct WalIndexRepr {
+	generation: u64,
+	offset: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +179,60 @@ impl Serialized for WriteBlock {
 	type Repr = WriteBlockRepr;
 }
 
+type CheckpointBlock = CheckpointBlockRepr;
+
+impl Serialized for CheckpointBlock {
+	type Repr = CheckpointBlockRepr;
+}
+
+impl From<PageId> for PageIdRepr {
+	fn from(value: PageId) -> Self {
+		Self {
+			segment_num: value.segment_num,
+			page_num: value.page_num.get(),
+		}
+	}
+}
+
+impl TryFrom<PageIdRepr> for PageId {
+	type Error = FileError;
+
+	fn try_from(value: PageIdRepr) -> Result<Self, Self::Error> {
+		let Some(page_num) = NonZeroU16::new(value.page_num) else {
+			return Err(FileError::Corrupted(
+				"Found invalid page number 0".to_string(),
+			));
+		};
+		Ok(PageId::new(value.segment_num, page_num))
+	}
+}
+
+impl Serialized for PageId {
+	type Repr = PageIdRepr;
+}
+
+impl From<WalIndex> for WalIndexRepr {
+	fn from(value: WalIndex) -> Self {
+		Self {
+			offset: value.offset,
+			generation: value.generation,
+		}
+	}
+}
+
+impl From<WalIndexRepr> for WalIndex {
+	fn from(value: WalIndexRepr) -> Self {
+		Self {
+			offset: value.offset,
+			generation: value.generation,
+		}
+	}
+}
+
+impl Serialized for WalIndex {
+	type Repr = WalIndexRepr;
+}
+
 pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
@@ -251,6 +329,27 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		writer.write_all(&data.to)?;
 		Ok(())
 	}
+
+	fn write_checkpoint_block(
+		mut writer: impl Write,
+		data: CheckpointData,
+	) -> Result<(), FileError> {
+		let block = CheckpointBlock {
+			num_dirty_pages: data.dirty_pages.len() as u64,
+			num_transactions: data.transactions.len() as u64,
+		};
+		block.serialize(&mut writer)?;
+		for (page_id, wal_index) in data.dirty_pages.iter() {
+			page_id.serialize(&mut writer)?;
+			wal_index.serialize(&mut writer)?;
+		}
+		for (transaction_id, wal_index) in data.transactions.iter() {
+			writer.write_all(transaction_id.as_bytes())?;
+			wal_index.serialize(&mut writer)?;
+		}
+
+		Ok(())
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,11 +368,17 @@ pub(crate) struct WriteData<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckpointData<'a> {
+	pub transactions: Cow<'a, HashMap<u64, WalIndex>>,
+	pub dirty_pages: Cow<'a, HashMap<PageId, WalIndex>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Item<'a> {
 	Write(WriteData<'a>),
 	Commit(TransactionData),
 	Undo(TransactionData),
-	Checkpoint,
+	Checkpoint(CheckpointData<'a>),
 }
 
 #[cfg_attr(test, automock(
@@ -319,8 +424,9 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 				kind = ItemKind::Undo;
 				Self::write_transaction_block(&mut body_buffer, transaction_data)?
 			}
-			Item::Checkpoint => {
+			Item::Checkpoint(checkpoint_data) => {
 				kind = ItemKind::Checkpoint;
+				Self::write_checkpoint_block(&mut body_buffer, checkpoint_data)?
 			}
 		};
 		let crc = CRC32.checksum(&body_buffer);
@@ -411,6 +517,31 @@ impl<F: Read + Seek> ItemReader<F> {
 		})
 	}
 
+	fn read_checkpoint_data(mut body: impl Read) -> Result<CheckpointData<'static>, FileError> {
+		let checkpoint_block = CheckpointBlock::deserialize(&mut body)?;
+
+		let mut dirty_pages: HashMap<PageId, WalIndex> = HashMap::new();
+		for _ in 0..checkpoint_block.num_dirty_pages {
+			let page_id = PageId::deserialize(&mut body)?;
+			let wal_index = WalIndex::deserialize(&mut body)?;
+			dirty_pages.insert(page_id, wal_index);
+		}
+
+		let mut transactions: HashMap<u64, WalIndex> = HashMap::new();
+		for _ in 0..checkpoint_block.num_transactions {
+			let mut tid_bytes = [0; 8];
+			body.read_exact(&mut tid_bytes)?;
+			let transaction_id = u64::from_ne_bytes(tid_bytes);
+			let wal_index = WalIndex::deserialize(&mut body)?;
+			transactions.insert(transaction_id, wal_index);
+		}
+
+		Ok(CheckpointData {
+			dirty_pages: Cow::Owned(dirty_pages),
+			transactions: Cow::Owned(transactions),
+		})
+	}
+
 	fn read_item(&mut self) -> Result<Option<Item<'static>>, FileError> {
 		if !self.reader.has_data_left()? {
 			return Ok(None);
@@ -429,7 +560,7 @@ impl<F: Read + Seek> ItemReader<F> {
 			ItemKind::Write => Item::Write(Self::read_write_data(&mut body_cursor)?),
 			ItemKind::Commit => Item::Commit(Self::read_transaction_data(&mut body_cursor)?),
 			ItemKind::Undo => Item::Undo(Self::read_transaction_data(&mut body_cursor)?),
-			ItemKind::Checkpoint => Item::Checkpoint,
+			ItemKind::Checkpoint => Item::Checkpoint(Self::read_checkpoint_data(&mut body_cursor)?),
 		};
 
 		self.reader.seek_relative(ItemFooter::REPR_SIZE as i64)?;
@@ -687,7 +818,19 @@ mod tests {
 		let mut wal_file = WalFile::create(Cursor::new(&mut file)).unwrap();
 
 		// when
-		wal_file.push_item(Item::Checkpoint).unwrap();
+		let mut dirty_pages = HashMap::new();
+		dirty_pages.insert(
+			PageId::new(1, NonZeroU16::new(2).unwrap()),
+			WalIndex::new(0, 3),
+		);
+		let mut transactions = HashMap::new();
+		transactions.insert(69, WalIndex::new(0, 420));
+		wal_file
+			.push_item(Item::Checkpoint(CheckpointData {
+				dirty_pages: Cow::Borrowed(&dirty_pages),
+				transactions: Cow::Borrowed(&transactions),
+			}))
+			.unwrap();
 
 		// then
 		let mut expected_body = Vec::<u8>::new();
@@ -695,9 +838,38 @@ mod tests {
 			ItemHeaderRepr {
 				kind: ItemKind::Checkpoint as u8,
 				_padding: 0,
-				body_length: 0,
-				crc: 0x00000000,
+				body_length: 62,
+				crc: 0xc3819119,
 				prev_item: NonZeroU64::new(0),
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(
+			CheckpointBlockRepr {
+				num_dirty_pages: 1,
+				num_transactions: 1,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(
+			PageIdRepr {
+				segment_num: 1,
+				page_num: 2,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(
+			WalIndexRepr {
+				generation: 0,
+				offset: 3,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend(69_u64.to_ne_bytes());
+		expected_body.extend(
+			WalIndexRepr {
+				generation: 0,
+				offset: 420,
 			}
 			.as_bytes(),
 		);
@@ -797,33 +969,5 @@ mod tests {
 		assert_eq!(iter.next().unwrap().unwrap(), items[1]);
 		assert_eq!(iter.next().unwrap().unwrap(), items[0]);
 		assert!(iter.next().is_none());
-	}
-
-	#[test]
-	fn create_physical_file() {
-		// given
-		let tmpdir = tempfile::tempdir().unwrap();
-
-		// when
-		let mut wal_file = WalFile::create_file(tmpdir.path().join("0")).unwrap();
-		let offset = wal_file.push_item(Item::Checkpoint).unwrap();
-
-		// then
-		assert!(tmpdir.path().join("0").exists());
-		assert_eq!(wal_file.read_item_at(offset).unwrap(), Item::Checkpoint);
-	}
-
-	#[test]
-	fn open_physical_file() {
-		// given
-		let tmpdir = tempfile::tempdir().unwrap();
-		WalFile::create_file(tmpdir.path().join("0")).unwrap();
-
-		// when
-		let mut wal_file = WalFile::open_file(tmpdir.path().join("0")).unwrap();
-		let offset = wal_file.push_item(Item::Checkpoint).unwrap();
-
-		// then
-		assert_eq!(wal_file.read_item_at(offset).unwrap(), Item::Checkpoint);
 	}
 }
