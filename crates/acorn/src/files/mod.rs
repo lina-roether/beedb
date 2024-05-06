@@ -95,6 +95,7 @@ pub(crate) trait DatabaseFolderApi {
 
 	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError>;
 	fn open_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError>;
+	fn delete_wal_file(&self, generation: u64) -> Result<(), FileError>;
 }
 
 impl DatabaseFolderApi for DatabaseFolder {
@@ -117,5 +118,11 @@ impl DatabaseFolderApi for DatabaseFolder {
 		} else {
 			WalFile::create_file(path)
 		}
+	}
+
+	fn delete_wal_file(&self, generation: u64) -> Result<(), FileError> {
+		let path = self.wal_file_path(generation)?;
+		fs::remove_file(path)?;
+		Ok(())
 	}
 }
