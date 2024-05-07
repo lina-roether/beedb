@@ -9,6 +9,9 @@ mod wal;
 
 #[derive(Debug, Error)]
 pub(crate) enum StorageError {
+	#[error("The WAL was never initialized!")]
+	WalNotInitialized,
+
 	#[error(transparent)]
 	File(#[from] FileError),
 }
