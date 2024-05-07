@@ -3,6 +3,7 @@ use std::{
 	collections::HashMap,
 	fs::{File, OpenOptions},
 	io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+	mem,
 	num::{NonZeroU16, NonZeroU64},
 	path::Path,
 };
@@ -237,6 +238,7 @@ pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
 	file: F,
+	size: usize,
 }
 assert_impl_all!(WalFile: Send, Sync);
 
@@ -294,10 +296,12 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		} else {
 			None
 		};
+		let size = file.seek(SeekFrom::End(0))? as usize;
 		Ok(Self {
 			body_start,
 			file,
 			prev_item,
+			size,
 		})
 	}
 
@@ -398,6 +402,7 @@ pub(crate) trait WalFileApi {
 	fn read_item_at(&mut self, offset: NonZeroU64) -> Result<Item<'static>, FileError>;
 	fn iter_items<'a>(&'a mut self) -> Result<Self::IterItems<'a>, FileError>;
 	fn iter_items_reverse<'a>(&'a mut self) -> Result<Self::IterItemsReverse<'a>, FileError>;
+	fn size(&self) -> usize;
 }
 
 impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
@@ -450,8 +455,10 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		item_footer.serialize(&mut writer)?;
 
 		self.prev_item = Some(current_pos);
-
 		writer.flush()?;
+		mem::drop(writer);
+
+		self.size = self.file.seek(SeekFrom::End(0))? as usize;
 		Ok(current_pos)
 	}
 
@@ -474,6 +481,11 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 	fn iter_items_reverse(&mut self) -> Result<Self::IterItemsReverse<'_>, FileError> {
 		self.file.seek(SeekFrom::End(0))?;
 		Ok(IterItemsReverse::new(&mut self.file, self.prev_item))
+	}
+
+	#[inline]
+	fn size(&self) -> usize {
+		self.size
 	}
 }
 
@@ -722,6 +734,7 @@ mod tests {
 			.as_bytes(),
 		);
 
+		assert_eq!(wal_file.size(), file.len());
 		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
@@ -765,6 +778,7 @@ mod tests {
 			.as_bytes(),
 		);
 
+		assert_eq!(wal_file.size(), file.len());
 		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
@@ -808,6 +822,7 @@ mod tests {
 			.as_bytes(),
 		);
 
+		assert_eq!(wal_file.size(), file.len());
 		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
@@ -880,6 +895,7 @@ mod tests {
 			.as_bytes(),
 		);
 
+		assert_eq!(wal_file.size(), file.len());
 		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 

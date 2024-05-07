@@ -1,4 +1,9 @@
-use std::{convert::Infallible, fs, io, path::PathBuf};
+use std::{
+	convert::Infallible,
+	fs::{self, ReadDir},
+	io,
+	path::PathBuf,
+};
 
 use thiserror::Error;
 
@@ -88,19 +93,24 @@ impl DatabaseFolder {
 #[cfg_attr(test, automock(
     type SegmentFile = MockSegmentFileApi;
     type WalFile = MockWalFileApi;
+    type IterWalFiles = std::vec::IntoIter<Result<MockWalFileApi, FileError>>;
 ))]
 pub(crate) trait DatabaseFolderApi {
 	type SegmentFile: SegmentFileApi;
 	type WalFile: WalFileApi;
+	type IterWalFiles: Iterator<Item = Result<Self::WalFile, FileError>>;
 
 	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError>;
 	fn open_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError>;
 	fn delete_wal_file(&self, generation: u64) -> Result<(), FileError>;
+	fn iter_wal_files(&self) -> Result<Self::IterWalFiles, FileError>;
+	fn clear_wal_files(&self) -> Result<(), FileError>;
 }
 
 impl DatabaseFolderApi for DatabaseFolder {
 	type SegmentFile = SegmentFile;
 	type WalFile = WalFile;
+	type IterWalFiles = IterWalFiles;
 
 	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError> {
 		let path = self.segment_file_path(segment_num)?;
@@ -124,5 +134,34 @@ impl DatabaseFolderApi for DatabaseFolder {
 		let path = self.wal_file_path(generation)?;
 		fs::remove_file(path)?;
 		Ok(())
+	}
+
+	fn clear_wal_files(&self) -> Result<(), FileError> {
+		fs::remove_dir_all(self.wal_dir()?)?;
+		Ok(())
+	}
+
+	fn iter_wal_files(&self) -> Result<Self::IterWalFiles, FileError> {
+		Ok(IterWalFiles(fs::read_dir(self.wal_dir()?)?))
+	}
+}
+
+pub(crate) struct IterWalFiles(ReadDir);
+
+impl Iterator for IterWalFiles {
+	type Item = Result<WalFile, FileError>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		for entry_result in &mut self.0 {
+			let entry = match entry_result {
+				Ok(entry) => entry,
+				Err(error) => return Some(Err(error.into())),
+			};
+			if entry.path().is_file() {
+				return Some(WalFile::open_file(entry.path()));
+			}
+		}
+
+		None
 	}
 }
