@@ -3,7 +3,7 @@ use std::{
 	collections::{HashMap, VecDeque},
 	mem,
 	sync::{
-		atomic::{AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicUsize, Ordering},
 		Arc,
 	},
 };
@@ -22,45 +22,47 @@ use super::{physical::PhysicalStorageApi, PageId, StorageError, WalIndex};
 
 pub(super) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
 	folder: Arc<DF>,
-	state: RwLock<State<DF>>,
+	generations: RwLock<GenerationQueue<DF>>,
+	state: Mutex<State>,
 }
 assert_impl_all!(Wal: Send, Sync);
 
 impl<DF: DatabaseFolderApi> Wal<DF> {
 	pub fn create(folder: Arc<DF>) -> Result<Self, StorageError> {
 		folder.clear_wal_files()?;
-		let mut state: State<DF> = State::new();
-		state.push_generation(0, folder.open_wal_file(0)?);
-		Self::write_checkpoint(&state, &HashMap::new(), &HashMap::new())?;
+		let mut gens: GenerationQueue<DF> = GenerationQueue::new();
+		gens.push_generation(0, folder.open_wal_file(0)?);
+		Self::write_checkpoint(&gens, &HashMap::new(), &HashMap::new())?;
 
-		Ok(Self::new(folder, state))
+		Ok(Self::new(folder, gens))
 	}
 
 	pub fn open(folder: Arc<DF>) -> Result<Self, StorageError> {
 		let mut wal_files: Vec<(u64, DF::WalFile)> = Result::from_iter(folder.iter_wal_files()?)?;
 		wal_files.sort_by(|(gen_1, _), (gen_2, _)| u64::cmp(gen_1, gen_2));
 
-		let mut state: State<DF> = State::new();
+		let mut gens: GenerationQueue<DF> = GenerationQueue::new();
 		for (gen, file) in wal_files {
-			state.push_generation(gen, file);
+			gens.push_generation(gen, file);
 		}
 
-		Ok(Self::new(folder, state))
+		Ok(Self::new(folder, gens))
 	}
 
-	fn new(folder: Arc<DF>, state: State<DF>) -> Self {
+	fn new(folder: Arc<DF>, generations: GenerationQueue<DF>) -> Self {
 		Self {
 			folder,
-			state: RwLock::new(state),
+			generations: RwLock::new(generations),
+			state: Mutex::new(State::default()),
 		}
 	}
 
 	fn write_checkpoint(
-		state: &State<DF>,
+		generations: &GenerationQueue<DF>,
 		dirty_pages: &HashMap<PageId, WalIndex>,
 		transactions: &HashMap<u64, WalIndex>,
 	) -> Result<(), StorageError> {
-		let Some(mut wal_file) = state.current_generation() else {
+		let Some(mut wal_file) = generations.current_generation() else {
 			return Err(StorageError::WalNotInitialized);
 		};
 		wal_file.push_item(Item::Checkpoint(CheckpointData {
@@ -71,16 +73,19 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		Ok(())
 	}
 
-	fn cleanup_generations(&self, state: &mut State<DF>) -> Result<(), StorageError> {
+	fn cleanup_generations(
+		&self,
+		generations: &mut GenerationQueue<DF>,
+	) -> Result<(), StorageError> {
 		let mut delete_gens: Vec<u64> = Vec::new();
-		for gen in &state.generations {
+		for gen in &generations.generations {
 			if gen.num_transactions.load(Ordering::Relaxed) != 0 {
 				break;
 			}
 			delete_gens.push(gen.generation_num);
 		}
 		for gen_num in delete_gens {
-			state.generations.pop_front();
+			generations.generations.pop_front();
 			self.folder.delete_wal_file(gen_num)?;
 		}
 		Ok(())
@@ -88,10 +93,12 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 
 	fn recover(
 		file: &mut impl WalFileApi,
+		generations: &GenerationQueue<DF>,
 		physical_storage: &impl PhysicalStorageApi,
 	) -> Result<(), StorageError> {
 		let mut fuzzy_buffer: Vec<wal::Item> = Vec::new();
 		let item_iter = file.iter_items()?;
+
 		let mut checkpoint_data: Option<wal::CheckpointData> = None;
 		for item_result in item_iter {
 			match item_result? {
@@ -102,14 +109,17 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 				item => fuzzy_buffer.push(item),
 			}
 		}
-
-		let state: State<DF> = match checkpoint_data {
-			Some(data) => State::new(
-				data.dirty_pages.into_owned(),
-				data.transactions.into_owned(),
-			),
+		let mut state = match checkpoint_data {
+			Some(data) => State {
+				dirty_pages: data.dirty_pages.into_owned(),
+				transactions: data.transactions.into_owned(),
+			},
 			None => State::default(),
 		};
+
+		for item in fuzzy_buffer {
+			todo!()
+		}
 
 		todo!()
 	}
@@ -141,29 +151,28 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 	}
 
 	fn checkpoint(&self) -> Result<(), StorageError> {
-		// Acquire exclusive state lock
-		let mut state_mut = self.state.write();
+		// Acquire exclusive generations lock
+		let mut generations_mut = self.generations.write();
 
 		// Clone checkpoint-relevant state to ensure consistency
 		// TODO: This might not be necessary, need to look into how the threads
 		// interplay here
-		let dirty_pages = state_mut.dirty_pages.clone();
-		let transactions = state_mut.transactions.clone();
+		let state = self.state.lock().clone();
 
 		// Create the new generation and save it to the state object
-		let gen_num = state_mut.current_gen_num + 1;
+		let gen_num = generations_mut.current_gen_num + 1;
 		let file = self.folder.open_wal_file(gen_num)?;
-		state_mut.push_generation(gen_num, file);
+		generations_mut.push_generation(gen_num, file);
 
 		// Delete old generations if possible
-		self.cleanup_generations(&mut state_mut)?;
+		self.cleanup_generations(&mut generations_mut)?;
 
-		// Release exclusive state lock
-		mem::drop(state_mut);
+		// Release exclusive generations lock
+		mem::drop(generations_mut);
 
 		// Write checkpoint item to new generation
-		let state = self.state.read();
-		Self::write_checkpoint(&state, &dirty_pages, &transactions)?;
+		let generations = self.generations.read();
+		Self::write_checkpoint(&generations, &state.dirty_pages, &state.transactions)?;
 
 		Ok(())
 	}
@@ -185,19 +194,15 @@ impl<DF: DatabaseFolderApi> WalGeneration<DF> {
 	}
 }
 
-struct State<DF: DatabaseFolderApi> {
+struct GenerationQueue<DF: DatabaseFolderApi> {
 	generations: VecDeque<WalGeneration<DF>>,
-	dirty_pages: HashMap<PageId, WalIndex>,
-	transactions: HashMap<u64, WalIndex>,
 	current_gen_num: u64,
 }
 
-impl<DF: DatabaseFolderApi> State<DF> {
-	fn new(dirty_pages: HashMap<PageId, WalIndex>, transactions: HashMap<u64, WalIndex>) -> Self {
+impl<DF: DatabaseFolderApi> GenerationQueue<DF> {
+	fn new() -> Self {
 		Self {
 			generations: VecDeque::new(),
-			dirty_pages,
-			transactions,
 			current_gen_num: 0,
 		}
 	}
@@ -213,10 +218,49 @@ impl<DF: DatabaseFolderApi> State<DF> {
 		assert_eq!(generation.generation_num, self.current_gen_num);
 		Some(generation.file.lock())
 	}
+
+	fn track_transaction(&self) {
+		let Some(generation) = self.generations.front() else {
+			return;
+		};
+		generation.num_transactions.fetch_add(1, Ordering::AcqRel);
+	}
+
+	fn complete_transaction(&self, generation_num: u64) {
+		for generation in &self.generations {
+			if generation.generation_num == generation_num {
+				generation.num_transactions.fetch_sub(1, Ordering::AcqRel);
+			}
+		}
+	}
 }
 
-impl<DF: DatabaseFolderApi> Default for State<DF> {
-	fn default() -> Self {
-		Self::new(HashMap::new(), HashMap::new())
+#[derive(Debug, Clone, Default)]
+struct State {
+	dirty_pages: HashMap<PageId, WalIndex>,
+	transactions: HashMap<u64, WalIndex>,
+}
+
+impl State {
+	fn track_transaction(&mut self, index: WalIndex, data: &wal::TransactionData) {
+		self.transactions.insert(data.transaction_id, index);
+	}
+
+	fn complete_transaction(&mut self, data: &wal::TransactionData) {
+		self.transactions.remove(&data.transaction_id);
+	}
+
+	fn track_write(&mut self, index: WalIndex, data: &wal::WriteData) {
+		self.track_transaction(index, &data.transaction_data);
+		self.dirty_pages.entry(data.page_id).or_insert(index);
+	}
+
+	fn handle_item(&mut self, index: WalIndex, item: &wal::Item) {
+		match item {
+			wal::Item::Write(data) => self.track_write(index, data),
+			wal::Item::Commit(data) => self.complete_transaction(data),
+			wal::Item::Undo(data) => self.complete_transaction(data),
+			wal::Item::Checkpoint(..) => (),
+		}
 	}
 }
