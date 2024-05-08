@@ -12,7 +12,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use static_assertions::assert_impl_all;
 
 use crate::files::{
-	wal::{CheckpointData, WalFileApi},
+	wal::{self, CheckpointData, WalFileApi},
 	DatabaseFolder, DatabaseFolderApi,
 };
 
@@ -85,6 +85,34 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		}
 		Ok(())
 	}
+
+	fn recover(
+		file: &mut impl WalFileApi,
+		physical_storage: &impl PhysicalStorageApi,
+	) -> Result<(), StorageError> {
+		let mut fuzzy_buffer: Vec<wal::Item> = Vec::new();
+		let item_iter = file.iter_items()?;
+		let mut checkpoint_data: Option<wal::CheckpointData> = None;
+		for item_result in item_iter {
+			match item_result? {
+				wal::Item::Checkpoint(data) => {
+					checkpoint_data = Some(data);
+					break;
+				}
+				item => fuzzy_buffer.push(item),
+			}
+		}
+
+		let state: State<DF> = match checkpoint_data {
+			Some(data) => State::new(
+				data.dirty_pages.into_owned(),
+				data.transactions.into_owned(),
+			),
+			None => State::default(),
+		};
+
+		todo!()
+	}
 }
 
 pub(super) trait WalApi {
@@ -95,8 +123,6 @@ pub(super) trait WalApi {
 		physical_storage: &impl PhysicalStorageApi,
 		transaction_id: u64,
 	) -> Result<(), StorageError>;
-
-	fn recover(&self, physical_storage: &impl PhysicalStorageApi) -> Result<(), StorageError>;
 
 	fn checkpoint(&self) -> Result<(), StorageError>;
 }
@@ -111,10 +137,6 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		physical_storage: &impl PhysicalStorageApi,
 		transaction_id: u64,
 	) -> Result<(), StorageError> {
-		todo!()
-	}
-
-	fn recover(&self, physical_storage: &impl PhysicalStorageApi) -> Result<(), StorageError> {
 		todo!()
 	}
 
@@ -171,11 +193,11 @@ struct State<DF: DatabaseFolderApi> {
 }
 
 impl<DF: DatabaseFolderApi> State<DF> {
-	fn new() -> Self {
+	fn new(dirty_pages: HashMap<PageId, WalIndex>, transactions: HashMap<u64, WalIndex>) -> Self {
 		Self {
 			generations: VecDeque::new(),
-			dirty_pages: HashMap::new(),
-			transactions: HashMap::new(),
+			dirty_pages,
+			transactions,
 			current_gen_num: 0,
 		}
 	}
@@ -190,5 +212,11 @@ impl<DF: DatabaseFolderApi> State<DF> {
 		let generation = self.generations.front()?;
 		assert_eq!(generation.generation_num, self.current_gen_num);
 		Some(generation.file.lock())
+	}
+}
+
+impl<DF: DatabaseFolderApi> Default for State<DF> {
+	fn default() -> Self {
+		Self::new(HashMap::new(), HashMap::new())
 	}
 }
