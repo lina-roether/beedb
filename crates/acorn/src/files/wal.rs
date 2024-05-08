@@ -50,7 +50,8 @@ struct TransactionBlockRepr {
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct WriteBlockRepr {
-	page_id: u64,
+	segment_num: u32,
+	page_num: u16,
 	offset: u16,
 	write_length: u16,
 }
@@ -174,7 +175,40 @@ impl Serialized for TransactionBlock {
 	type Repr = TransactionBlockRepr;
 }
 
-type WriteBlock = WriteBlockRepr;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteBlock {
+	page_id: PageId,
+	offset: u16,
+	write_length: u16,
+}
+
+impl From<WriteBlock> for WriteBlockRepr {
+	fn from(value: WriteBlock) -> Self {
+		Self {
+			segment_num: value.page_id.segment_num,
+			page_num: value.page_id.page_num.get(),
+			offset: value.offset,
+			write_length: value.write_length,
+		}
+	}
+}
+
+impl TryFrom<WriteBlockRepr> for WriteBlock {
+	type Error = FileError;
+
+	fn try_from(value: WriteBlockRepr) -> Result<Self, Self::Error> {
+		let Some(page_num) = NonZeroU16::new(value.page_num) else {
+			return Err(FileError::Corrupted(
+				"0 is not a valid page number".to_string(),
+			));
+		};
+		Ok(Self {
+			page_id: PageId::new(value.segment_num, page_num),
+			offset: value.offset,
+			write_length: value.write_length,
+		})
+	}
+}
 
 impl Serialized for WriteBlock {
 	type Repr = WriteBlockRepr;
@@ -365,7 +399,7 @@ pub(crate) struct TransactionData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteData<'a> {
 	pub transaction_data: TransactionData,
-	pub page_id: u64,
+	pub page_id: PageId,
 	pub offset: u16,
 	pub from: Cow<'a, [u8]>,
 	pub to: Cow<'a, [u8]>,
@@ -691,7 +725,7 @@ mod tests {
 					transaction_id: 25,
 					prev_transaction_item: NonZeroU64::new(24),
 				},
-				page_id: 123,
+				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 				offset: 445,
 				from: Cow::Owned(vec![1, 2, 3, 4]),
 				to: Cow::Owned(vec![4, 5, 6, 7]),
@@ -719,7 +753,8 @@ mod tests {
 		);
 		expected_body.extend(
 			WriteBlockRepr {
-				page_id: 123,
+				segment_num: 123,
+				page_num: 456,
 				offset: 445,
 				write_length: 4,
 			}
@@ -908,7 +943,7 @@ mod tests {
 				transaction_id: 0,
 				prev_transaction_item: None,
 			},
-			page_id: 69,
+			page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 			offset: 420,
 			from: Cow::Owned(vec![0, 0, 0, 0]),
 			to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -931,7 +966,7 @@ mod tests {
 					transaction_id: 0,
 					prev_transaction_item: None,
 				},
-				page_id: 69,
+				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 				offset: 420,
 				from: Cow::Owned(vec![0, 0, 0, 0]),
 				to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -964,7 +999,7 @@ mod tests {
 					transaction_id: 0,
 					prev_transaction_item: None,
 				},
-				page_id: 69,
+				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 				offset: 420,
 				from: Cow::Owned(vec![0, 0, 0, 0]),
 				to: Cow::Owned(vec![1, 2, 3, 4]),
