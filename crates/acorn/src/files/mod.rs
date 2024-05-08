@@ -1,5 +1,6 @@
 use std::{
 	convert::Infallible,
+	ffi::OsString,
 	fs::{self, ReadDir},
 	io,
 	path::PathBuf,
@@ -46,6 +47,9 @@ pub(crate) enum FileError {
 
 	#[error("The file is corrupted; a checksum mismatch occurred")]
 	ChecksumMismatch,
+
+	#[error("Unexpected file in database folder: {}", _0.display())]
+	UnexpectedFile(OsString),
 
 	#[error(transparent)]
 	Io(#[from] io::Error),
@@ -98,7 +102,7 @@ impl DatabaseFolder {
 pub(crate) trait DatabaseFolderApi {
 	type SegmentFile: SegmentFileApi;
 	type WalFile: WalFileApi;
-	type IterWalFiles: Iterator<Item = Result<Self::WalFile, FileError>>;
+	type IterWalFiles: Iterator<Item = Result<(u64, Self::WalFile), FileError>>;
 
 	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError>;
 	fn open_wal_file(&self, generation: u64) -> Result<Self::WalFile, FileError>;
@@ -149,7 +153,7 @@ impl DatabaseFolderApi for DatabaseFolder {
 pub(crate) struct IterWalFiles(ReadDir);
 
 impl Iterator for IterWalFiles {
-	type Item = Result<WalFile, FileError>;
+	type Item = Result<(u64, WalFile), FileError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		for entry_result in &mut self.0 {
@@ -158,7 +162,16 @@ impl Iterator for IterWalFiles {
 				Err(error) => return Some(Err(error.into())),
 			};
 			if entry.path().is_file() {
-				return Some(WalFile::open_file(entry.path()));
+				let file = match WalFile::open_file(entry.path()) {
+					Ok(file) => file,
+					Err(error) => return Some(Err(error)),
+				};
+				let Ok(generation): Result<u64, _> = entry.file_name().to_string_lossy().parse()
+				else {
+					return Some(Err(FileError::UnexpectedFile(entry.file_name())));
+				};
+
+				return Some(Ok((generation, file)));
 			}
 		}
 
