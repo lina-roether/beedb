@@ -31,7 +31,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		folder.clear_wal_files()?;
 		let mut state: State<DF> = State::new();
 		state.push_generation(0, folder.open_wal_file(0)?);
-		state.write_checkpoint()?;
+		Self::write_checkpoint(&state, &HashMap::new(), &HashMap::new())?;
 
 		Ok(Self::new(folder, state))
 	}
@@ -53,6 +53,37 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 			folder,
 			state: RwLock::new(state),
 		}
+	}
+
+	fn write_checkpoint(
+		state: &State<DF>,
+		dirty_pages: &HashMap<PageId, WalIndex>,
+		transactions: &HashMap<u64, WalIndex>,
+	) -> Result<(), StorageError> {
+		let Some(mut wal_file) = state.current_generation() else {
+			return Err(StorageError::WalNotInitialized);
+		};
+		wal_file.push_item(Item::Checkpoint(CheckpointData {
+			dirty_pages: Cow::Borrowed(dirty_pages),
+			transactions: Cow::Borrowed(transactions),
+		}))?;
+
+		Ok(())
+	}
+
+	fn cleanup_generations(&self, state: &mut State<DF>) -> Result<(), StorageError> {
+		let mut delete_gens: Vec<u64> = Vec::new();
+		for gen in &state.generations {
+			if gen.num_transactions.load(Ordering::Relaxed) != 0 {
+				break;
+			}
+			delete_gens.push(gen.generation_num);
+		}
+		for gen_num in delete_gens {
+			state.generations.pop_front();
+			self.folder.delete_wal_file(gen_num)?;
+		}
+		Ok(())
 	}
 }
 
@@ -88,15 +119,30 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 	}
 
 	fn checkpoint(&self) -> Result<(), StorageError> {
+		// Acquire exclusive state lock
 		let mut state_mut = self.state.write();
+
+		// Clone checkpoint-relevant state to ensure consistency
+		// TODO: This might not be necessary, need to look into how the threads
+		// interplay here
+		let dirty_pages = state_mut.dirty_pages.clone();
+		let transactions = state_mut.transactions.clone();
+
+		// Create the new generation and save it to the state object
 		let gen_num = state_mut.current_gen_num + 1;
 		let file = self.folder.open_wal_file(gen_num)?;
 		state_mut.push_generation(gen_num, file);
-		state_mut.cleanup_generations(&self.folder)?;
+
+		// Delete old generations if possible
+		self.cleanup_generations(&mut state_mut)?;
+
+		// Release exclusive state lock
 		mem::drop(state_mut);
 
+		// Write checkpoint item to new generation
 		let state = self.state.read();
-		state.write_checkpoint()?;
+		Self::write_checkpoint(&state, &dirty_pages, &transactions)?;
+
 		Ok(())
 	}
 }
@@ -144,32 +190,5 @@ impl<DF: DatabaseFolderApi> State<DF> {
 		let generation = self.generations.front()?;
 		assert_eq!(generation.generation_num, self.current_gen_num);
 		Some(generation.file.lock())
-	}
-
-	fn write_checkpoint(&self) -> Result<(), StorageError> {
-		let Some(mut wal_file) = self.current_generation() else {
-			return Err(StorageError::WalNotInitialized);
-		};
-		wal_file.push_item(Item::Checkpoint(CheckpointData {
-			dirty_pages: Cow::Borrowed(&self.dirty_pages),
-			transactions: Cow::Borrowed(&self.transactions),
-		}))?;
-
-		Ok(())
-	}
-
-	fn cleanup_generations(&mut self, folder: &DF) -> Result<(), StorageError> {
-		let mut delete_gens: Vec<u64> = Vec::new();
-		for gen in &self.generations {
-			if gen.num_transactions.load(Ordering::Relaxed) != 0 {
-				break;
-			}
-			delete_gens.push(gen.generation_num);
-		}
-		for gen_num in delete_gens {
-			self.generations.pop_front();
-			folder.delete_wal_file(gen_num)?;
-		}
-		Ok(())
 	}
 }
