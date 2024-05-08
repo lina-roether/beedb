@@ -97,8 +97,8 @@ impl DatabaseFolder {
 #[cfg_attr(test, automock(
     type SegmentFile = MockSegmentFileApi;
     type WalFile = MockWalFileApi;
-    type IterWalFiles = std::vec::IntoIter<Result<MockWalFileApi, FileError>>;
-))]
+    type IterWalFiles = std::vec::IntoIter<Result<(u64, MockWalFileApi), FileError>>;
+), allow(clippy::type_complexity))]
 pub(crate) trait DatabaseFolderApi {
 	type SegmentFile: SegmentFileApi;
 	type WalFile: WalFileApi;
