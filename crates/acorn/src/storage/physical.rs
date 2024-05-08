@@ -124,7 +124,7 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 		}
 
 		self.descriptors.insert(segment_num, segment_file);
-		self.eviction_queue.push_front(segment_num);
+		self.eviction_queue.push_back(segment_num);
 		self.descriptors.get(&segment_num).unwrap()
 	}
 
