@@ -42,6 +42,9 @@ pub(crate) enum FileError {
 	#[error("Incompatible version of {0:?} file: {1}")]
 	IncompatibleVersion(FileType, u8),
 
+	#[error("Incompatible page version: {0}")]
+	IncompatiblePageVersion(u8),
+
 	#[error("Unexpected end of file")]
 	UnexpectedEof,
 
@@ -52,7 +55,16 @@ pub(crate) enum FileError {
 	UnexpectedFile(OsString),
 
 	#[error(transparent)]
-	Io(#[from] io::Error),
+	Io(io::Error),
+}
+
+impl From<io::Error> for FileError {
+	fn from(value: io::Error) -> Self {
+		match value.kind() {
+			io::ErrorKind::UnexpectedEof => Self::UnexpectedEof,
+			_ => Self::Io(value),
+		}
+	}
 }
 
 impl From<Infallible> for FileError {
