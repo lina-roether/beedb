@@ -211,6 +211,7 @@ impl SegmentFileApi for SegmentFile {
 mod tests {
 	use std::fs;
 
+	use pretty_assertions::assert_buf_eq;
 	use zerocopy::AsBytes;
 
 	use crate::files::generic::GenericHeaderRepr;
@@ -274,7 +275,7 @@ mod tests {
 
 		// then
 		let file = fs::read(tempdir.path().join("0")).unwrap();
-		assert_eq!(
+		assert_buf_eq!(
 			&file[3 * PAGE_SIZE..4 * PAGE_SIZE],
 			[
 				PageHeaderRepr {
