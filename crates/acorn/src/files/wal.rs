@@ -2,7 +2,7 @@ use std::{
 	borrow::Cow,
 	collections::HashMap,
 	fs::{File, OpenOptions},
-	io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+	io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
 	mem,
 	num::{NonZeroU16, NonZeroU64},
 	path::Path,
@@ -420,15 +420,15 @@ pub(crate) enum Item<'a> {
 }
 
 #[cfg_attr(test, automock(
-    type IterItems<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
-    type IterItemsReverse<'a> = std::vec::IntoIter<Result<Item<'static>, FileError>>;
-))]
+    type IterItems<'a> = std::vec::IntoIter<Result<(u64, Item<'static>), FileError>>;
+    type IterItemsReverse<'a> = std::vec::IntoIter<Result<(u64, Item<'static>), FileError>>;
+), allow(clippy::type_complexity))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait WalFileApi {
-	type IterItems<'a>: Iterator<Item = Result<Item<'static>, FileError>> + 'a
+	type IterItems<'a>: Iterator<Item = Result<(u64, Item<'static>), FileError>> + 'a
 	where
 		Self: 'a;
-	type IterItemsReverse<'a>: Iterator<Item = Result<Item<'static>, FileError>> + 'a
+	type IterItemsReverse<'a>: Iterator<Item = Result<(u64, Item<'static>), FileError>> + 'a
 	where
 		Self: 'a;
 
@@ -500,21 +500,23 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		debug_assert!(offset.get() >= self.body_start);
 
 		self.file.seek(SeekFrom::Start(offset.get()))?;
-		let mut reader = ItemReader::new(&mut self.file, None);
-		let Some(item) = reader.read_item()? else {
+		let mut reader = ItemReader::new(&mut self.file, None)?;
+		let Some((read_offset, item)) = reader.read_item()? else {
 			return Err(FileError::UnexpectedEof);
 		};
+		debug_assert_eq!(read_offset, offset.get());
+
 		Ok(item)
 	}
 
 	fn iter_items(&mut self) -> Result<Self::IterItems<'_>, FileError> {
 		self.file.seek(SeekFrom::Start(self.body_start))?;
-		Ok(IterItems::new(&mut self.file))
+		IterItems::new(&mut self.file)
 	}
 
 	fn iter_items_reverse(&mut self) -> Result<Self::IterItemsReverse<'_>, FileError> {
 		self.file.seek(SeekFrom::End(0))?;
-		Ok(IterItemsReverse::new(&mut self.file, self.prev_item))
+		IterItemsReverse::new(&mut self.file, self.prev_item)
 	}
 
 	#[inline]
@@ -524,16 +526,19 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 }
 
 struct ItemReader<F: Read + Seek> {
+	offset: u64,
 	reader: BufReader<F>,
 	prev_item: Option<NonZeroU64>,
 }
 
 impl<F: Read + Seek> ItemReader<F> {
-	fn new(file: F, prev_item: Option<NonZeroU64>) -> Self {
-		Self {
+	fn new(mut file: F, prev_item: Option<NonZeroU64>) -> Result<Self, FileError> {
+		let offset = file.stream_position()?;
+		Ok(Self {
+			offset,
 			reader: BufReader::new(file),
 			prev_item,
-		}
+		})
 	}
 
 	fn read_transaction_data(body: impl Read) -> Result<TransactionData, FileError> {
@@ -588,10 +593,7 @@ impl<F: Read + Seek> ItemReader<F> {
 		})
 	}
 
-	fn read_item(&mut self) -> Result<Option<Item<'static>>, FileError> {
-		if !self.reader.has_data_left()? {
-			return Ok(None);
-		}
+	fn read_item_exact(&mut self) -> Result<(u64, Item<'static>), FileError> {
 		let header = ItemHeader::deserialize(&mut self.reader)?;
 		let mut body_buf: Box<[u8]> = vec![0; header.body_length.into()].into();
 		self.reader.read_exact(&mut body_buf)?;
@@ -611,14 +613,28 @@ impl<F: Read + Seek> ItemReader<F> {
 
 		self.reader.seek_relative(ItemFooter::REPR_SIZE as i64)?;
 
-		Ok(Some(item))
+		let item_offset = self.offset;
+		self.offset +=
+			(ItemHeader::REPR_SIZE + header.body_length as usize + ItemFooter::REPR_SIZE) as u64;
+
+		Ok((item_offset, item))
 	}
 
-	fn read_prev_item(&mut self) -> Result<Option<Item<'static>>, FileError> {
+	fn read_item(&mut self) -> Result<Option<(u64, Item<'static>)>, FileError> {
+		match self.read_item_exact() {
+			Err(FileError::UnexpectedEof) => Ok(None),
+			Err(other_error) => Err(other_error),
+			Ok(value) => Ok(Some(value)),
+		}
+	}
+
+	fn read_prev_item(&mut self) -> Result<Option<(u64, Item<'static>)>, FileError> {
 		let Some(prev_item) = self.prev_item else {
 			return Ok(None);
 		};
-		self.reader.seek(SeekFrom::Start(prev_item.get()))?;
+		let relative_offset = prev_item.get() as i64 - self.offset as i64;
+		self.reader.seek_relative(relative_offset)?;
+		self.offset = prev_item.get();
 		self.read_item()
 	}
 }
@@ -628,15 +644,15 @@ pub(crate) struct IterItems<F: Read + Seek> {
 }
 
 impl<F: Read + Seek> IterItems<F> {
-	fn new(file: F) -> Self {
-		Self {
-			reader: ItemReader::new(file, None),
-		}
+	fn new(file: F) -> Result<Self, FileError> {
+		Ok(Self {
+			reader: ItemReader::new(file, None)?,
+		})
 	}
 }
 
 impl<F: Read + Seek> Iterator for IterItems<F> {
-	type Item = Result<Item<'static>, FileError>;
+	type Item = Result<(u64, Item<'static>), FileError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.reader.read_item().transpose()
@@ -648,15 +664,15 @@ pub(crate) struct IterItemsReverse<F: Read + Seek> {
 }
 
 impl<F: Read + Seek> IterItemsReverse<F> {
-	fn new(file: F, prev_item: Option<NonZeroU64>) -> Self {
-		Self {
-			reader: ItemReader::new(file, prev_item),
-		}
+	fn new(file: F, prev_item: Option<NonZeroU64>) -> Result<Self, FileError> {
+		Ok(Self {
+			reader: ItemReader::new(file, prev_item)?,
+		})
 	}
 }
 
 impl<F: Read + Seek> Iterator for IterItemsReverse<F> {
-	type Item = Result<Item<'static>, FileError>;
+	type Item = Result<(u64, Item<'static>), FileError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.reader.read_prev_item().transpose()
@@ -738,8 +754,8 @@ mod tests {
 			ItemHeaderRepr {
 				kind: ItemKind::Write as u8,
 				_padding: 0,
-				body_length: 36,
-				crc: 0xcef5c9ba,
+				body_length: 34,
+				crc: 0x137560fc,
 				prev_item: NonZeroU64::new(0),
 			}
 			.as_bytes(),
@@ -984,8 +1000,8 @@ mod tests {
 
 		// then
 		let mut iter = wal_file.iter_items().unwrap();
-		assert_eq!(iter.next().unwrap().unwrap(), items[0]);
-		assert_eq!(iter.next().unwrap().unwrap(), items[1]);
+		assert_eq!(iter.next().unwrap().unwrap(), (9, items[0].clone()));
+		assert_eq!(iter.next().unwrap().unwrap(), (67, items[1].clone()));
 		assert!(iter.next().is_none());
 	}
 
@@ -1017,8 +1033,8 @@ mod tests {
 
 		// then
 		let mut iter = wal_file.iter_items_reverse().unwrap();
-		assert_eq!(iter.next().unwrap().unwrap(), items[1]);
-		assert_eq!(iter.next().unwrap().unwrap(), items[0]);
+		assert_eq!(iter.next().unwrap().unwrap(), (67, items[1].clone()));
+		assert_eq!(iter.next().unwrap().unwrap(), (9, items[0].clone()));
 		assert!(iter.next().is_none());
 	}
 }
