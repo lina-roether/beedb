@@ -45,6 +45,16 @@ fn get_bytes_per_line(width: usize) -> usize {
 	(width + BYTE_SPACE_WIDTH) / (BYTE_WIDTH + BYTE_SPACE_WIDTH)
 }
 
+fn write_centered(f: &mut fmt::Formatter, message: String, width: usize) -> fmt::Result {
+	if message.len() >= width {
+		write!(f, "{message}")?;
+	} else {
+		let padding = (width - message.len()) / 2;
+		write!(f, "{}{message}", " ".repeat(padding))?;
+	}
+	Ok(())
+}
+
 pub struct HexdumpDiff<'a> {
 	pub received: &'a [u8],
 	pub expected: &'a [u8],
@@ -76,12 +86,37 @@ impl fmt::Display for HexdumpDiff<'_> {
 
 		let pad_to = if num_lines == 1 { 0 } else { bytes_per_line };
 
+		let mut last_received_line: Option<Box<[u8]>> = None;
+		let mut last_expected_line: Option<Box<[u8]>> = None;
+		let mut same_line_counter: usize = 0;
+
 		for line in 0..num_lines {
 			let offset = line * bytes_per_line;
 			let received_end = usize::min(self.received.len(), offset + bytes_per_line);
 			let expected_end = usize::min(self.expected.len(), offset + bytes_per_line);
 			let received_line = &self.received[offset..received_end];
 			let expected_line = &self.expected[offset..expected_end];
+
+			if last_received_line == Some(received_line.into())
+				&& last_expected_line == Some(expected_line.into())
+			{
+				same_line_counter += 1;
+				continue;
+			} else {
+				if same_line_counter != 0 {
+					write!(f, "\x1b[90m")?;
+					write_centered(
+						f,
+						format!("... {same_line_counter} repetitions ..."),
+						terminal_width,
+					)?;
+					writeln!(f, "\x1b[0m")?;
+				}
+				same_line_counter = 0;
+				last_received_line = Some(received_line.into());
+				last_expected_line = Some(expected_line.into());
+			}
+
 			print_hexdump_diff_line(f, received_line, expected_line, "\x1b[1;91m", pad_to)?;
 			write!(f, "{DELIMITER}")?;
 			print_hexdump_diff_line(f, expected_line, received_line, "\x1b[1;92m", pad_to)?;
