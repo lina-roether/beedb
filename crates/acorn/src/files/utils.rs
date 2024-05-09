@@ -11,6 +11,7 @@ use super::FileError;
 // TODO: there are tradeoffs here. Perhaps I should look more into selecting an
 // algorithm.
 pub(crate) const CRC32: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+pub(crate) const CRC16: Crc<u16> = Crc::<u16>::new(&crc::CRC_16_IBM_SDLC);
 
 pub(crate) trait Serialized: Sized
 where
@@ -33,5 +34,11 @@ where
 
 	fn into_repr(self) -> Self::Repr {
 		Self::Repr::from(self)
+	}
+
+	fn from_repr_bytes(bytes: &[u8]) -> Result<Self, FileError> {
+		let mut repr = Self::Repr::new_zeroed();
+		repr.as_bytes_mut().copy_from_slice(bytes);
+		Ok(repr.try_into()?)
 	}
 }

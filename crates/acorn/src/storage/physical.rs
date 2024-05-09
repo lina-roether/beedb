@@ -15,7 +15,7 @@ use crate::{
 	files::{segment::SegmentFileApi, DatabaseFolder, DatabaseFolderApi},
 };
 
-use super::{PageId, StorageError};
+use super::{PageId, StorageError, WalIndex};
 
 pub(super) struct PhysicalStorage<DF = DatabaseFolder>
 where
@@ -72,22 +72,22 @@ where
 
 #[cfg_attr(test, automock)]
 pub(super) trait PhysicalStorageApi {
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<WalIndex, StorageError>;
 
-	fn write(&self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
+	fn write(&self, page_id: PageId, buf: &[u8], wal_index: WalIndex) -> Result<(), StorageError>;
 }
 
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+	fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<WalIndex, StorageError> {
 		self.use_segment(page_id.segment_num, |segment| {
-			segment.read(page_id.page_num, offset as u16, buf)?;
-			Ok(())
+			let wal_index = segment.read(page_id.page_num, buf)?;
+			Ok(wal_index)
 		})
 	}
 
-	fn write(&self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
+	fn write(&self, page_id: PageId, buf: &[u8], wal_index: WalIndex) -> Result<(), StorageError> {
 		self.use_segment(page_id.segment_num, |segment| {
-			segment.write(page_id.page_num, offset as u16, buf)?;
+			segment.write(page_id.page_num, buf, wal_index)?;
 			Ok(())
 		})
 	}
@@ -142,7 +142,10 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 mod tests {
 	use std::num::NonZeroU16;
 
-	use crate::files::{segment::MockSegmentFileApi, MockDatabaseFolderApi};
+	use crate::files::{
+		segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
+		MockDatabaseFolderApi,
+	};
 	use mockall::predicate::*;
 
 	use super::*;
@@ -160,7 +163,11 @@ mod tests {
 				segment
 					.expect_write()
 					.once()
-					.with(eq(NonZeroU16::new(420).unwrap()), eq(24), eq([1, 2, 3]))
+					.with(
+						eq(NonZeroU16::new(420).unwrap()),
+						eq([1; PAGE_BODY_SIZE]),
+						eq(WalIndex::new(69, 420)),
+					)
 					.returning(|_, _, _| Ok(()));
 				Ok(segment)
 			});
@@ -172,8 +179,8 @@ mod tests {
 		storage
 			.write(
 				PageId::new(69, NonZeroU16::new(420).unwrap()),
-				24,
-				&[1, 2, 3],
+				&[1; PAGE_BODY_SIZE],
+				WalIndex::new(69, 420),
 			)
 			.unwrap();
 	}
@@ -191,10 +198,10 @@ mod tests {
 				segment
 					.expect_read()
 					.once()
-					.with(eq(NonZeroU16::new(420).unwrap()), eq(24), always())
-					.returning(|_, _, buf| {
-						buf.copy_from_slice(&[1, 2, 3]);
-						Ok(())
+					.with(eq(NonZeroU16::new(420).unwrap()), always())
+					.returning(|_, buf| {
+						buf[0..3].copy_from_slice(&[1, 2, 3]);
+						Ok(WalIndex::new(69, 420))
 					});
 				Ok(segment)
 			});
@@ -204,11 +211,12 @@ mod tests {
 
 		// when
 		let mut buf = [0; 3];
-		storage
-			.read(PageId::new(69, NonZeroU16::new(420).unwrap()), 24, &mut buf)
+		let wal_index = storage
+			.read(PageId::new(69, NonZeroU16::new(420).unwrap()), &mut buf)
 			.unwrap();
 
 		// then
-		assert_eq!(buf, [1, 2, 3]);
+		assert_eq!(wal_index, WalIndex::new(69, 420));
+		assert_eq!(buf[0..3], [1, 2, 3]);
 	}
 }
