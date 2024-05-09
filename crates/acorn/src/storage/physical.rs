@@ -140,7 +140,7 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 
 #[cfg(test)]
 mod tests {
-	use std::num::NonZeroU16;
+	use std::num::{NonZeroU16, NonZeroU64};
 
 	use crate::files::{
 		segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
@@ -166,7 +166,7 @@ mod tests {
 					.with(
 						eq(NonZeroU16::new(420).unwrap()),
 						eq([1; PAGE_BODY_SIZE]),
-						eq(WalIndex::new(69, 420)),
+						eq(WalIndex::new(69, NonZeroU64::new(420).unwrap())),
 					)
 					.returning(|_, _, _| Ok(()));
 				Ok(segment)
@@ -180,7 +180,7 @@ mod tests {
 			.write(
 				PageId::new(69, NonZeroU16::new(420).unwrap()),
 				&[1; PAGE_BODY_SIZE],
-				WalIndex::new(69, 420),
+				WalIndex::new(69, NonZeroU64::new(420).unwrap()),
 			)
 			.unwrap();
 	}
@@ -201,7 +201,7 @@ mod tests {
 					.with(eq(NonZeroU16::new(420).unwrap()), always())
 					.returning(|_, buf| {
 						buf[0..3].copy_from_slice(&[1, 2, 3]);
-						Ok(WalIndex::new(69, 420))
+						Ok(WalIndex::new(69, NonZeroU64::new(420).unwrap()))
 					});
 				Ok(segment)
 			});
@@ -216,7 +216,7 @@ mod tests {
 			.unwrap();
 
 		// then
-		assert_eq!(wal_index, WalIndex::new(69, 420));
+		assert_eq!(wal_index, WalIndex::new(69, NonZeroU64::new(420).unwrap()));
 		assert_eq!(buf[0..3], [1, 2, 3]);
 	}
 }

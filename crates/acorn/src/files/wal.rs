@@ -24,11 +24,13 @@ use super::{
 	FileError,
 };
 
+const FLAG_UNDO: u8 = 0b00000001;
+
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
 struct ItemHeaderRepr {
 	kind: u8,
-	_padding: u8,
+	flags: u8,
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU64>,
@@ -44,7 +46,8 @@ struct ItemFooterRepr {
 #[repr(C)]
 struct TransactionBlockRepr {
 	transaction_id: u64,
-	prev_transaction_item: Option<NonZeroU64>,
+	prev_transaction_generation: u64,
+	prev_transaction_offset: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
@@ -82,8 +85,7 @@ pub(crate) struct WalIndexRepr {
 enum ItemKind {
 	Write = 0,
 	Commit = 1,
-	Undo = 2,
-	Checkpoint = 3,
+	Checkpoint = 2,
 }
 
 impl TryFrom<u8> for ItemKind {
@@ -93,8 +95,7 @@ impl TryFrom<u8> for ItemKind {
 		match value {
 			0 => Ok(Self::Write),
 			1 => Ok(Self::Commit),
-			2 => Ok(Self::Undo),
-			3 => Ok(Self::Checkpoint),
+			2 => Ok(Self::Checkpoint),
 			_ => Err(FileError::Corrupted(format!(
 				"Unknown WAL item kind {value}"
 			))),
@@ -105,6 +106,7 @@ impl TryFrom<u8> for ItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemHeader {
 	kind: ItemKind,
+	flags: u8,
 	body_length: u16,
 	crc: u32,
 	prev_item: Option<NonZeroU64>,
@@ -114,7 +116,7 @@ impl From<ItemHeader> for ItemHeaderRepr {
 	fn from(value: ItemHeader) -> Self {
 		Self {
 			kind: value.kind as u8,
-			_padding: 0,
+			flags: value.flags,
 			body_length: value.body_length,
 			crc: value.crc,
 			prev_item: value.prev_item,
@@ -128,6 +130,7 @@ impl TryFrom<ItemHeaderRepr> for ItemHeader {
 	fn try_from(value: ItemHeaderRepr) -> Result<Self, Self::Error> {
 		Ok(Self {
 			kind: ItemKind::try_from(value.kind)?,
+			flags: value.flags,
 			body_length: value.body_length,
 			crc: value.crc,
 			prev_item: value.prev_item,
@@ -169,7 +172,34 @@ impl Serialized for ItemFooter {
 	type Repr = ItemFooterRepr;
 }
 
-type TransactionBlock = TransactionBlockRepr;
+struct TransactionBlock {
+	transaction_id: u64,
+	prev_transaction_item: Option<WalIndex>,
+}
+
+impl From<TransactionBlock> for TransactionBlockRepr {
+	fn from(value: TransactionBlock) -> Self {
+		Self {
+			transaction_id: value.transaction_id,
+			prev_transaction_generation: value
+				.prev_transaction_item
+				.map(|idx| idx.generation)
+				.unwrap_or_default(),
+			prev_transaction_offset: value.prev_transaction_item.map(|idx| idx.offset),
+		}
+	}
+}
+
+impl From<TransactionBlockRepr> for TransactionBlock {
+	fn from(value: TransactionBlockRepr) -> Self {
+		Self {
+			transaction_id: value.transaction_id,
+			prev_transaction_item: value
+				.prev_transaction_offset
+				.map(|offset| WalIndex::new(value.prev_transaction_generation, offset)),
+		}
+	}
+}
 
 impl Serialized for TransactionBlock {
 	type Repr = TransactionBlockRepr;
@@ -249,18 +279,25 @@ impl Serialized for PageId {
 impl From<WalIndex> for WalIndexRepr {
 	fn from(value: WalIndex) -> Self {
 		Self {
-			offset: value.offset,
+			offset: value.offset.get(),
 			generation: value.generation,
 		}
 	}
 }
 
-impl From<WalIndexRepr> for WalIndex {
-	fn from(value: WalIndexRepr) -> Self {
-		Self {
-			offset: value.offset,
+impl TryFrom<WalIndexRepr> for WalIndex {
+	type Error = FileError;
+
+	fn try_from(value: WalIndexRepr) -> Result<Self, Self::Error> {
+		let Some(offset) = NonZeroU64::new(value.offset) else {
+			return Err(FileError::Corrupted(
+				"Found invalid WAL offset '0'".to_string(),
+			));
+		};
+		Ok(Self {
 			generation: value.generation,
-		}
+			offset,
+		})
 	}
 }
 
@@ -272,7 +309,7 @@ pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
 	file: F,
-	size: usize,
+	next_offset: NonZeroU64,
 }
 assert_impl_all!(WalFile: Send, Sync);
 
@@ -330,12 +367,12 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		} else {
 			None
 		};
-		let size = file.seek(SeekFrom::End(0))? as usize;
+		let next_offset = NonZeroU64::new(file.seek(SeekFrom::End(0))?).unwrap();
 		Ok(Self {
 			body_start,
 			file,
 			prev_item,
-			size,
+			next_offset,
 		})
 	}
 
@@ -349,21 +386,22 @@ impl<F: Seek + Read + Write> WalFile<F> {
 	}
 
 	fn write_write_block(mut writer: impl Write, data: WriteData) -> Result<(), FileError> {
-		assert_eq!(data.from.len(), data.to.len());
-
 		Self::write_transaction_block(&mut writer, data.transaction_data)?;
 
 		let block = WriteBlock {
 			page_id: data.page_id,
 			offset: data.offset,
 			write_length: data
-				.from
+				.to
 				.len()
 				.try_into()
 				.expect("Write length must be 16-bit!"),
 		};
 		block.serialize(&mut writer)?;
-		writer.write_all(&data.from)?;
+		if let Some(from) = data.from {
+			debug_assert_eq!(from.len(), data.to.len());
+			writer.write_all(&from)?;
+		}
 		writer.write_all(&data.to)?;
 		Ok(())
 	}
@@ -393,7 +431,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransactionData {
 	pub transaction_id: u64,
-	pub prev_transaction_item: Option<NonZeroU64>,
+	pub prev_transaction_item: Option<WalIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,7 +439,7 @@ pub(crate) struct WriteData<'a> {
 	pub transaction_data: TransactionData,
 	pub page_id: PageId,
 	pub offset: u16,
-	pub from: Cow<'a, [u8]>,
+	pub from: Option<Cow<'a, [u8]>>,
 	pub to: Cow<'a, [u8]>,
 }
 
@@ -415,20 +453,19 @@ pub(crate) struct CheckpointData<'a> {
 pub(crate) enum Item<'a> {
 	Write(WriteData<'a>),
 	Commit(TransactionData),
-	Undo(TransactionData),
 	Checkpoint(CheckpointData<'a>),
 }
 
 #[cfg_attr(test, automock(
-    type IterItems<'a> = std::vec::IntoIter<Result<(u64, Item<'static>), FileError>>;
-    type IterItemsReverse<'a> = std::vec::IntoIter<Result<(u64, Item<'static>), FileError>>;
+    type IterItems<'a> = std::vec::IntoIter<Result<(NonZeroU64, Item<'static>), FileError>>;
+    type IterItemsReverse<'a> = std::vec::IntoIter<Result<(NonZeroU64, Item<'static>), FileError>>;
 ), allow(clippy::type_complexity))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait WalFileApi {
-	type IterItems<'a>: Iterator<Item = Result<(u64, Item<'static>), FileError>> + 'a
+	type IterItems<'a>: Iterator<Item = Result<(NonZeroU64, Item<'static>), FileError>> + 'a
 	where
 		Self: 'a;
-	type IterItemsReverse<'a>: Iterator<Item = Result<(u64, Item<'static>), FileError>> + 'a
+	type IterItemsReverse<'a>: Iterator<Item = Result<(NonZeroU64, Item<'static>), FileError>> + 'a
 	where
 		Self: 'a;
 
@@ -436,6 +473,7 @@ pub(crate) trait WalFileApi {
 	fn read_item_at(&mut self, offset: NonZeroU64) -> Result<Item<'static>, FileError>;
 	fn iter_items<'a>(&'a mut self) -> Result<Self::IterItems<'a>, FileError>;
 	fn iter_items_reverse<'a>(&'a mut self) -> Result<Self::IterItemsReverse<'a>, FileError>;
+	fn next_offset(&self) -> NonZeroU64;
 	fn size(&self) -> usize;
 }
 
@@ -450,17 +488,17 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 		let mut body_buffer: Vec<u8> = vec![];
 		let kind: ItemKind;
+		let mut flags: u8 = 0;
 		match item {
 			Item::Write(write_data) => {
 				kind = ItemKind::Write;
+				if write_data.from.is_none() {
+					flags |= FLAG_UNDO;
+				}
 				Self::write_write_block(&mut body_buffer, write_data)?;
 			}
 			Item::Commit(transaction_data) => {
 				kind = ItemKind::Commit;
-				Self::write_transaction_block(&mut body_buffer, transaction_data)?
-			}
-			Item::Undo(transaction_data) => {
-				kind = ItemKind::Undo;
 				Self::write_transaction_block(&mut body_buffer, transaction_data)?
 			}
 			Item::Checkpoint(checkpoint_data) => {
@@ -472,6 +510,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 		let item_header = ItemHeader {
 			kind,
+			flags,
 			body_length: body_buffer
 				.len()
 				.try_into()
@@ -492,7 +531,8 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		writer.flush()?;
 		mem::drop(writer);
 
-		self.size = self.file.seek(SeekFrom::End(0))? as usize;
+		self.next_offset = NonZeroU64::new(self.file.seek(SeekFrom::End(0))?)
+			.expect("WAL file unexpectedly at position 0");
 		Ok(current_pos)
 	}
 
@@ -504,7 +544,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		let Some((read_offset, item)) = reader.read_item()? else {
 			return Err(FileError::UnexpectedEof);
 		};
-		debug_assert_eq!(read_offset, offset.get());
+		debug_assert_eq!(read_offset, offset);
 
 		Ok(item)
 	}
@@ -521,7 +561,12 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 	#[inline]
 	fn size(&self) -> usize {
-		self.size
+		self.next_offset.get() as usize
+	}
+
+	#[inline]
+	fn next_offset(&self) -> NonZeroU64 {
+		self.next_offset
 	}
 }
 
@@ -550,12 +595,20 @@ impl<F: Read + Seek> ItemReader<F> {
 		})
 	}
 
-	fn read_write_data(mut body: impl Read) -> Result<WriteData<'static>, FileError> {
+	fn read_write_data(
+		mut body: impl Read,
+		is_undo: bool,
+	) -> Result<WriteData<'static>, FileError> {
 		let transaction_data = Self::read_transaction_data(&mut body)?;
 
 		let write_block = WriteBlock::deserialize(&mut body)?;
-		let mut from: Vec<u8> = vec![0; write_block.write_length.into()];
-		body.read_exact(&mut from)?;
+		let from: Option<Vec<u8>> = if is_undo {
+			let mut from = vec![0; write_block.write_length.into()];
+			body.read_exact(&mut from)?;
+			Some(from)
+		} else {
+			None
+		};
 		let mut to: Vec<u8> = vec![0; write_block.write_length.into()];
 		body.read_exact(&mut to)?;
 
@@ -563,7 +616,7 @@ impl<F: Read + Seek> ItemReader<F> {
 			transaction_data,
 			page_id: write_block.page_id,
 			offset: write_block.offset,
-			from: Cow::Owned(from),
+			from: from.map(Cow::Owned),
 			to: Cow::Owned(to),
 		})
 	}
@@ -593,7 +646,7 @@ impl<F: Read + Seek> ItemReader<F> {
 		})
 	}
 
-	fn read_item_exact(&mut self) -> Result<(u64, Item<'static>), FileError> {
+	fn read_item_exact(&mut self) -> Result<(NonZeroU64, Item<'static>), FileError> {
 		let header = ItemHeader::deserialize(&mut self.reader)?;
 		let mut body_buf: Box<[u8]> = vec![0; header.body_length.into()].into();
 		self.reader.read_exact(&mut body_buf)?;
@@ -603,11 +656,12 @@ impl<F: Read + Seek> ItemReader<F> {
 			return Err(FileError::ChecksumMismatch);
 		}
 
+		let is_undo = header.flags & FLAG_UNDO != 0;
+
 		let mut body_cursor = Cursor::new(body_buf);
 		let item = match header.kind {
-			ItemKind::Write => Item::Write(Self::read_write_data(&mut body_cursor)?),
+			ItemKind::Write => Item::Write(Self::read_write_data(&mut body_cursor, is_undo)?),
 			ItemKind::Commit => Item::Commit(Self::read_transaction_data(&mut body_cursor)?),
-			ItemKind::Undo => Item::Undo(Self::read_transaction_data(&mut body_cursor)?),
 			ItemKind::Checkpoint => Item::Checkpoint(Self::read_checkpoint_data(&mut body_cursor)?),
 		};
 
@@ -617,10 +671,13 @@ impl<F: Read + Seek> ItemReader<F> {
 		self.offset +=
 			(ItemHeader::REPR_SIZE + header.body_length as usize + ItemFooter::REPR_SIZE) as u64;
 
-		Ok((item_offset, item))
+		Ok((
+			NonZeroU64::new(item_offset).expect("WAL was unexpectedly read at offset 0"),
+			item,
+		))
 	}
 
-	fn read_item(&mut self) -> Result<Option<(u64, Item<'static>)>, FileError> {
+	fn read_item(&mut self) -> Result<Option<(NonZeroU64, Item<'static>)>, FileError> {
 		match self.read_item_exact() {
 			Err(FileError::UnexpectedEof) => Ok(None),
 			Err(other_error) => Err(other_error),
@@ -628,7 +685,7 @@ impl<F: Read + Seek> ItemReader<F> {
 		}
 	}
 
-	fn read_prev_item(&mut self) -> Result<Option<(u64, Item<'static>)>, FileError> {
+	fn read_prev_item(&mut self) -> Result<Option<(NonZeroU64, Item<'static>)>, FileError> {
 		let Some(prev_item) = self.prev_item else {
 			return Ok(None);
 		};
@@ -652,7 +709,7 @@ impl<F: Read + Seek> IterItems<F> {
 }
 
 impl<F: Read + Seek> Iterator for IterItems<F> {
-	type Item = Result<(u64, Item<'static>), FileError>;
+	type Item = Result<(NonZeroU64, Item<'static>), FileError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.reader.read_item().transpose()
@@ -672,7 +729,7 @@ impl<F: Read + Seek> IterItemsReverse<F> {
 }
 
 impl<F: Read + Seek> Iterator for IterItemsReverse<F> {
-	type Item = Result<(u64, Item<'static>), FileError>;
+	type Item = Result<(NonZeroU64, Item<'static>), FileError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.reader.read_prev_item().transpose()
@@ -739,11 +796,11 @@ mod tests {
 			.push_item(Item::Write(WriteData {
 				transaction_data: TransactionData {
 					transaction_id: 25,
-					prev_transaction_item: NonZeroU64::new(24),
+					prev_transaction_item: Some(WalIndex::new(123, NonZeroU64::new(24).unwrap())),
 				},
 				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 				offset: 445,
-				from: Cow::Owned(vec![1, 2, 3, 4]),
+				from: Some(Cow::Owned(vec![1, 2, 3, 4])),
 				to: Cow::Owned(vec![4, 5, 6, 7]),
 			}))
 			.unwrap();
@@ -753,7 +810,7 @@ mod tests {
 		expected_body.extend(
 			ItemHeaderRepr {
 				kind: ItemKind::Write as u8,
-				_padding: 0,
+				flags: 0,
 				body_length: 34,
 				crc: 0x137560fc,
 				prev_item: NonZeroU64::new(0),
@@ -762,7 +819,8 @@ mod tests {
 		);
 		expected_body.extend(
 			TransactionBlockRepr {
-				prev_transaction_item: std::num::NonZeroU64::new(24),
+				prev_transaction_generation: 123,
+				prev_transaction_offset: NonZeroU64::new(24),
 				transaction_id: 25,
 			}
 			.as_bytes(),
@@ -799,7 +857,7 @@ mod tests {
 		wal_file
 			.push_item(Item::Commit(TransactionData {
 				transaction_id: 69,
-				prev_transaction_item: NonZeroU64::new(25),
+				prev_transaction_item: Some(WalIndex::new(123, NonZeroU64::new(25).unwrap())),
 			}))
 			.unwrap();
 
@@ -808,7 +866,7 @@ mod tests {
 		expected_body.extend(
 			ItemHeaderRepr {
 				kind: ItemKind::Commit as u8,
-				_padding: 0,
+				flags: 0,
 				body_length: 16,
 				crc: 0xdb684ab9,
 				prev_item: NonZeroU64::new(0),
@@ -817,7 +875,8 @@ mod tests {
 		);
 		expected_body.extend(
 			TransactionBlockRepr {
-				prev_transaction_item: std::num::NonZeroU64::new(25),
+				prev_transaction_generation: 123,
+				prev_transaction_offset: NonZeroU64::new(25),
 				transaction_id: 69,
 			}
 			.as_bytes(),
@@ -841,9 +900,15 @@ mod tests {
 
 		// when
 		wal_file
-			.push_item(Item::Undo(TransactionData {
-				transaction_id: 69,
-				prev_transaction_item: NonZeroU64::new(25),
+			.push_item(Item::Write(WriteData {
+				transaction_data: TransactionData {
+					transaction_id: 25,
+					prev_transaction_item: Some(WalIndex::new(123, NonZeroU64::new(24).unwrap())),
+				},
+				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
+				offset: 445,
+				from: None,
+				to: Cow::Owned(vec![4, 5, 6, 7]),
 			}))
 			.unwrap();
 
@@ -851,8 +916,8 @@ mod tests {
 		let mut expected_body = Vec::<u8>::new();
 		expected_body.extend(
 			ItemHeaderRepr {
-				kind: ItemKind::Undo as u8,
-				_padding: 0,
+				kind: ItemKind::Write as u8,
+				flags: FLAG_UNDO,
 				body_length: 16,
 				crc: 0xdb684ab9,
 				prev_item: NonZeroU64::new(0),
@@ -861,7 +926,8 @@ mod tests {
 		);
 		expected_body.extend(
 			TransactionBlockRepr {
-				prev_transaction_item: std::num::NonZeroU64::new(25),
+				prev_transaction_generation: 123,
+				prev_transaction_offset: NonZeroU64::new(24),
 				transaction_id: 69,
 			}
 			.as_bytes(),
@@ -887,10 +953,10 @@ mod tests {
 		let mut dirty_pages = HashMap::new();
 		dirty_pages.insert(
 			PageId::new(1, NonZeroU16::new(2).unwrap()),
-			WalIndex::new(0, 3),
+			WalIndex::new(0, NonZeroU64::new(3).unwrap()),
 		);
 		let mut transactions = HashMap::new();
-		transactions.insert(69, WalIndex::new(0, 420));
+		transactions.insert(69, WalIndex::new(0, NonZeroU64::new(420).unwrap()));
 		wal_file
 			.push_item(Item::Checkpoint(CheckpointData {
 				dirty_pages: Cow::Borrowed(&dirty_pages),
@@ -903,7 +969,7 @@ mod tests {
 		expected_body.extend(
 			ItemHeaderRepr {
 				kind: ItemKind::Checkpoint as u8,
-				_padding: 0,
+				flags: 0,
 				body_length: 62,
 				crc: 0xc3819119,
 				prev_item: NonZeroU64::new(0),
@@ -961,7 +1027,7 @@ mod tests {
 			},
 			page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 			offset: 420,
-			from: Cow::Owned(vec![0, 0, 0, 0]),
+			from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 			to: Cow::Owned(vec![1, 2, 3, 4]),
 		});
 
@@ -984,7 +1050,7 @@ mod tests {
 				},
 				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 				offset: 420,
-				from: Cow::Owned(vec![0, 0, 0, 0]),
+				from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 				to: Cow::Owned(vec![1, 2, 3, 4]),
 			}),
 			Item::Commit(TransactionData {
@@ -1000,8 +1066,14 @@ mod tests {
 
 		// then
 		let mut iter = wal_file.iter_items().unwrap();
-		assert_eq!(iter.next().unwrap().unwrap(), (9, items[0].clone()));
-		assert_eq!(iter.next().unwrap().unwrap(), (67, items[1].clone()));
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(NonZeroU64::new(9).unwrap(), items[0].clone())
+		);
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(NonZeroU64::new(67).unwrap(), items[1].clone())
+		);
 		assert!(iter.next().is_none());
 	}
 
@@ -1017,7 +1089,7 @@ mod tests {
 				},
 				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
 				offset: 420,
-				from: Cow::Owned(vec![0, 0, 0, 0]),
+				from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 				to: Cow::Owned(vec![1, 2, 3, 4]),
 			}),
 			Item::Commit(TransactionData {
@@ -1033,8 +1105,14 @@ mod tests {
 
 		// then
 		let mut iter = wal_file.iter_items_reverse().unwrap();
-		assert_eq!(iter.next().unwrap().unwrap(), (67, items[1].clone()));
-		assert_eq!(iter.next().unwrap().unwrap(), (9, items[0].clone()));
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(NonZeroU64::new(67).unwrap(), items[1].clone())
+		);
+		assert_eq!(
+			iter.next().unwrap().unwrap(),
+			(NonZeroU64::new(9).unwrap(), items[0].clone())
+		);
 		assert!(iter.next().is_none());
 	}
 }

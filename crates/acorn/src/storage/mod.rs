@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 
 use thiserror::Error;
 
@@ -34,11 +34,11 @@ impl PageId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct WalIndex {
 	pub generation: u64,
-	pub offset: u64,
+	pub offset: NonZeroU64,
 }
 
 impl WalIndex {
-	pub fn new(generation: u64, offset: u64) -> Self {
+	pub fn new(generation: u64, offset: NonZeroU64) -> Self {
 		Self { generation, offset }
 	}
 }

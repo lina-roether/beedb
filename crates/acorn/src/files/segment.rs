@@ -1,7 +1,7 @@
 use std::{
 	fs::{File, OpenOptions},
 	io::{Seek, SeekFrom},
-	num::NonZeroU16,
+	num::{NonZeroU16, NonZeroU64},
 	os,
 	path::Path,
 };
@@ -51,7 +51,7 @@ impl From<PageHeader> for PageHeaderRepr {
 	fn from(value: PageHeader) -> Self {
 		Self {
 			wal_generation: value.wal_index.generation,
-			wal_offset: value.wal_index.offset,
+			wal_offset: value.wal_index.offset.get(),
 			crc: value.crc,
 			format_version: PAGE_FORMAT_VERSION,
 		}
@@ -65,8 +65,13 @@ impl TryFrom<PageHeaderRepr> for PageHeader {
 		if value.format_version != PAGE_FORMAT_VERSION {
 			return Err(FileError::IncompatiblePageVersion(value.format_version));
 		}
+		let Some(wal_offset) = NonZeroU64::new(value.wal_offset) else {
+			return Err(FileError::Corrupted(
+				"Found invalid WAL offset '0'".to_string(),
+			));
+		};
 		Ok(Self {
-			wal_index: WalIndex::new(value.wal_generation, value.wal_offset),
+			wal_index: WalIndex::new(value.wal_generation, wal_offset),
 			crc: value.crc,
 		})
 	}
@@ -263,7 +268,7 @@ mod tests {
 			.write(
 				NonZeroU16::new(3).unwrap(),
 				&[3; PAGE_BODY_SIZE],
-				WalIndex::new(69, 420),
+				WalIndex::new(69, NonZeroU64::new(420).unwrap()),
 			)
 			.unwrap();
 
@@ -275,7 +280,7 @@ mod tests {
 				PageHeaderRepr {
 					wal_generation: 69,
 					wal_offset: 420,
-					crc: 0x9c41,
+					crc: 0x00000000,
 					format_version: 1
 				}
 				.as_bytes(),
@@ -294,7 +299,7 @@ mod tests {
 			.write(
 				NonZeroU16::new(5).unwrap(),
 				&[25; PAGE_BODY_SIZE],
-				WalIndex::new(69, 420),
+				WalIndex::new(69, NonZeroU64::new(420).unwrap()),
 			)
 			.unwrap();
 
@@ -305,7 +310,7 @@ mod tests {
 			.unwrap();
 
 		// then
-		assert_eq!(wal_index, WalIndex::new(69, 420));
+		assert_eq!(wal_index, WalIndex::new(69, NonZeroU64::new(420).unwrap()));
 		assert_eq!(data, [25; PAGE_BODY_SIZE]);
 	}
 }
