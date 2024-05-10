@@ -11,16 +11,23 @@ use static_assertions::assert_impl_all;
 use crate::{
 	consts::DEFAULT_MAX_WAL_GENERATION_SIZE,
 	files::{
-		segment::PAGE_BODY_SIZE,
 		wal::{self, CheckpointData, WalFileApi},
 		DatabaseFolder, DatabaseFolderApi,
 	},
 };
 
-use super::{physical::PhysicalStorageApi, PageId, StorageError, TransactionState, WalIndex};
+use super::{PageId, StorageError, TransactionState, WalIndex};
 
 pub(crate) struct WalConfig {
 	pub max_generation_size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WriteOp<'a> {
+	index: WalIndex,
+	page_id: PageId,
+	offset: u16,
+	buf: &'a [u8],
 }
 
 impl Default for WalConfig {
@@ -66,16 +73,14 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		folder.clear_wal_files()?;
 		let mut gens: GenerationQueue<DF> = GenerationQueue::new();
 		gens.push_generation(0, folder.open_wal_file(0)?);
-		Self::log_checkpoint(&gens, &HashMap::new(), &HashMap::new())?;
 
-		Ok(Self::new(folder, config, gens, State::default()))
+		let wal = Self::new(folder, config, gens, State::default());
+		wal.log_checkpoint()?;
+
+		Ok(wal)
 	}
 
-	pub fn open_and_recover(
-		folder: Arc<DF>,
-		config: &WalConfig,
-		storage: &impl PhysicalStorageApi,
-	) -> Result<Self, StorageError> {
+	pub fn open(folder: Arc<DF>, config: &WalConfig) -> Result<Self, StorageError> {
 		let mut wal_files: Vec<(u64, DF::WalFile)> = Result::from_iter(folder.iter_wal_files()?)?;
 		wal_files.sort_by(|(gen_1, _), (gen_2, _)| u64::cmp(gen_1, gen_2));
 
@@ -84,10 +89,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 			gens.push_generation(gen, file);
 		}
 
-		let state = Self::recover(&gens, storage)?;
-		Self::cleanup_generations(&folder, &state, &mut gens)?;
-
-		Ok(Self::new(folder, config, gens, state))
+		Ok(Self::new(folder, config, gens, State::default()))
 	}
 
 	fn new(
@@ -104,43 +106,42 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		}
 	}
 
-	fn log_checkpoint(
-		generations: &GenerationQueue<DF>,
-		dirty_pages: &HashMap<PageId, WalIndex>,
-		transactions: &HashMap<u64, TransactionState>,
-	) -> Result<(), StorageError> {
+	fn log_checkpoint(&self) -> Result<(), StorageError> {
+		let generations = self.generations.read();
 		let Some(mut wal_file) = generations.current_generation() else {
 			return Err(StorageError::WalNotInitialized);
 		};
+
+		let state = self.state.lock();
 		wal_file.push_item(wal::Item::Checkpoint(CheckpointData {
-			dirty_pages: Cow::Borrowed(dirty_pages),
-			transactions: Cow::Borrowed(transactions),
+			dirty_pages: Cow::Borrowed(&state.dirty_pages),
+			transactions: Cow::Borrowed(&state.transactions),
 		}))?;
 
 		Ok(())
 	}
 
-	fn cleanup_generations(
-		folder: &DF,
-		state: &State,
-		generations: &mut GenerationQueue<DF>,
-	) -> Result<(), StorageError> {
+	fn cleanup_generations(&self, gens: &mut GenerationQueue<DF>) -> Result<(), StorageError> {
+		let state = self.state.lock();
 		let first_needed = state.first_needed_generation();
+		mem::drop(state);
+
 		let mut delete_gens: Vec<u64> = Vec::new();
-		for gen in &generations.generations {
-			if gen.gen_num >= first_needed || gen.gen_num == generations.current_gen_num {
+		for gen in &gens.generations {
+			if gen.gen_num >= first_needed || gen.gen_num == gens.current_gen_num {
 				break;
 			}
 			delete_gens.push(gen.gen_num);
 		}
+
 		for gen_num in delete_gens {
-			generations.generations.pop_front();
-			folder.delete_wal_file(gen_num)?;
+			gens.generations.pop_front();
+			self.folder.delete_wal_file(gen_num)?;
 		}
 		Ok(())
 	}
 
-	fn read_initial_state(file: &mut impl WalFileApi) -> Result<State, StorageError> {
+	fn read_initial_state(&self, file: &mut DF::WalFile) -> Result<(), StorageError> {
 		let mut checkpoint_data: Option<wal::CheckpointData> = None;
 		for item_result in file.iter_items()? {
 			if let (_, wal::Item::Checkpoint(data)) = item_result? {
@@ -148,21 +149,20 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 				break;
 			}
 		}
-		let state = match checkpoint_data {
+
+		let mut state = self.state.lock();
+		*state = match checkpoint_data {
 			Some(data) => State::new(
 				data.dirty_pages.into_owned(),
 				data.transactions.into_owned(),
 			),
 			None => State::default(),
 		};
-		Ok(state)
+		Ok(())
 	}
 
-	fn recover_state(
-		file: &mut impl WalFileApi,
-		gen_num: u64,
-		state: &mut State,
-	) -> Result<(), StorageError> {
+	fn recover_state(&self, file: &mut DF::WalFile, gen_num: u64) -> Result<(), StorageError> {
+		let mut state = self.state.lock();
 		for item_result in file.iter_items()? {
 			let (offset, item) = item_result?;
 			state.handle_item(WalIndex::new(gen_num, offset), &item);
@@ -171,50 +171,50 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 	}
 
 	fn redo_write(
-		state: &State,
+		&self,
 		index: WalIndex,
 		data: wal::WriteData,
-		storage: &impl PhysicalStorageApi,
+		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
-		let Some(first_dirty_index) = state.dirty_pages.get(&data.page_id) else {
+		let state = self.state.lock();
+		let Some(first_dirty_index) = state.dirty_pages.get(&data.page_id).copied() else {
 			return Ok(());
 		};
-		if index < *first_dirty_index {
-			return Ok(());
-		}
-		let mut page_buf = [0; PAGE_BODY_SIZE];
-		let last_written_index = storage.read(data.page_id, &mut page_buf)?;
-		if index < last_written_index {
+		mem::drop(state);
+
+		if index < first_dirty_index {
 			return Ok(());
 		}
 
-		page_buf[data.offset.into()..data.offset as usize + data.to.len()]
-			.copy_from_slice(&data.to);
-		storage.write(data.page_id, &page_buf, index)?;
+		handle(WriteOp {
+			index,
+			page_id: data.page_id,
+			offset: data.offset,
+			buf: data.to.borrow(),
+		})?;
+
 		Ok(())
 	}
 
 	fn redo(
-		file: &mut impl WalFileApi,
-		state: &State,
+		&self,
+		file: &mut DF::WalFile,
 		gen_num: u64,
-		storage: &impl PhysicalStorageApi,
+		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
 		for item_result in file.iter_items()? {
 			let (offset, item) = item_result?;
 			let index = WalIndex::new(gen_num, offset);
 
 			if let wal::Item::Write(data) = item {
-				Self::redo_write(state, index, data, storage)?
+				self.redo_write(index, data, &mut handle)?;
 			}
 		}
 		Ok(())
 	}
 
-	fn create_undo_log<'a>(write: wal::WriteData<'a>) -> Option<UndoLog<'a>> {
-		let Some(from_buf) = write.from else {
-			return None;
-		};
+	fn create_undo_log(write: wal::WriteData<'_>) -> Option<UndoLog<'_>> {
+		let from_buf = write.from?;
 
 		Some(UndoLog {
 			transaction_id: write.transaction_data.transaction_id,
@@ -225,40 +225,43 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 	}
 
 	fn apply_undo_log(
-		wal_file: &mut DF::WalFile,
+		&self,
 		log: UndoLog,
-		gen_num: u64,
-		storage: &impl PhysicalStorageApi,
+		gens: &GenerationQueue<DF>,
+		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
 	) -> Result<WalIndex, StorageError> {
-		let mut page_buf = [0; PAGE_BODY_SIZE];
-		storage.read(log.page_id, &mut page_buf)?;
-		page_buf[log.offset as usize..log.offset as usize + log.to.len()].copy_from_slice(&log.to);
+		let index = self.log_undo(log.clone(), gens)?;
 
-		let wal_offset = wal_file.push_item(wal::Item::Write(item))?;
-
-		storage.write(page_id, &page_buf, WalIndex::new(gen_num, wal_offset))?;
-		Ok(WalIndex::new(gen_num, wal_offset))
+		handle(WriteOp {
+			page_id: log.page_id,
+			offset: log.offset,
+			index,
+			buf: &log.to,
+		})?;
+		Ok(index)
 	}
 
 	fn undo_all(
-		state: &mut State,
+		&self,
 		transaction_ids: &[u64],
-		gen_queue: &GenerationQueue<DF>,
-		storage: &impl PhysicalStorageApi,
+		gens: &mut GenerationQueue<DF>,
+		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
 		if transaction_ids.is_empty() {
 			return Ok(());
 		}
 
+		let state = self.state.lock();
 		let lowest_index: WalIndex = transaction_ids
 			.iter()
 			.filter_map(|tid| state.transactions.get(tid).map(|ts| ts.last_index))
 			.min()
 			.unwrap();
+		mem::drop(state);
 
-		let mut compensation_items: Vec<wal::WriteData> = Vec::new();
+		let mut compensation_items: Vec<UndoLog> = Vec::new();
 
-		'gen_loop: for generation in gen_queue.generations.iter().rev() {
+		'gen_loop: for generation in gens.generations.iter().rev() {
 			let mut wal_file = generation.file.lock();
 			'item_loop: for item_result in wal_file.iter_items_reverse()? {
 				let (offset, item) = item_result?;
@@ -271,51 +274,33 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 					if !transaction_ids.contains(&data.transaction_data.transaction_id) {
 						continue 'item_loop;
 					}
-					if let Some(compensation_item) = Self::create_undo_item(state, data)? {
+					if let Some(compensation_item) = Self::create_undo_log(data) {
 						compensation_items.push(compensation_item);
 					}
 				}
 			}
 		}
 
-		let Some(mut wal_file) = gen_queue.current_generation() else {
-			return Err(StorageError::WalNotInitialized);
-		};
 		for item in compensation_items {
-			let index = Self::apply_undo(&mut wal_file, gen_queue.current_gen_num, item, storage)?;
+			self.apply_undo_log(item, gens, &mut handle)?;
 		}
+
 		for tid in transaction_ids {
-			wal_file.push_item(wal::Item::Commit(wal::TransactionData {
-				transaction_id: *tid,
-				prev_transaction_item: todo!(),
-			}))?;
+			self.push_raw_item(wal::Item::Commit(self.create_transaction_data(*tid)), gens)?;
+
+			let mut state = self.state.lock();
 			state.complete_transaction(*tid);
+			mem::drop(state);
 		}
+
 		Ok(())
 	}
 
-	fn recover(
-		generations: &GenerationQueue<DF>,
-		storage: &impl PhysicalStorageApi,
-	) -> Result<State, StorageError> {
-		let Some(mut file) = generations.current_generation() else {
-			return Ok(State::default());
-		};
-
-		let mut state = Self::read_initial_state(&mut *file)?;
-		Self::recover_state(&mut *file, generations.current_gen_num, &mut state)?;
-		Self::redo(&mut *file, &state, generations.current_gen_num, storage)?;
-		mem::drop(file);
-
-		let all_tids = state.transactions.keys().copied().collect::<Vec<_>>();
-
-		Self::undo_all(&mut state, &all_tids, generations, storage)?;
-
-		Ok(state)
-	}
-
-	fn push_raw_item(&self, item: wal::Item) -> Result<WalIndex, StorageError> {
-		let gens = self.generations.read();
+	fn push_raw_item(
+		&self,
+		item: wal::Item,
+		gens: &GenerationQueue<DF>,
+	) -> Result<WalIndex, StorageError> {
 		let Some(mut wal_file) = gens.current_generation() else {
 			return Err(StorageError::WalNotInitialized);
 		};
@@ -368,9 +353,13 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		}
 	}
 
-	fn log_undo(&self, undo_log: UndoLog) -> Result<WalIndex, StorageError> {
+	fn log_undo(
+		&self,
+		undo_log: UndoLog,
+		gens: &GenerationQueue<DF>,
+	) -> Result<WalIndex, StorageError> {
 		let write_data = self.create_undo_write_data(undo_log);
-		self.push_raw_item(wal::Item::Write(write_data))
+		self.push_raw_item(wal::Item::Write(write_data), gens)
 	}
 }
 
@@ -382,7 +371,12 @@ pub(super) trait WalApi {
 	fn undo(
 		&self,
 		transaction_id: u64,
-		physical_storage: &impl PhysicalStorageApi,
+		handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
+	) -> Result<(), StorageError>;
+
+	fn recover(
+		&self,
+		handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError>;
 
 	fn checkpoint(&self) -> Result<(), StorageError>;
@@ -393,23 +387,48 @@ pub(super) trait WalApi {
 impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 	fn log_write(&self, log: WriteLog) -> Result<WalIndex, StorageError> {
 		let write_data = self.create_write_data(log);
-		self.push_raw_item(wal::Item::Write(write_data))
+		let gens = self.generations.read();
+		self.push_raw_item(wal::Item::Write(write_data), &gens)
 	}
 
 	fn log_commit(&self, log: CommitLog) -> Result<WalIndex, StorageError> {
 		let transaction_data = self.create_transaction_data(log.transaction_id);
-		self.push_raw_item(wal::Item::Commit(transaction_data))
+		let gens = self.generations.read();
+		self.push_raw_item(wal::Item::Commit(transaction_data), &gens)
 	}
 
 	fn undo(
 		&self,
 		transaction_id: u64,
-		physical_storage: &impl PhysicalStorageApi,
+		handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
-		let gens = self.generations.read();
-		let mut state = self.state.lock();
+		let mut gens = self.generations.write();
+		self.undo_all(&[transaction_id], &mut gens, handle)?;
+		Ok(())
+	}
 
-		Self::undo_all(&mut state, &[transaction_id], &gens, physical_storage)?;
+	fn recover(
+		&self,
+		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
+	) -> Result<(), StorageError> {
+		// acquire exclusive gen lock to prevent conflicts
+		let mut gens = self.generations.write();
+
+		let Some(mut file) = gens.current_generation() else {
+			return Err(StorageError::WalNotInitialized);
+		};
+
+		self.read_initial_state(&mut file)?;
+		self.recover_state(&mut file, gens.current_gen_num)?;
+		self.redo(&mut file, gens.current_gen_num, &mut handle)?;
+		mem::drop(file);
+
+		let state = self.state.lock();
+		let all_tids = state.transactions.keys().copied().collect::<Vec<_>>();
+		mem::drop(state);
+
+		self.undo_all(&all_tids, &mut gens, handle)?;
+
 		Ok(())
 	}
 
@@ -417,25 +436,19 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		// Acquire exclusive generations lock
 		let mut generations_mut = self.generations.write();
 
-		// Clone checkpoint-relevant state to ensure consistency
-		// TODO: This might not be necessary, need to look into how the threads
-		// interplay here
-		let state = self.state.lock().clone();
-
 		// Create the new generation and save it to the state object
 		let gen_num = generations_mut.current_gen_num + 1;
 		let file = self.folder.open_wal_file(gen_num)?;
 		generations_mut.push_generation(gen_num, file);
 
 		// Delete old generations if possible
-		Self::cleanup_generations(&self.folder, &state, &mut generations_mut)?;
+		self.cleanup_generations(&mut generations_mut)?;
 
 		// Release exclusive generations lock
 		mem::drop(generations_mut);
 
 		// Write checkpoint item to new generation
-		let generations = self.generations.read();
-		Self::log_checkpoint(&generations, &state.dirty_pages, &state.transactions)?;
+		self.log_checkpoint()?;
 
 		Ok(())
 	}
@@ -553,7 +566,7 @@ mod tests {
 
 	use mockall::{predicate::*, Sequence};
 
-	use crate::{files::MockDatabaseFolderApi, storage::physical::MockPhysicalStorageApi};
+	use crate::files::MockDatabaseFolderApi;
 
 	use self::wal::MockWalFileApi;
 
@@ -696,6 +709,11 @@ mod tests {
 
 			let mut seq = Sequence::new();
 			generation_3
+				.expect_next_offset()
+				.once()
+				.in_sequence(&mut seq)
+				.returning(|| NonZeroU64::new(40).unwrap());
+			generation_3
 				.expect_push_item()
 				.withf(|item| {
 					item == &wal::Item::Write(wal::WriteData {
@@ -716,6 +734,16 @@ mod tests {
 				.in_sequence(&mut seq)
 				.returning(|_| Ok(NonZeroU64::new(40).unwrap()));
 			generation_3
+				.expect_size()
+				.once()
+				.in_sequence(&mut seq)
+				.returning(|| 69420);
+			generation_3
+				.expect_next_offset()
+				.once()
+				.in_sequence(&mut seq)
+				.returning(|| NonZeroU64::new(50).unwrap());
+			generation_3
 				.expect_push_item()
 				.withf(|item| {
 					item == &wal::Item::Commit(wal::TransactionData {
@@ -726,60 +754,41 @@ mod tests {
 				.once()
 				.in_sequence(&mut seq)
 				.returning(|_| Ok(NonZeroU64::new(50).unwrap()));
+			generation_3
+				.expect_size()
+				.once()
+				.in_sequence(&mut seq)
+				.returning(|| 69420);
 
 			Ok(vec![Ok((2, generation_2)), Ok((3, generation_3))].into_iter())
 		});
-		let mut physical_storage = MockPhysicalStorageApi::new();
-		let mut seq = Sequence::new();
-		physical_storage
-			.expect_read()
-			.with(eq(PageId::new(25, NonZeroU16::new(69).unwrap())), always())
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|_, buf| {
-				buf.fill(0);
-				Ok(WalIndex::new(1, NonZeroU64::new(20).unwrap()))
-			});
-		physical_storage
-			.expect_write()
-			.with(
-				eq(PageId::new(25, NonZeroU16::new(69).unwrap())),
-				function(|buf: &[u8]| buf[100..104] == [1, 2, 3, 4]),
-				eq(WalIndex::new(3, NonZeroU64::new(10).unwrap())),
-			)
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|_, _, _| Ok(()));
-		physical_storage
-			.expect_read()
-			.with(
-				eq(PageId::new(100, NonZeroU16::new(200).unwrap())),
-				always(),
-			)
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|_, buf| {
-				buf.fill(0);
-				Ok(WalIndex::new(2, NonZeroU64::new(20).unwrap()))
-			});
-		physical_storage
-			.expect_write()
-			.with(
-				eq(PageId::new(100, NonZeroU16::new(200).unwrap())),
-				function(|buf: &[u8]| buf[25..29] == [2, 2, 2, 2]),
-				eq(WalIndex::new(3, NonZeroU64::new(40).unwrap())),
-			)
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|_, _, _| Ok(()));
-		folder
-			.expect_delete_wal_file()
-			.with(eq(2))
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|_| Ok(()));
 
 		// when
-		Wal::open_and_recover(Arc::new(folder), &WalConfig::default(), &physical_storage).unwrap();
+		let wal = Wal::open(Arc::new(folder), &WalConfig::default()).unwrap();
+		let mut write_ops: Vec<(WalIndex, PageId, u16, Box<[u8]>)> = Vec::new();
+		wal.recover(|op| {
+			write_ops.push((op.index, op.page_id, op.offset, op.buf.into()));
+			Ok(())
+		})
+		.unwrap();
+
+		// then
+		assert_eq!(
+			write_ops,
+			vec![
+				(
+					WalIndex::new(3, NonZeroU64::new(10).unwrap()),
+					PageId::new(25, NonZeroU16::new(69).unwrap()),
+					100,
+					vec![1, 2, 3, 4].into()
+				),
+				(
+					WalIndex::new(3, NonZeroU64::new(40).unwrap()),
+					PageId::new(100, NonZeroU16::new(200).unwrap()),
+					25,
+					vec![2, 2, 2, 2].into()
+				)
+			]
+		)
 	}
 }
