@@ -16,7 +16,7 @@ const FORMAT_VERSION: u8 = 1;
 #[cfg(test)]
 use mockall::automock;
 
-use crate::storage::{PageId, WalIndex};
+use crate::storage::{PageId, TransactionState, WalIndex};
 
 use super::{
 	generic::{FileType, GenericHeader},
@@ -78,6 +78,14 @@ pub(crate) struct PageIdRepr {
 pub(crate) struct WalIndexRepr {
 	generation: u64,
 	offset: u64,
+}
+
+#[derive(Debug, Clone, FromBytes, FromZeroes, AsBytes)]
+#[repr(C)]
+pub(crate) struct TransactionStateRepr {
+	first_generation: u64,
+	last_generation: u64,
+	last_offset: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +313,36 @@ impl Serialized for WalIndex {
 	type Repr = WalIndexRepr;
 }
 
+impl From<TransactionState> for TransactionStateRepr {
+	fn from(value: TransactionState) -> Self {
+		Self {
+			first_generation: value.first_gen,
+			last_generation: value.last_index.generation,
+			last_offset: value.last_index.offset.get(),
+		}
+	}
+}
+
+impl Serialized for TransactionState {
+	type Repr = TransactionStateRepr;
+}
+
+impl TryFrom<TransactionStateRepr> for TransactionState {
+	type Error = FileError;
+
+	fn try_from(value: TransactionStateRepr) -> Result<Self, Self::Error> {
+		let Some(last_offset) = NonZeroU64::new(value.last_offset) else {
+			return Err(FileError::Corrupted(
+				"Found invalid WAL offset '0'".to_string(),
+			));
+		};
+		Ok(Self {
+			first_gen: value.first_generation,
+			last_index: WalIndex::new(value.last_generation, last_offset),
+		})
+	}
+}
+
 pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
@@ -419,9 +457,9 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			page_id.serialize(&mut writer)?;
 			wal_index.serialize(&mut writer)?;
 		}
-		for (transaction_id, wal_index) in data.transactions.iter() {
+		for (transaction_id, transaction_state) in data.transactions.iter() {
 			writer.write_all(transaction_id.as_bytes())?;
-			wal_index.serialize(&mut writer)?;
+			transaction_state.clone().serialize(&mut writer)?;
 		}
 
 		Ok(())
@@ -445,7 +483,7 @@ pub(crate) struct WriteData<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckpointData<'a> {
-	pub transactions: Cow<'a, HashMap<u64, WalIndex>>,
+	pub transactions: Cow<'a, HashMap<u64, TransactionState>>,
 	pub dirty_pages: Cow<'a, HashMap<PageId, WalIndex>>,
 }
 
@@ -631,13 +669,13 @@ impl<F: Read + Seek> ItemReader<F> {
 			dirty_pages.insert(page_id, wal_index);
 		}
 
-		let mut transactions: HashMap<u64, WalIndex> = HashMap::new();
+		let mut transactions: HashMap<u64, TransactionState> = HashMap::new();
 		for _ in 0..checkpoint_block.num_transactions {
 			let mut tid_bytes = [0; 8];
 			body.read_exact(&mut tid_bytes)?;
 			let transaction_id = u64::from_ne_bytes(tid_bytes);
-			let wal_index = WalIndex::deserialize(&mut body)?;
-			transactions.insert(transaction_id, wal_index);
+			let transaction_state = TransactionState::deserialize(&mut body)?;
+			transactions.insert(transaction_id, transaction_state);
 		}
 
 		Ok(CheckpointData {
@@ -764,7 +802,7 @@ mod tests {
 		);
 
 		assert_eq!(file.len(), GenericHeader::REPR_SIZE);
-		assert_eq!(file, expected_data);
+		assert_buf_eq!(file, expected_data);
 	}
 
 	#[test]
@@ -968,7 +1006,13 @@ mod tests {
 			WalIndex::new(0, NonZeroU64::new(3).unwrap()),
 		);
 		let mut transactions = HashMap::new();
-		transactions.insert(69, WalIndex::new(0, NonZeroU64::new(420).unwrap()));
+		transactions.insert(
+			69,
+			TransactionState {
+				first_gen: 0,
+				last_index: WalIndex::new(1, NonZeroU64::new(420).unwrap()),
+			},
+		);
 		wal_file
 			.push_item(Item::Checkpoint(CheckpointData {
 				dirty_pages: Cow::Borrowed(&dirty_pages),
@@ -982,8 +1026,8 @@ mod tests {
 			ItemHeaderRepr {
 				kind: ItemKind::Checkpoint as u8,
 				flags: 0,
-				body_length: 62,
-				crc: 0xc3819119,
+				body_length: 70,
+				crc: 0x3420af22,
 				prev_item: NonZeroU64::new(0),
 			}
 			.as_bytes(),
@@ -1011,9 +1055,10 @@ mod tests {
 		);
 		expected_body.extend(69_u64.to_ne_bytes());
 		expected_body.extend(
-			WalIndexRepr {
-				generation: 0,
-				offset: 420,
+			TransactionStateRepr {
+				first_generation: 0,
+				last_generation: 1,
+				last_offset: 420,
 			}
 			.as_bytes(),
 		);
@@ -1025,7 +1070,7 @@ mod tests {
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]

@@ -16,6 +16,12 @@ pub(crate) enum StorageError {
 	File(#[from] FileError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransactionState {
+	pub first_gen: u64,
+	pub last_index: WalIndex,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PageId {
 	pub segment_num: u32,
