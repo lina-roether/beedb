@@ -117,8 +117,8 @@ impl fmt::Display for HexdumpDiff<'_> {
 			let offset = line * bytes_per_line;
 			let received_end = usize::min(self.received.len(), offset + bytes_per_line);
 			let expected_end = usize::min(self.expected.len(), offset + bytes_per_line);
-			let received_line = &self.received[offset..received_end];
-			let expected_line = &self.expected[offset..expected_end];
+			let received_line = self.received.get(offset..received_end).unwrap_or_default();
+			let expected_line = self.expected.get(offset..expected_end).unwrap_or_default();
 
 			if last_received_line == Some(received_line.into())
 				&& last_expected_line == Some(expected_line.into())
