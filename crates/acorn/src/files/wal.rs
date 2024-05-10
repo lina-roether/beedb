@@ -603,11 +603,11 @@ impl<F: Read + Seek> ItemReader<F> {
 
 		let write_block = WriteBlock::deserialize(&mut body)?;
 		let from: Option<Vec<u8>> = if is_undo {
+			None
+		} else {
 			let mut from = vec![0; write_block.write_length.into()];
 			body.read_exact(&mut from)?;
 			Some(from)
-		} else {
-			None
 		};
 		let mut to: Vec<u8> = vec![0; write_block.write_length.into()];
 		body.read_exact(&mut to)?;
@@ -738,6 +738,8 @@ impl<F: Read + Seek> Iterator for IterItemsReverse<F> {
 
 #[cfg(test)]
 mod tests {
+	use pretty_assertions::assert_buf_eq;
+
 	use crate::files::generic::GenericHeaderRepr;
 
 	use super::*;
@@ -811,8 +813,8 @@ mod tests {
 			ItemHeaderRepr {
 				kind: ItemKind::Write as u8,
 				flags: 0,
-				body_length: 34,
-				crc: 0x137560fc,
+				body_length: 42,
+				crc: 0x994f0abc,
 				prev_item: NonZeroU64::new(0),
 			}
 			.as_bytes(),
@@ -844,7 +846,7 @@ mod tests {
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]
@@ -867,8 +869,8 @@ mod tests {
 			ItemHeaderRepr {
 				kind: ItemKind::Commit as u8,
 				flags: 0,
-				body_length: 16,
-				crc: 0xdb684ab9,
+				body_length: 24,
+				crc: 0x8b777949,
 				prev_item: NonZeroU64::new(0),
 			}
 			.as_bytes(),
@@ -889,7 +891,7 @@ mod tests {
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]
@@ -918,8 +920,8 @@ mod tests {
 			ItemHeaderRepr {
 				kind: ItemKind::Write as u8,
 				flags: FLAG_UNDO,
-				body_length: 16,
-				crc: 0xdb684ab9,
+				body_length: 38,
+				crc: 0x1af2b54e,
 				prev_item: NonZeroU64::new(0),
 			}
 			.as_bytes(),
@@ -928,10 +930,20 @@ mod tests {
 			TransactionBlockRepr {
 				prev_transaction_generation: 123,
 				prev_transaction_offset: NonZeroU64::new(24),
-				transaction_id: 69,
+				transaction_id: 25,
 			}
 			.as_bytes(),
 		);
+		expected_body.extend(
+			WriteBlockRepr {
+				offset: 445,
+				segment_num: 123,
+				page_num: 456,
+				write_length: 4,
+			}
+			.as_bytes(),
+		);
+		expected_body.extend([4, 5, 6, 7]);
 		expected_body.extend(
 			ItemFooterRepr {
 				item_start: GenericHeader::REPR_SIZE as u64,
@@ -940,7 +952,7 @@ mod tests {
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_eq!(file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
 	}
 
 	#[test]
@@ -1072,7 +1084,7 @@ mod tests {
 		);
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(NonZeroU64::new(67).unwrap(), items[1].clone())
+			(NonZeroU64::new(75).unwrap(), items[1].clone())
 		);
 		assert!(iter.next().is_none());
 	}
@@ -1107,7 +1119,7 @@ mod tests {
 		let mut iter = wal_file.iter_items_reverse().unwrap();
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(NonZeroU64::new(67).unwrap(), items[1].clone())
+			(NonZeroU64::new(75).unwrap(), items[1].clone())
 		);
 		assert_eq!(
 			iter.next().unwrap().unwrap(),

@@ -281,7 +281,7 @@ mod tests {
 				PageHeaderRepr {
 					wal_generation: 69,
 					wal_offset: 420,
-					crc: 0x00000000,
+					crc: 0x9c41,
 					format_version: 1
 				}
 				.as_bytes(),
