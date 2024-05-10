@@ -778,7 +778,10 @@ impl<F: Read + Seek> Iterator for IterItemsReverse<F> {
 mod tests {
 	use pretty_assertions::assert_buf_eq;
 
-	use crate::files::generic::GenericHeaderRepr;
+	use crate::{
+		files::generic::GenericHeaderRepr,
+		storage::test_helpers::{page_id, wal_index},
+	};
 
 	use super::*;
 
@@ -836,9 +839,9 @@ mod tests {
 			.push_item(Item::Write(WriteData {
 				transaction_data: TransactionData {
 					transaction_id: 25,
-					prev_transaction_item: Some(WalIndex::new(123, NonZeroU64::new(24).unwrap())),
+					prev_transaction_item: Some(wal_index!(123, 24)),
 				},
-				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
+				page_id: page_id!(123, 456),
 				offset: 445,
 				from: Some(Cow::Owned(vec![1, 2, 3, 4])),
 				to: Cow::Owned(vec![4, 5, 6, 7]),
@@ -897,7 +900,7 @@ mod tests {
 		wal_file
 			.push_item(Item::Commit(TransactionData {
 				transaction_id: 69,
-				prev_transaction_item: Some(WalIndex::new(123, NonZeroU64::new(25).unwrap())),
+				prev_transaction_item: Some(wal_index!(123, 25)),
 			}))
 			.unwrap();
 
@@ -943,12 +946,12 @@ mod tests {
 			.push_item(Item::Write(WriteData {
 				transaction_data: TransactionData {
 					transaction_id: 25,
-					prev_transaction_item: Some(WalIndex::new(123, NonZeroU64::new(24).unwrap())),
+					prev_transaction_item: Some(wal_index!(123, 24)),
 				},
-				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
+				page_id: page_id!(123, 456),
 				offset: 445,
 				from: None,
-				to: Cow::Owned(vec![4, 5, 6, 7]),
+				to: vec![4, 5, 6, 7].into(),
 			}))
 			.unwrap();
 
@@ -1001,16 +1004,13 @@ mod tests {
 
 		// when
 		let mut dirty_pages = HashMap::new();
-		dirty_pages.insert(
-			PageId::new(1, NonZeroU16::new(2).unwrap()),
-			WalIndex::new(0, NonZeroU64::new(3).unwrap()),
-		);
+		dirty_pages.insert(page_id!(1, 2), wal_index!(0, 3));
 		let mut transactions = HashMap::new();
 		transactions.insert(
 			69,
 			TransactionState {
 				first_gen: 0,
-				last_index: WalIndex::new(1, NonZeroU64::new(420).unwrap()),
+				last_index: wal_index!(1, 420),
 			},
 		);
 		wal_file
@@ -1082,7 +1082,7 @@ mod tests {
 				transaction_id: 0,
 				prev_transaction_item: None,
 			},
-			page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
+			page_id: page_id!(123, 456),
 			offset: 420,
 			from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 			to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -1105,7 +1105,7 @@ mod tests {
 					transaction_id: 0,
 					prev_transaction_item: None,
 				},
-				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
+				page_id: page_id!(123, 456),
 				offset: 420,
 				from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 				to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -1144,7 +1144,7 @@ mod tests {
 					transaction_id: 0,
 					prev_transaction_item: None,
 				},
-				page_id: PageId::new(123, NonZeroU16::new(456).unwrap()),
+				page_id: page_id!(123, 456),
 				offset: 420,
 				from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 				to: Cow::Owned(vec![1, 2, 3, 4]),

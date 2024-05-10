@@ -140,11 +140,14 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 
 #[cfg(test)]
 mod tests {
-	use std::num::{NonZeroU16, NonZeroU64};
+	use std::num::NonZeroU16;
 
-	use crate::files::{
-		segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
-		MockDatabaseFolderApi,
+	use crate::{
+		files::{
+			segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
+			MockDatabaseFolderApi,
+		},
+		storage::test_helpers::{page_id, wal_index},
 	};
 	use mockall::predicate::*;
 
@@ -166,7 +169,7 @@ mod tests {
 					.with(
 						eq(NonZeroU16::new(420).unwrap()),
 						eq([1; PAGE_BODY_SIZE]),
-						eq(WalIndex::new(69, NonZeroU64::new(420).unwrap())),
+						eq(wal_index!(69, 420)),
 					)
 					.returning(|_, _, _| Ok(()));
 				Ok(segment)
@@ -177,11 +180,7 @@ mod tests {
 
 		// when
 		storage
-			.write(
-				PageId::new(69, NonZeroU16::new(420).unwrap()),
-				&[1; PAGE_BODY_SIZE],
-				WalIndex::new(69, NonZeroU64::new(420).unwrap()),
-			)
+			.write(page_id!(69, 420), &[1; PAGE_BODY_SIZE], wal_index!(69, 420))
 			.unwrap();
 	}
 
@@ -201,7 +200,7 @@ mod tests {
 					.with(eq(NonZeroU16::new(420).unwrap()), always())
 					.returning(|_, buf| {
 						buf[0..3].copy_from_slice(&[1, 2, 3]);
-						Ok(WalIndex::new(69, NonZeroU64::new(420).unwrap()))
+						Ok(wal_index!(69, 420))
 					});
 				Ok(segment)
 			});
@@ -211,12 +210,10 @@ mod tests {
 
 		// when
 		let mut buf = [0; 3];
-		let wal_index = storage
-			.read(PageId::new(69, NonZeroU16::new(420).unwrap()), &mut buf)
-			.unwrap();
+		let wal_index = storage.read(page_id!(69, 420), &mut buf).unwrap();
 
 		// then
-		assert_eq!(wal_index, WalIndex::new(69, NonZeroU64::new(420).unwrap()));
+		assert_eq!(wal_index, wal_index!(69, 420));
 		assert_eq!(buf[0..3], [1, 2, 3]);
 	}
 }

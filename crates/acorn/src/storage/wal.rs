@@ -562,11 +562,14 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-	use std::num::{NonZeroU16, NonZeroU64};
+	use std::num::NonZeroU64;
 
 	use mockall::{predicate::*, Sequence};
 
-	use crate::files::MockDatabaseFolderApi;
+	use crate::{
+		files::MockDatabaseFolderApi,
+		storage::test_helpers::{page_id, wal_index},
+	};
 
 	use self::wal::MockWalFileApi;
 
@@ -619,7 +622,7 @@ mod tests {
 						transaction_id: 1,
 						prev_transaction_item: None,
 					},
-					page_id: PageId::new(100, NonZeroU16::new(200).unwrap()),
+					page_id: page_id!(100, 200),
 					offset: 25,
 					from: Some(Cow::Owned(vec![2, 2, 2, 2])),
 					to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -634,7 +637,7 @@ mod tests {
 						transaction_id: 2,
 						prev_transaction_item: None,
 					},
-					page_id: PageId::new(25, NonZeroU16::new(69).unwrap()),
+					page_id: page_id!(25, 69),
 					offset: 100,
 					from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 					to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -646,23 +649,20 @@ mod tests {
 							1,
 							TransactionState {
 								first_gen: 2,
-								last_index: WalIndex::new(2, NonZeroU64::new(20).unwrap()),
+								last_index: wal_index!(2, 20),
 							},
 						);
 						map
 					}),
 					dirty_pages: Cow::Owned({
 						let mut map = HashMap::new();
-						map.insert(
-							PageId::new(100, NonZeroU16::new(200).unwrap()),
-							WalIndex::new(2, NonZeroU64::new(20).unwrap()),
-						);
+						map.insert(page_id!(100, 200), wal_index!(2, 20));
 						map
 					}),
 				}),
 				wal::Item::Commit(wal::TransactionData {
 					transaction_id: 2,
-					prev_transaction_item: Some(WalIndex::new(2, NonZeroU64::new(30).unwrap())),
+					prev_transaction_item: Some(wal_index!(2, 30)),
 				}),
 			]
 		}
@@ -724,7 +724,7 @@ mod tests {
 								NonZeroU64::new(20).unwrap(),
 							)),
 						},
-						page_id: PageId::new(100, NonZeroU16::new(200).unwrap()),
+						page_id: page_id!(100, 200),
 						offset: 25,
 						from: None,
 						to: Cow::Owned(vec![2, 2, 2, 2]),
@@ -748,7 +748,7 @@ mod tests {
 				.withf(|item| {
 					item == &wal::Item::Commit(wal::TransactionData {
 						transaction_id: 1,
-						prev_transaction_item: Some(WalIndex::new(3, NonZeroU64::new(40).unwrap())),
+						prev_transaction_item: Some(wal_index!(3, 40)),
 					})
 				})
 				.once()
@@ -777,14 +777,14 @@ mod tests {
 			write_ops,
 			vec![
 				(
-					WalIndex::new(3, NonZeroU64::new(10).unwrap()),
-					PageId::new(25, NonZeroU16::new(69).unwrap()),
+					wal_index!(3, 10),
+					page_id!(25, 69),
 					100,
 					vec![1, 2, 3, 4].into()
 				),
 				(
-					WalIndex::new(3, NonZeroU64::new(40).unwrap()),
-					PageId::new(100, NonZeroU16::new(200).unwrap()),
+					wal_index!(3, 40),
+					page_id!(100, 200),
 					25,
 					vec![2, 2, 2, 2].into()
 				)

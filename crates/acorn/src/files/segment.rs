@@ -214,7 +214,7 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 	use zerocopy::AsBytes;
 
-	use crate::files::generic::GenericHeaderRepr;
+	use crate::{files::generic::GenericHeaderRepr, storage::test_helpers::wal_index};
 
 	use super::*;
 
@@ -269,7 +269,7 @@ mod tests {
 			.write(
 				NonZeroU16::new(3).unwrap(),
 				&[3; PAGE_BODY_SIZE],
-				WalIndex::new(69, NonZeroU64::new(420).unwrap()),
+				wal_index!(69, 420),
 			)
 			.unwrap();
 
@@ -300,7 +300,7 @@ mod tests {
 			.write(
 				NonZeroU16::new(5).unwrap(),
 				&[25; PAGE_BODY_SIZE],
-				WalIndex::new(69, NonZeroU64::new(420).unwrap()),
+				wal_index!(69, 420),
 			)
 			.unwrap();
 
@@ -311,7 +311,7 @@ mod tests {
 			.unwrap();
 
 		// then
-		assert_eq!(wal_index, WalIndex::new(69, NonZeroU64::new(420).unwrap()));
+		assert_eq!(wal_index, wal_index!(69, 420));
 		assert_eq!(data, [25; PAGE_BODY_SIZE]);
 	}
 }

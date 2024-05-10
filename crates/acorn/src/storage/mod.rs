@@ -48,3 +48,20 @@ impl WalIndex {
 		Self { generation, offset }
 	}
 }
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+	macro_rules! page_id {
+		($segment:expr, $page:expr) => {
+			$crate::storage::PageId::new($segment, std::num::NonZeroU16::new($page).unwrap())
+		};
+	}
+	pub(crate) use page_id;
+
+	macro_rules! wal_index {
+		($gen:expr, $offset:expr) => {
+			$crate::storage::WalIndex::new($gen, std::num::NonZeroU64::new($offset).unwrap())
+		};
+	}
+	pub(crate) use wal_index;
+}
