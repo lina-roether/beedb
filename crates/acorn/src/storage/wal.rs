@@ -22,7 +22,7 @@ pub(crate) struct WalConfig {
 	pub max_generation_size: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteOp<'a> {
 	index: WalIndex,
 	page_id: PageId,
@@ -562,13 +562,15 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-	use std::num::NonZeroU64;
-
 	use mockall::{predicate::*, Sequence};
 
 	use crate::{
 		files::MockDatabaseFolderApi,
-		storage::test_helpers::{page_id, wal_index},
+		storage::{
+			test_helpers::{page_id, wal_index},
+			wal::tests::wal::test_helpers::mock_wal_file,
+		},
+		utils::test_helpers::{map, non_zero},
 	};
 
 	use self::wal::MockWalFileApi;
@@ -600,7 +602,7 @@ mod tests {
 							dirty_pages: Cow::Owned(HashMap::new()),
 						})
 					})
-					.returning(|_| Ok(NonZeroU64::new(69).unwrap()));
+					.returning(|_| Ok(non_zero!(69)));
 				Ok(file)
 			});
 
@@ -610,119 +612,67 @@ mod tests {
 
 	#[test]
 	fn open_and_recover_wal() {
-		// helpers
-		fn generation_2_items() -> Vec<wal::Item<'static>> {
-			vec![
-				wal::Item::Checkpoint(wal::CheckpointData {
-					transactions: Cow::Owned(HashMap::new()),
-					dirty_pages: Cow::Owned(HashMap::new()),
-				}),
-				wal::Item::Write(wal::WriteData {
-					transaction_data: wal::TransactionData {
-						transaction_id: 1,
-						prev_transaction_item: None,
-					},
-					page_id: page_id!(100, 200),
-					offset: 25,
-					from: Some(Cow::Owned(vec![2, 2, 2, 2])),
-					to: Cow::Owned(vec![1, 2, 3, 4]),
-				}),
-			]
-		}
-
-		fn generation_3_items() -> Vec<wal::Item<'static>> {
-			vec![
-				wal::Item::Write(wal::WriteData {
-					transaction_data: wal::TransactionData {
-						transaction_id: 2,
-						prev_transaction_item: None,
-					},
-					page_id: page_id!(25, 69),
-					offset: 100,
-					from: Some(Cow::Owned(vec![0, 0, 0, 0])),
-					to: Cow::Owned(vec![1, 2, 3, 4]),
-				}),
-				wal::Item::Checkpoint(wal::CheckpointData {
-					transactions: Cow::Owned({
-						let mut map = HashMap::new();
-						map.insert(
-							1,
-							TransactionState {
-								first_gen: 2,
-								last_index: wal_index!(2, 20),
-							},
-						);
-						map
-					}),
-					dirty_pages: Cow::Owned({
-						let mut map = HashMap::new();
-						map.insert(page_id!(100, 200), wal_index!(2, 20));
-						map
-					}),
-				}),
-				wal::Item::Commit(wal::TransactionData {
-					transaction_id: 2,
-					prev_transaction_item: Some(wal_index!(2, 30)),
-				}),
-			]
-		}
-
 		// expect
 		let mut folder = MockDatabaseFolderApi::new();
 		folder.expect_iter_wal_files().returning(|| {
-			let mut generation_2 = MockWalFileApi::new();
-			generation_2.expect_iter_items().returning(|| {
-				let items = generation_2_items();
-				Ok(vec![
-					Ok((NonZeroU64::new(10).unwrap(), items[0].clone())),
-					Ok((NonZeroU64::new(20).unwrap(), items[1].clone())),
-				]
-				.into_iter())
-			});
-			generation_2.expect_iter_items_reverse().returning(|| {
-				let items = generation_2_items();
-				Ok(vec![
-					Ok((NonZeroU64::new(20).unwrap(), items[1].clone())),
-					Ok((NonZeroU64::new(10).unwrap(), items[0].clone())),
-				]
-				.into_iter())
-			});
-			let mut generation_3 = MockWalFileApi::new();
-			generation_3.expect_iter_items().returning(|| {
-				let items = generation_3_items();
-				Ok(vec![
-					Ok((NonZeroU64::new(10).unwrap(), items[0].clone())),
-					Ok((NonZeroU64::new(20).unwrap(), items[1].clone())),
-					Ok((NonZeroU64::new(30).unwrap(), items[2].clone())),
-				]
-				.into_iter())
-			});
-			generation_3.expect_iter_items_reverse().returning(|| {
-				let items = generation_3_items();
-				Ok(vec![
-					Ok((NonZeroU64::new(30).unwrap(), items[2].clone())),
-					Ok((NonZeroU64::new(20).unwrap(), items[1].clone())),
-					Ok((NonZeroU64::new(10).unwrap(), items[0].clone())),
-				]
-				.into_iter())
-			});
+			let generation_2 = mock_wal_file! {
+				10 => wal::Item::Checkpoint(wal::CheckpointData {
+					transactions: Cow::Owned(HashMap::new()),
+					dirty_pages: Cow::Owned(HashMap::new())
+				}),
+				20 => wal::Item::Write(wal::WriteData {
+					transaction_data: wal::TransactionData {
+						transaction_id: 1,
+						prev_transaction_item: None
+					},
+					page_id: page_id!(100, 200),
+					offset: 25,
+					from: Some(vec![2, 2, 2, 2].into()),
+					to: vec![1, 2, 3, 4].into()
+				})
+			};
+			let mut generation_3 = mock_wal_file! {
+				10 => wal::Item::Write(wal::WriteData {
+					transaction_data: wal::TransactionData {
+						transaction_id: 2,
+						prev_transaction_item: None
+					},
+					page_id: page_id!(25, 69),
+					offset: 100,
+					from: Some(vec![0, 0, 0, 0].into()),
+					to: vec![1, 2, 3, 4].into()
+				}),
+				20 => wal::Item::Checkpoint(wal::CheckpointData {
+					transactions: Cow::Owned(map! {
+						1 => TransactionState {
+							first_gen: 2,
+							last_index: wal_index!(2, 20)
+						}
+					}),
+					dirty_pages: Cow::Owned(map! {
+						page_id!(100, 200) => wal_index!(2, 20)
+					})
+				}),
+				30 => wal::Item::Commit(wal::TransactionData {
+					transaction_id: 2,
+					prev_transaction_item: Some(wal_index!(2, 30))
+				})
+			};
 
 			let mut seq = Sequence::new();
 			generation_3
 				.expect_next_offset()
 				.once()
 				.in_sequence(&mut seq)
-				.returning(|| NonZeroU64::new(40).unwrap());
+				.returning(|| non_zero!(40));
+
 			generation_3
 				.expect_push_item()
 				.withf(|item| {
 					item == &wal::Item::Write(wal::WriteData {
 						transaction_data: wal::TransactionData {
 							transaction_id: 1,
-							prev_transaction_item: Some(WalIndex::new(
-								2,
-								NonZeroU64::new(20).unwrap(),
-							)),
+							prev_transaction_item: Some(WalIndex::new(2, non_zero!(20))),
 						},
 						page_id: page_id!(100, 200),
 						offset: 25,
@@ -732,17 +682,20 @@ mod tests {
 				})
 				.once()
 				.in_sequence(&mut seq)
-				.returning(|_| Ok(NonZeroU64::new(40).unwrap()));
+				.returning(|_| Ok(non_zero!(40)));
+
 			generation_3
 				.expect_size()
 				.once()
 				.in_sequence(&mut seq)
 				.returning(|| 69420);
+
 			generation_3
 				.expect_next_offset()
 				.once()
 				.in_sequence(&mut seq)
-				.returning(|| NonZeroU64::new(50).unwrap());
+				.returning(|| non_zero!(50));
+
 			generation_3
 				.expect_push_item()
 				.withf(|item| {
@@ -753,7 +706,8 @@ mod tests {
 				})
 				.once()
 				.in_sequence(&mut seq)
-				.returning(|_| Ok(NonZeroU64::new(50).unwrap()));
+				.returning(|_| Ok(non_zero!(50)));
+
 			generation_3
 				.expect_size()
 				.once()
@@ -764,31 +718,27 @@ mod tests {
 		});
 
 		// when
+		let mut expected_ops = vec![
+			WriteOp {
+				index: wal_index!(3, 10),
+				page_id: page_id!(25, 69),
+				offset: 100,
+				buf: &[1, 2, 3, 4],
+			},
+			WriteOp {
+				index: wal_index!(3, 40),
+				page_id: page_id!(100, 200),
+				offset: 25,
+				buf: &[2, 2, 2, 2],
+			},
+		]
+		.into_iter();
+
 		let wal = Wal::open(Arc::new(folder), &WalConfig::default()).unwrap();
-		let mut write_ops: Vec<(WalIndex, PageId, u16, Box<[u8]>)> = Vec::new();
 		wal.recover(|op| {
-			write_ops.push((op.index, op.page_id, op.offset, op.buf.into()));
+			assert_eq!(Some(op), expected_ops.next());
 			Ok(())
 		})
 		.unwrap();
-
-		// then
-		assert_eq!(
-			write_ops,
-			vec![
-				(
-					wal_index!(3, 10),
-					page_id!(25, 69),
-					100,
-					vec![1, 2, 3, 4].into()
-				),
-				(
-					wal_index!(3, 40),
-					page_id!(100, 200),
-					25,
-					vec![2, 2, 2, 2].into()
-				)
-			]
-		)
 	}
 }

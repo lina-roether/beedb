@@ -496,7 +496,7 @@ pub(crate) enum Item<'a> {
 
 #[cfg_attr(test, automock(
     type IterItems<'a> = std::vec::IntoIter<Result<(NonZeroU64, Item<'static>), FileError>>;
-    type IterItemsReverse<'a> = std::vec::IntoIter<Result<(NonZeroU64, Item<'static>), FileError>>;
+    type IterItemsReverse<'a> = std::iter::Rev<std::vec::IntoIter<Result<(NonZeroU64, Item<'static>), FileError>>>;
 ), allow(clippy::type_complexity))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait WalFileApi {
@@ -781,6 +781,7 @@ mod tests {
 	use crate::{
 		files::generic::GenericHeaderRepr,
 		storage::test_helpers::{page_id, wal_index},
+		utils::test_helpers::non_zero,
 	};
 
 	use super::*;
@@ -1125,11 +1126,11 @@ mod tests {
 		let mut iter = wal_file.iter_items().unwrap();
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(NonZeroU64::new(9).unwrap(), items[0].clone())
+			(non_zero!(9), items[0].clone())
 		);
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(NonZeroU64::new(75).unwrap(), items[1].clone())
+			(non_zero!(75), items[1].clone())
 		);
 		assert!(iter.next().is_none());
 	}
@@ -1164,12 +1165,39 @@ mod tests {
 		let mut iter = wal_file.iter_items_reverse().unwrap();
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(NonZeroU64::new(75).unwrap(), items[1].clone())
+			(non_zero!(75), items[1].clone())
 		);
 		assert_eq!(
 			iter.next().unwrap().unwrap(),
-			(NonZeroU64::new(9).unwrap(), items[0].clone())
+			(non_zero!(9), items[0].clone())
 		);
 		assert!(iter.next().is_none());
 	}
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+	macro_rules! mock_wal_file {
+		($($offset:expr => $item:expr),* $(,)?) => {{
+			let mut file = $crate::files::wal::MockWalFileApi::new();
+            file.expect_iter_items().returning(|| {
+                Ok(vec![
+                   $(Ok(($crate::utils::test_helpers::non_zero!($offset), $item))),*
+                ].into_iter())
+            });
+            file.expect_iter_items_reverse().returning(|| {
+                Ok(vec![
+                   $(Ok(($crate::utils::test_helpers::non_zero!($offset), $item))),*
+                ].into_iter().rev())
+            });
+            $(
+                file
+                    .expect_read_item_at()
+                    .with(eq($crate::utils::test_helpers::non_zero!($offset)))
+                    .returning(|_| Ok($item));
+            )*
+            file
+		}};
+	}
+	pub(crate) use mock_wal_file;
 }

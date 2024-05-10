@@ -214,7 +214,10 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 	use zerocopy::AsBytes;
 
-	use crate::{files::generic::GenericHeaderRepr, storage::test_helpers::wal_index};
+	use crate::{
+		files::generic::GenericHeaderRepr, storage::test_helpers::wal_index,
+		utils::test_helpers::non_zero,
+	};
 
 	use super::*;
 
@@ -266,11 +269,7 @@ mod tests {
 
 		// when
 		segment
-			.write(
-				NonZeroU16::new(3).unwrap(),
-				&[3; PAGE_BODY_SIZE],
-				wal_index!(69, 420),
-			)
+			.write(non_zero!(3), &[3; PAGE_BODY_SIZE], wal_index!(69, 420))
 			.unwrap();
 
 		// then
@@ -297,18 +296,12 @@ mod tests {
 		let tempdir = tempfile::tempdir().unwrap();
 		let segment = SegmentFile::create_file(tempdir.path().join("0")).unwrap();
 		segment
-			.write(
-				NonZeroU16::new(5).unwrap(),
-				&[25; PAGE_BODY_SIZE],
-				wal_index!(69, 420),
-			)
+			.write(non_zero!(5), &[25; PAGE_BODY_SIZE], wal_index!(69, 420))
 			.unwrap();
 
 		// when
 		let mut data = [0; PAGE_BODY_SIZE];
-		let wal_index = segment
-			.read(NonZeroU16::new(5).unwrap(), &mut data)
-			.unwrap();
+		let wal_index = segment.read(non_zero!(5), &mut data).unwrap();
 
 		// then
 		assert_eq!(wal_index, wal_index!(69, 420));

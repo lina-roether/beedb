@@ -140,14 +140,13 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 
 #[cfg(test)]
 mod tests {
-	use std::num::NonZeroU16;
-
 	use crate::{
 		files::{
 			segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
 			MockDatabaseFolderApi,
 		},
 		storage::test_helpers::{page_id, wal_index},
+		utils::test_helpers::non_zero,
 	};
 	use mockall::predicate::*;
 
@@ -167,7 +166,7 @@ mod tests {
 					.expect_write()
 					.once()
 					.with(
-						eq(NonZeroU16::new(420).unwrap()),
+						eq(non_zero!(420)),
 						eq([1; PAGE_BODY_SIZE]),
 						eq(wal_index!(69, 420)),
 					)
@@ -197,7 +196,7 @@ mod tests {
 				segment
 					.expect_read()
 					.once()
-					.with(eq(NonZeroU16::new(420).unwrap()), always())
+					.with(eq(non_zero!(420)), always())
 					.returning(|_, buf| {
 						buf[0..3].copy_from_slice(&[1, 2, 3]);
 						Ok(wal_index!(69, 420))
