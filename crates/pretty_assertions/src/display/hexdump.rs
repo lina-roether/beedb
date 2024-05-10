@@ -1,12 +1,14 @@
 use std::{borrow::Borrow, fmt};
 
-const DELIMITER: &str = " \x1b[1;37m|\x1b[0m ";
+const DELIMITER: &str = "\x1b[1;37m|\x1b[0m";
 const DELIMITER_WIDTH: usize = 3;
 const BYTE_WIDTH: usize = 2;
 const BYTE_SPACE: &str = " ";
 const BYTE_SPACE_WIDTH: usize = 1;
+const PADDING: &str = "   ";
+const PADDING_WIDTH: usize = 3;
 
-fn print_hexdump_diff_line(
+fn write_hexdump_diff_line(
 	f: &mut fmt::Formatter,
 	bytes: &[u8],
 	compare: &[u8],
@@ -14,11 +16,12 @@ fn print_hexdump_diff_line(
 	pad_to: usize,
 ) -> fmt::Result {
 	let line_length = usize::max(bytes.len(), compare.len());
+	write!(f, "{PADDING}")?;
 	for i in 0..line_length {
 		let byte_str = bytes
 			.get(i)
 			.map(|byte| format!("{byte:02x}"))
-			.unwrap_or("__".to_string());
+			.unwrap_or("  ".to_string());
 		let color = if bytes.get(i) != compare.get(i) {
 			highlight
 		} else {
@@ -34,6 +37,7 @@ fn print_hexdump_diff_line(
 			write!(f, "{BYTE_SPACE}  ")?;
 		}
 	}
+	write!(f, "{PADDING}")?;
 	Ok(())
 }
 
@@ -42,7 +46,7 @@ fn get_terminal_width() -> Option<usize> {
 }
 
 fn get_bytes_per_line(width: usize) -> usize {
-	(width + BYTE_SPACE_WIDTH) / (BYTE_WIDTH + BYTE_SPACE_WIDTH)
+	(width + BYTE_SPACE_WIDTH - 2 * PADDING_WIDTH) / (BYTE_WIDTH + BYTE_SPACE_WIDTH)
 }
 
 fn write_centered(f: &mut fmt::Formatter, message: String, width: usize) -> fmt::Result {
@@ -52,6 +56,15 @@ fn write_centered(f: &mut fmt::Formatter, message: String, width: usize) -> fmt:
 		let padding = (width - message.len()) / 2;
 		write!(f, "{}{message}", " ".repeat(padding))?;
 	}
+	Ok(())
+}
+
+fn write_padded_number(f: &mut fmt::Formatter, number: usize, pad_to: usize) -> fmt::Result {
+	let width = (number.checked_ilog10().unwrap_or(0) + 1) as usize;
+	let num_zeroes = pad_to.saturating_sub(width);
+	write!(f, "\x1b[37m{}", " ".repeat(num_zeroes))?;
+	write!(f, "{number}\x1b[0m")?;
+
 	Ok(())
 }
 
@@ -76,8 +89,18 @@ impl fmt::Display for HexdumpDiff<'_> {
 			return Ok(());
 		};
 
-		let line_length = (terminal_width - DELIMITER_WIDTH) / 2;
 		let diff_len = usize::max(self.received.len(), self.expected.len());
+		if diff_len == 0 {
+			write_centered(
+				f,
+				"\x1b[37mBoth buffers are empty\x1b[0m".to_string(),
+				terminal_width,
+			)?;
+		}
+
+		let index_width = (diff_len.ilog10() + 1) as usize;
+		let line_length = (terminal_width - index_width - DELIMITER_WIDTH) / 2;
+
 		let bytes_per_line = get_bytes_per_line(line_length);
 		let mut num_lines = diff_len / bytes_per_line;
 		if diff_len % bytes_per_line != 0 {
@@ -117,9 +140,10 @@ impl fmt::Display for HexdumpDiff<'_> {
 				last_expected_line = Some(expected_line.into());
 			}
 
-			print_hexdump_diff_line(f, received_line, expected_line, "\x1b[1;91m", pad_to)?;
+			write_padded_number(f, offset, index_width)?;
+			write_hexdump_diff_line(f, received_line, expected_line, "\x1b[1;91m", pad_to)?;
 			write!(f, "{DELIMITER}")?;
-			print_hexdump_diff_line(f, expected_line, received_line, "\x1b[1;92m", pad_to)?;
+			write_hexdump_diff_line(f, expected_line, received_line, "\x1b[1;92m", pad_to)?;
 			writeln!(f)?;
 		}
 		Ok(())
