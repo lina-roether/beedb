@@ -615,11 +615,18 @@ mod tests {
 		// expect
 		let mut folder = MockDatabaseFolderApi::new();
 		folder.expect_iter_wal_files().returning(|| {
+			//  WAL content
+
+			// An older generation; has already been flushed to disk.
 			let generation_2 = mock_wal_file! {
+				// The initial checkpoint. Not relevant to this test case.
 				10 => wal::Item::Checkpoint(wal::CheckpointData {
 					transactions: Cow::Owned(HashMap::new()),
 					dirty_pages: Cow::Owned(HashMap::new())
 				}),
+
+				// This write item was flushed to disk, but has no corresponding commit. It should
+				// be reverted.
 				20 => wal::Item::Write(wal::WriteData {
 					transaction_data: wal::TransactionData {
 						transaction_id: 1,
@@ -631,7 +638,11 @@ mod tests {
 					to: vec![1, 2, 3, 4].into()
 				})
 			};
+
+			// The current generation; has likely not yet been flushed to disk.
 			let mut generation_3 = mock_wal_file! {
+				// This write item has a corresponding commit, but wasn't yet flushed to disk;
+				// It should be reapplied.
 				10 => wal::Item::Write(wal::WriteData {
 					transaction_data: wal::TransactionData {
 						transaction_id: 2,
@@ -642,6 +653,9 @@ mod tests {
 					from: Some(vec![0, 0, 0, 0].into()),
 					to: vec![1, 2, 3, 4].into()
 				}),
+
+				// The checkpoint for gen 3. The preceding fuzzy write item should be handled
+				// properly.
 				20 => wal::Item::Checkpoint(wal::CheckpointData {
 					transactions: Cow::Owned(map! {
 						1 => TransactionState {
@@ -653,6 +667,8 @@ mod tests {
 						page_id!(100, 200) => wal_index!(2, 20)
 					})
 				}),
+
+				// The commit item for the write item at offset 10.
 				30 => wal::Item::Commit(wal::TransactionData {
 					transaction_id: 2,
 					prev_transaction_item: Some(wal_index!(2, 30))
@@ -660,12 +676,17 @@ mod tests {
 			};
 
 			let mut seq = Sequence::new();
+
+			// Revert the uncommitted WAL item
+
+			// 1. get the next offset
 			generation_3
 				.expect_next_offset()
 				.once()
 				.in_sequence(&mut seq)
 				.returning(|| non_zero!(40));
 
+			// 2. push the item
 			generation_3
 				.expect_push_item()
 				.withf(|item| {
@@ -684,18 +705,23 @@ mod tests {
 				.in_sequence(&mut seq)
 				.returning(|_| Ok(non_zero!(40)));
 
+			// 3. check the WAL file size
 			generation_3
 				.expect_size()
 				.once()
 				.in_sequence(&mut seq)
 				.returning(|| 69420);
 
+			// Write the commit item that marks the transaction as completed
+
+			// 1. get the next offset
 			generation_3
 				.expect_next_offset()
 				.once()
 				.in_sequence(&mut seq)
 				.returning(|| non_zero!(50));
 
+			// 2. push the item
 			generation_3
 				.expect_push_item()
 				.withf(|item| {
@@ -708,6 +734,7 @@ mod tests {
 				.in_sequence(&mut seq)
 				.returning(|_| Ok(non_zero!(50)));
 
+			// 3. check the WAL file size
 			generation_3
 				.expect_size()
 				.once()
@@ -719,12 +746,14 @@ mod tests {
 
 		// when
 		let mut expected_ops = vec![
+			// This reapplies write (3, 10).
 			WriteOp {
 				index: wal_index!(3, 10),
 				page_id: page_id!(25, 69),
 				offset: 100,
 				buf: &[1, 2, 3, 4],
 			},
+			// This reverts write (2, 20).
 			WriteOp {
 				index: wal_index!(3, 40),
 				page_id: page_id!(100, 200),
@@ -736,6 +765,7 @@ mod tests {
 
 		let wal = Wal::open(Arc::new(folder), &WalConfig::default()).unwrap();
 		wal.recover(|op| {
+			// Write operations should appear in the order of expected_ops.
 			assert_eq!(Some(op), expected_ops.next());
 			Ok(())
 		})
