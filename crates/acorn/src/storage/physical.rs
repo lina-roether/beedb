@@ -146,7 +146,7 @@ mod tests {
 			MockDatabaseFolderApi,
 		},
 		storage::test_helpers::{page_id, wal_index},
-		utils::test_helpers::non_zero,
+		utils::macros::non_zero,
 	};
 	use mockall::predicate::*;
 

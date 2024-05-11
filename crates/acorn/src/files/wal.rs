@@ -781,7 +781,7 @@ mod tests {
 	use crate::{
 		files::generic::GenericHeaderRepr,
 		storage::test_helpers::{page_id, wal_index},
-		utils::test_helpers::non_zero,
+		utils::macros::non_zero,
 	};
 
 	use super::*;
@@ -1182,18 +1182,18 @@ pub(crate) mod test_helpers {
 			let mut file = $crate::files::wal::MockWalFileApi::new();
             file.expect_iter_items().returning(|| {
                 Ok(vec![
-                   $(Ok(($crate::utils::test_helpers::non_zero!($offset), $item))),*
+                   $(Ok(($crate::utils::macros::non_zero!($offset), $item))),*
                 ].into_iter())
             });
             file.expect_iter_items_reverse().returning(|| {
                 Ok(vec![
-                   $(Ok(($crate::utils::test_helpers::non_zero!($offset), $item))),*
+                   $(Ok(($crate::utils::macros::non_zero!($offset), $item))),*
                 ].into_iter().rev())
             });
             $(
                 file
                     .expect_read_item_at()
-                    .with(eq($crate::utils::test_helpers::non_zero!($offset)))
+                    .with(eq($crate::utils::macros::non_zero!($offset)))
                     .returning(|_| Ok($item));
             )*
             file

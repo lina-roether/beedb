@@ -570,7 +570,7 @@ mod tests {
 			test_helpers::{page_id, wal_index},
 			wal::tests::wal::test_helpers::mock_wal_file,
 		},
-		utils::test_helpers::{map, non_zero},
+		utils::macros::{map, non_zero},
 	};
 
 	use self::wal::MockWalFileApi;
