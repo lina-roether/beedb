@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::files::FileError;
 
+mod cache;
 mod physical;
 mod wal;
 
