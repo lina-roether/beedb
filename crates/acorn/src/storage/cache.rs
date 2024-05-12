@@ -5,7 +5,7 @@ use std::{
 	sync::atomic::{AtomicUsize, Ordering},
 };
 
-use parking_lot::RwLock;
+use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock};
 use static_assertions::assert_impl_all;
 
 use crate::{
@@ -104,6 +104,7 @@ pub(super) struct PageCache {
 	buf: PageBuffer,
 	indices: RwLock<HashMap<PageId, usize>>,
 	replacer: RwLock<CacheReplacer<PageId>>,
+	locks: Box<[RawRwLock]>,
 }
 assert_impl_all!(PageCache: Send, Sync);
 
@@ -111,8 +112,8 @@ assert_impl_all!(PageCache: Send, Sync);
 unsafe impl Send for PageCache {}
 
 // Safety: `buf` is only accessed through the `load` and `store` methods,
-// which are unsafe, and explicitly require that there be no references
-// on other threads that would make this unsound.
+// which guarantee the safety of the references by acquiring the corresponding
+// locks.
 unsafe impl Sync for PageCache {}
 
 impl PageCache {
@@ -124,13 +125,13 @@ impl PageCache {
 			buf,
 			replacer: RwLock::new(replacer),
 			indices: RwLock::new(HashMap::new()),
+			locks: std::iter::repeat_with(|| RawRwLock::INIT)
+				.take(num_pages)
+				.collect(),
 		}
 	}
 
-	/// # Safety:
-	/// The caller must ensure that no thread is currently mutating the page in
-	/// the cache.
-	pub unsafe fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool {
+	pub fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool {
 		let indices = self.indices.read();
 		let Some(index) = indices.get(&page_id).copied() else {
 			return false;
@@ -142,21 +143,18 @@ impl PageCache {
 		debug_assert!(access_successful);
 		mem::drop(replacer);
 
+		self.locks[index].lock_shared();
 		buf.copy_from_slice(
-			// Safety: As long as no other tread holds one, no mutable reference to this page can
-			// exist, because references to pages never outlive the `store` function.
-			self.buf
-				.get_page(index)
-				.expect("Tried to index page buffer out of bounds!"),
+			// Safety: The safety of the reference is guaranteed by acquiring the shared lock.
+			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!"),
 		);
+		// Safety: the lock is acquired at this point
+		unsafe { self.locks[index].unlock_shared() };
 
 		true
 	}
 
-	/// # Safety:
-	/// The caller must ensure that no other thread is currently accessing this
-	/// page in the cache.
-	pub unsafe fn store(&self, page_id: PageId, buf: &[u8]) {
+	pub fn store(&self, page_id: PageId, buf: &[u8]) {
 		let mut indices = self.indices.write();
 		if indices.contains_key(&page_id) {
 			return;
@@ -181,13 +179,14 @@ impl PageCache {
 			index
 		};
 
-		// Safety: As long as no other thread holds one, no other reference to this page
-		// can exist, because references to pages never outlive the `load` and `store`
-		// functions.
-		self.buf
-			.get_page_mut(index)
+		self.locks[index].lock_exclusive();
+		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
+		// lock.
+		unsafe { self.buf.get_page_mut(index) }
 			.expect("Triet to index page buffer out of bounds!")
 			.copy_from_slice(buf);
+		// Safety: the lock is always acquired at this point
+		unsafe { self.locks[index].unlock_exclusive() };
 	}
 }
 
@@ -208,9 +207,9 @@ mod tests {
 
 		// when
 		let expected_page = [69; PAGE_BODY_SIZE];
-		unsafe { cache.store(page_id!(69, 420), &expected_page) };
+		cache.store(page_id!(69, 420), &expected_page);
 		let mut received_page = [0; PAGE_BODY_SIZE];
-		let success = unsafe { cache.load(page_id!(69, 420), &mut received_page) };
+		let success = cache.load(page_id!(69, 420), &mut received_page);
 
 		// then
 		assert!(success);
@@ -226,7 +225,7 @@ mod tests {
 
 		// when
 		let mut received_page = [0; PAGE_BODY_SIZE];
-		let success = unsafe { cache.load(page_id!(69, 420), &mut received_page) };
+		let success = cache.load(page_id!(69, 420), &mut received_page);
 
 		// then
 		assert!(!success);
