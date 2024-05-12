@@ -108,8 +108,9 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 	}
 
 	pub fn get_descriptor(&self, segment_num: u32) -> Option<&DF::SegmentFile> {
-		self.replacer.access(&segment_num);
-		self.descriptors.get(&segment_num)
+		let descriptor = self.descriptors.get(&segment_num)?;
+		debug_assert!(self.replacer.access(&segment_num));
+		Some(descriptor)
 	}
 
 	pub fn store_descriptor(
@@ -117,6 +118,8 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 		segment_num: u32,
 		segment_file: DF::SegmentFile,
 	) -> &DF::SegmentFile {
+		debug_assert!(!self.descriptors.contains_key(&segment_num));
+
 		if let Some(evicted) = self.replacer.evict_replace(segment_num) {
 			self.descriptors.remove(&evicted);
 		}

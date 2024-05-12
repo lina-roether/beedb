@@ -65,6 +65,15 @@ impl<T: PartialEq> ClockList<T> {
 		}
 		false
 	}
+
+	fn contains(&self, value: &T) -> bool {
+		for item in &self.items {
+			if item.value == *value {
+				return true;
+			}
+		}
+		false
+	}
 }
 
 struct LruList<T> {
@@ -144,6 +153,8 @@ impl<T: Clone + Hash + Eq> CacheReplacer<T> {
 	/// Insert a value into the cache, potentially evicting a value to make
 	/// space.
 	pub fn evict_replace(&mut self, value: T) -> Option<T> {
+		debug_assert!(!self.recent.contains(&value) && !self.frequent.contains(&value));
+
 		let mut evicted: Option<T> = None;
 
 		if self.cache_is_full() {
