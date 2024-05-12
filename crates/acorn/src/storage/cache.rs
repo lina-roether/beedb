@@ -8,6 +8,9 @@ use std::{
 use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock};
 use static_assertions::assert_impl_all;
 
+#[cfg(test)]
+use mockall::automock;
+
 use crate::{
 	consts::DEFAULT_PAGE_CACHE_SIZE, files::segment::PAGE_BODY_SIZE, utils::cache::CacheReplacer,
 };
@@ -100,7 +103,7 @@ impl Drop for PageBuffer {
 	}
 }
 
-pub(super) struct PageCache {
+pub(crate) struct PageCache {
 	buf: PageBuffer,
 	indices: RwLock<HashMap<PageId, usize>>,
 	replacer: RwLock<CacheReplacer<PageId>>,
@@ -130,8 +133,16 @@ impl PageCache {
 				.collect(),
 		}
 	}
+}
 
-	pub fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool {
+#[cfg_attr(test, automock)]
+pub(crate) trait PageCacheApi {
+	fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool;
+	fn store(&self, page_id: PageId, buf: &[u8]);
+}
+
+impl PageCacheApi for PageCache {
+	fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool {
 		let indices = self.indices.read();
 		let Some(index) = indices.get(&page_id).copied() else {
 			return false;
@@ -154,7 +165,7 @@ impl PageCache {
 		true
 	}
 
-	pub fn store(&self, page_id: PageId, buf: &[u8]) {
+	fn store(&self, page_id: PageId, buf: &[u8]) {
 		let mut indices = self.indices.write();
 		if indices.contains_key(&page_id) {
 			return;

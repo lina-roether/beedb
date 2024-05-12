@@ -5,6 +5,9 @@ use std::{
 	sync::Arc,
 };
 
+#[cfg(test)]
+use mockall::{automock, concretize};
+
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use static_assertions::assert_impl_all;
 
@@ -18,16 +21,9 @@ use crate::{
 
 use super::{PageId, StorageError, TransactionState, WalIndex};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalConfig {
 	pub max_generation_size: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WriteOp<'a> {
-	index: WalIndex,
-	page_id: PageId,
-	offset: u16,
-	buf: &'a [u8],
 }
 
 impl Default for WalConfig {
@@ -36,6 +32,14 @@ impl Default for WalConfig {
 			max_generation_size: DEFAULT_MAX_WAL_GENERATION_SIZE,
 		}
 	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteOp<'a> {
+	pub index: WalIndex,
+	pub page_id: PageId,
+	pub offset: u16,
+	pub buf: &'a [u8],
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +64,7 @@ pub(crate) struct CommitLog {
 	pub transaction_id: u64,
 }
 
-pub(super) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
+pub(crate) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
 	folder: Arc<DF>,
 	generations: RwLock<GenerationQueue<DF>>,
 	state: Mutex<State>,
@@ -363,21 +367,22 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 	}
 }
 
-pub(super) trait WalApi {
-	fn log_write(&self, log: WriteLog) -> Result<WalIndex, StorageError>;
+#[cfg_attr(test, automock)]
+#[allow(clippy::needless_lifetimes)]
+pub(crate) trait WalApi {
+	fn log_write<'a>(&self, log: WriteLog<'a>) -> Result<WalIndex, StorageError>;
 
 	fn log_commit(&self, log: CommitLog) -> Result<WalIndex, StorageError>;
 
-	fn undo(
-		&self,
-		transaction_id: u64,
-		handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
-	) -> Result<(), StorageError>;
+	#[cfg_attr(test, concretize)]
+	fn undo<HFn>(&self, transaction_id: u64, handle: HFn) -> Result<(), StorageError>
+	where
+		HFn: FnMut(WriteOp) -> Result<(), StorageError>;
 
-	fn recover(
-		&self,
-		handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
-	) -> Result<(), StorageError>;
+	#[cfg_attr(test, concretize)]
+	fn recover<HFn>(&self, handle: HFn) -> Result<(), StorageError>
+	where
+		HFn: FnMut(WriteOp) -> Result<(), StorageError>;
 
 	fn checkpoint(&self) -> Result<(), StorageError>;
 
@@ -397,20 +402,19 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		self.push_raw_item(wal::Item::Commit(transaction_data), &gens)
 	}
 
-	fn undo(
-		&self,
-		transaction_id: u64,
-		handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
-	) -> Result<(), StorageError> {
+	fn undo<HFn>(&self, transaction_id: u64, handle: HFn) -> Result<(), StorageError>
+	where
+		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
+	{
 		let mut gens = self.generations.write();
 		self.undo_all(&[transaction_id], &mut gens, handle)?;
 		Ok(())
 	}
 
-	fn recover(
-		&self,
-		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
-	) -> Result<(), StorageError> {
+	fn recover<HFn>(&self, mut handle: HFn) -> Result<(), StorageError>
+	where
+		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
+	{
 		// acquire exclusive gen lock to prevent conflicts
 		let mut gens = self.generations.write();
 

@@ -14,7 +14,7 @@ use crate::{
 
 use super::{PageId, StorageError, WalIndex};
 
-pub(super) struct PhysicalStorage<DF = DatabaseFolder>
+pub(crate) struct PhysicalStorage<DF = DatabaseFolder>
 where
 	DF: DatabaseFolderApi,
 {
@@ -41,7 +41,7 @@ impl<DF> PhysicalStorage<DF>
 where
 	DF: DatabaseFolderApi,
 {
-	fn new(folder: Arc<DF>, config: &PhysicalStorageConfig) -> Self {
+	pub fn new(folder: Arc<DF>, config: &PhysicalStorageConfig) -> Self {
 		let descriptor_cache = RwLock::new(DescriptorCache::new(config));
 		Self {
 			folder,
@@ -68,7 +68,7 @@ where
 }
 
 #[cfg_attr(test, automock)]
-pub(super) trait PhysicalStorageApi {
+pub(crate) trait PhysicalStorageApi {
 	fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<WalIndex, StorageError>;
 
 	fn write(&self, page_id: PageId, buf: &[u8], wal_index: WalIndex) -> Result<(), StorageError>;
