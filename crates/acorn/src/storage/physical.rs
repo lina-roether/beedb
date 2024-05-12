@@ -109,7 +109,9 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 
 	pub fn get_descriptor(&self, segment_num: u32) -> Option<&DF::SegmentFile> {
 		let descriptor = self.descriptors.get(&segment_num)?;
-		debug_assert!(self.replacer.access(&segment_num));
+		let access_successful = self.replacer.access(&segment_num);
+		debug_assert!(access_successful);
+
 		Some(descriptor)
 	}
 
