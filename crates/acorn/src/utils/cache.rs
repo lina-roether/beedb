@@ -106,7 +106,7 @@ pub(crate) struct CacheReplacer<T> {
 	/// A clock containing values that are considered frequently used
 	frequent: ClockList<T>,
 
-	/// A LRU list containing values recently droppend from `frequent`
+	/// A LRU list containing values recently dropped from `frequent`
 	frequent_history: LruList<T>,
 
 	/// The target size for `recent`.
@@ -191,7 +191,7 @@ impl<T: Clone + Hash + Eq> CacheReplacer<T> {
 
 	/// Evicts a value from the cache, unless the cache is empty
 	fn evict(&mut self) -> Option<T> {
-		// We loop until we find a suitable item
+		// We loop until we find a suitable item.
 		loop {
 			if self.recent_cache_is_full() {
 				// If the recent clock is full, we want to look at its head.
