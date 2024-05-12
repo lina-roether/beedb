@@ -10,7 +10,11 @@ use std::{
 use mockall::automock;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-use super::{generic::GenericHeader, utils::Serialized, FileError};
+use super::{
+	generic::{GenericHeader, GenericHeaderRepr},
+	utils::Repr,
+	FileError,
+};
 use crate::{
 	consts::PAGE_SIZE,
 	files::{generic::FileType, utils::CRC16},
@@ -30,6 +34,12 @@ cfg_match! {
 	}
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PageHeader {
+	wal_index: WalIndex,
+	crc: u16,
+}
+
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
 struct PageHeaderRepr {
@@ -38,12 +48,7 @@ struct PageHeaderRepr {
 	crc: u16,
 	format_version: u8,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PageHeader {
-	wal_index: WalIndex,
-	crc: u16,
-}
+impl Repr<PageHeader> for PageHeaderRepr {}
 
 const PAGE_FORMAT_VERSION: u8 = 1;
 
@@ -77,11 +82,7 @@ impl TryFrom<PageHeaderRepr> for PageHeader {
 	}
 }
 
-impl Serialized for PageHeader {
-	type Repr = PageHeaderRepr;
-}
-
-pub(crate) const PAGE_BODY_SIZE: usize = PAGE_SIZE - PageHeader::REPR_SIZE;
+pub(crate) const PAGE_BODY_SIZE: usize = PAGE_SIZE - PageHeaderRepr::SIZE;
 
 pub(crate) struct SegmentFile {
 	file: File,
@@ -101,7 +102,7 @@ impl SegmentFile {
 			content_offset: PAGE_SIZE as u16,
 			version: FORMAT_VERSION,
 		};
-		header.serialize(&mut file)?;
+		GenericHeaderRepr::serialize(header, &mut file)?;
 
 		file.set_len(SEGMENT_SIZE as u64)?;
 
@@ -112,7 +113,7 @@ impl SegmentFile {
 		let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
 		file.seek(SeekFrom::Start(0))?;
-		let header = GenericHeader::deserialize(&mut file)?;
+		let header = GenericHeaderRepr::deserialize(&mut file)?;
 
 		if header.file_type != FileType::Segment {
 			return Err(FileError::WrongFileType(header.file_type));
@@ -174,8 +175,8 @@ impl SegmentFileApi for SegmentFile {
 
 		let mut page_buf = [0; PAGE_SIZE];
 		self.read_exact_at(&mut page_buf, Self::get_page_offset(page_num))?;
-		let header = PageHeader::from_repr_bytes(&page_buf[0..PageHeader::REPR_SIZE])?;
-		let body = &page_buf[PageHeader::REPR_SIZE..];
+		let header = PageHeaderRepr::from_bytes(&page_buf[0..PageHeaderRepr::SIZE])?;
+		let body = &page_buf[PageHeaderRepr::SIZE..];
 
 		let crc = CRC16.checksum(body);
 		if header.crc != crc {
@@ -199,8 +200,8 @@ impl SegmentFileApi for SegmentFile {
 		let header = PageHeader { wal_index, crc };
 
 		let mut page_buf = [0; PAGE_SIZE];
-		page_buf[0..PageHeader::REPR_SIZE].copy_from_slice(header.into_repr().as_bytes());
-		page_buf[PageHeader::REPR_SIZE..].copy_from_slice(buf);
+		page_buf[0..PageHeaderRepr::SIZE].copy_from_slice(PageHeaderRepr::from(header).as_bytes());
+		page_buf[PageHeaderRepr::SIZE..].copy_from_slice(buf);
 
 		self.write_all_at(&page_buf, Self::get_page_offset(page_num))?;
 		Ok(())
@@ -231,7 +232,7 @@ mod tests {
 
 		// then
 		let mut expected: Vec<u8> = vec![0; SEGMENT_SIZE];
-		expected[0..GenericHeader::REPR_SIZE].copy_from_slice(
+		expected[0..GenericHeaderRepr::SIZE].copy_from_slice(
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Segment,
 				content_offset: PAGE_SIZE as u16,
@@ -247,7 +248,7 @@ mod tests {
 		// given
 		let tempdir = tempfile::tempdir().unwrap();
 		let mut file: Vec<u8> = vec![0; SEGMENT_SIZE];
-		file[0..GenericHeader::REPR_SIZE].copy_from_slice(
+		file[0..GenericHeaderRepr::SIZE].copy_from_slice(
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Segment,
 				content_offset: PAGE_SIZE as u16,

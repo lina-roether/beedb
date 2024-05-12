@@ -1,6 +1,6 @@
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-use super::{utils::Serialized, FileError};
+use super::{utils::Repr, FileError};
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
@@ -76,9 +76,7 @@ impl TryFrom<GenericHeaderRepr> for GenericHeader {
 	}
 }
 
-impl Serialized for GenericHeader {
-	type Repr = GenericHeaderRepr;
-}
+impl Repr<GenericHeader> for GenericHeaderRepr {}
 
 #[cfg(test)]
 mod tests {

@@ -19,8 +19,8 @@ use mockall::automock;
 use crate::storage::{PageId, TransactionState, WalIndex};
 
 use super::{
-	generic::{FileType, GenericHeader},
-	utils::{Serialized, CRC32},
+	generic::{FileType, GenericHeader, GenericHeaderRepr},
+	utils::{Repr, CRC32},
 	FileError,
 };
 
@@ -68,21 +68,21 @@ struct CheckpointBlockRepr {
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
-pub(crate) struct PageIdRepr {
+struct PageIdRepr {
 	segment_num: u32,
 	page_num: u16,
 }
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C)]
-pub(crate) struct WalIndexRepr {
+struct WalIndexRepr {
 	generation: u64,
 	offset: u64,
 }
 
 #[derive(Debug, Clone, FromBytes, FromZeroes, AsBytes)]
 #[repr(C)]
-pub(crate) struct TransactionStateRepr {
+struct TransactionStateRepr {
 	first_generation: u64,
 	last_generation: u64,
 	last_offset: u64,
@@ -146,9 +146,7 @@ impl TryFrom<ItemHeaderRepr> for ItemHeader {
 	}
 }
 
-impl Serialized for ItemHeader {
-	type Repr = ItemHeaderRepr;
-}
+impl Repr<ItemHeader> for ItemHeaderRepr {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemFooter {
@@ -176,9 +174,7 @@ impl TryFrom<ItemFooterRepr> for ItemFooter {
 	}
 }
 
-impl Serialized for ItemFooter {
-	type Repr = ItemFooterRepr;
-}
+impl Repr<ItemFooter> for ItemFooterRepr {}
 
 struct TransactionBlock {
 	transaction_id: u64,
@@ -209,9 +205,7 @@ impl From<TransactionBlockRepr> for TransactionBlock {
 	}
 }
 
-impl Serialized for TransactionBlock {
-	type Repr = TransactionBlockRepr;
-}
+impl Repr<TransactionBlock> for TransactionBlockRepr {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WriteBlock {
@@ -248,15 +242,11 @@ impl TryFrom<WriteBlockRepr> for WriteBlock {
 	}
 }
 
-impl Serialized for WriteBlock {
-	type Repr = WriteBlockRepr;
-}
+impl Repr<WriteBlock> for WriteBlockRepr {}
 
 type CheckpointBlock = CheckpointBlockRepr;
 
-impl Serialized for CheckpointBlock {
-	type Repr = CheckpointBlockRepr;
-}
+impl Repr<CheckpointBlock> for CheckpointBlockRepr {}
 
 impl From<PageId> for PageIdRepr {
 	fn from(value: PageId) -> Self {
@@ -280,9 +270,7 @@ impl TryFrom<PageIdRepr> for PageId {
 	}
 }
 
-impl Serialized for PageId {
-	type Repr = PageIdRepr;
-}
+impl Repr<PageId> for PageIdRepr {}
 
 impl From<WalIndex> for WalIndexRepr {
 	fn from(value: WalIndex) -> Self {
@@ -309,9 +297,7 @@ impl TryFrom<WalIndexRepr> for WalIndex {
 	}
 }
 
-impl Serialized for WalIndex {
-	type Repr = WalIndexRepr;
-}
+impl Repr<WalIndex> for WalIndexRepr {}
 
 impl From<TransactionState> for TransactionStateRepr {
 	fn from(value: TransactionState) -> Self {
@@ -323,9 +309,7 @@ impl From<TransactionState> for TransactionStateRepr {
 	}
 }
 
-impl Serialized for TransactionState {
-	type Repr = TransactionStateRepr;
-}
+impl Repr<TransactionState> for TransactionStateRepr {}
 
 impl TryFrom<TransactionStateRepr> for TransactionState {
 	type Error = FileError;
@@ -371,19 +355,19 @@ impl WalFile {
 impl<F: Seek + Read + Write> WalFile<F> {
 	fn create(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
-		let content_offset = GenericHeader::REPR_SIZE as u16;
+		let content_offset = GenericHeaderRepr::SIZE as u16;
 		let meta = GenericHeader {
 			file_type: FileType::Wal,
 			content_offset,
 			version: FORMAT_VERSION,
 		};
-		meta.serialize(&mut file)?;
+		GenericHeaderRepr::serialize(meta, &mut file)?;
 		Self::new(file, content_offset.into())
 	}
 
 	fn open(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
-		let header = GenericHeader::deserialize(&mut file)?;
+		let header = GenericHeaderRepr::deserialize(&mut file)?;
 		if header.file_type != FileType::Wal {
 			return Err(FileError::WrongFileType(header.file_type));
 		}
@@ -398,9 +382,9 @@ impl<F: Seek + Read + Write> WalFile<F> {
 	}
 
 	fn new(mut file: F, body_start: u64) -> Result<Self, FileError> {
-		let prev_footer_start = file.seek(SeekFrom::End(-(ItemFooter::REPR_SIZE as i64)))?;
+		let prev_footer_start = file.seek(SeekFrom::End(-(ItemFooterRepr::SIZE as i64)))?;
 		let prev_item = if prev_footer_start > body_start {
-			let footer = ItemFooter::deserialize(&mut file)?;
+			let footer = ItemFooterRepr::deserialize(&mut file)?;
 			Some(footer.item_start)
 		} else {
 			None
@@ -419,7 +403,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			transaction_id: data.transaction_id,
 			prev_transaction_item: data.prev_transaction_item,
 		};
-		block.serialize(writer)?;
+		TransactionBlockRepr::serialize(block, writer)?;
 		Ok(())
 	}
 
@@ -435,7 +419,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 				.try_into()
 				.expect("Write length must be 16-bit!"),
 		};
-		block.serialize(&mut writer)?;
+		WriteBlockRepr::serialize(block, &mut writer)?;
 		if let Some(from) = data.from {
 			debug_assert_eq!(from.len(), data.to.len());
 			writer.write_all(&from)?;
@@ -452,14 +436,14 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			num_dirty_pages: data.dirty_pages.len() as u64,
 			num_transactions: data.transactions.len() as u64,
 		};
-		block.serialize(&mut writer)?;
+		CheckpointBlockRepr::serialize(block, &mut writer)?;
 		for (page_id, wal_index) in data.dirty_pages.iter() {
-			page_id.serialize(&mut writer)?;
-			wal_index.serialize(&mut writer)?;
+			PageIdRepr::serialize(*page_id, &mut writer)?;
+			WalIndexRepr::serialize(*wal_index, &mut writer)?;
 		}
 		for (transaction_id, transaction_state) in data.transactions.iter() {
 			writer.write_all(transaction_id.as_bytes())?;
-			transaction_state.clone().serialize(&mut writer)?;
+			TransactionStateRepr::serialize(transaction_state.clone(), &mut writer)?;
 		}
 
 		Ok(())
@@ -556,14 +540,14 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 			crc,
 			prev_item: self.prev_item,
 		};
-		item_header.serialize(&mut writer)?;
+		ItemHeaderRepr::serialize(item_header, &mut writer)?;
 
 		writer.write_all(&body_buffer)?;
 
 		let item_footer = ItemFooter {
 			item_start: current_pos,
 		};
-		item_footer.serialize(&mut writer)?;
+		ItemFooterRepr::serialize(item_footer, &mut writer)?;
 
 		self.prev_item = Some(current_pos);
 		writer.flush()?;
@@ -625,7 +609,7 @@ impl<F: Read + Seek> ItemReader<F> {
 	}
 
 	fn read_transaction_data(body: impl Read) -> Result<TransactionData, FileError> {
-		let transaction_block = TransactionBlock::deserialize(body)?;
+		let transaction_block = TransactionBlockRepr::deserialize(body)?;
 
 		Ok(TransactionData {
 			transaction_id: transaction_block.transaction_id,
@@ -639,7 +623,7 @@ impl<F: Read + Seek> ItemReader<F> {
 	) -> Result<WriteData<'static>, FileError> {
 		let transaction_data = Self::read_transaction_data(&mut body)?;
 
-		let write_block = WriteBlock::deserialize(&mut body)?;
+		let write_block = WriteBlockRepr::deserialize(&mut body)?;
 		let from: Option<Vec<u8>> = if is_undo {
 			None
 		} else {
@@ -664,8 +648,8 @@ impl<F: Read + Seek> ItemReader<F> {
 
 		let mut dirty_pages: HashMap<PageId, WalIndex> = HashMap::new();
 		for _ in 0..checkpoint_block.num_dirty_pages {
-			let page_id = PageId::deserialize(&mut body)?;
-			let wal_index = WalIndex::deserialize(&mut body)?;
+			let page_id = PageIdRepr::deserialize(&mut body)?;
+			let wal_index = WalIndexRepr::deserialize(&mut body)?;
 			dirty_pages.insert(page_id, wal_index);
 		}
 
@@ -674,7 +658,7 @@ impl<F: Read + Seek> ItemReader<F> {
 			let mut tid_bytes = [0; 8];
 			body.read_exact(&mut tid_bytes)?;
 			let transaction_id = u64::from_ne_bytes(tid_bytes);
-			let transaction_state = TransactionState::deserialize(&mut body)?;
+			let transaction_state = TransactionStateRepr::deserialize(&mut body)?;
 			transactions.insert(transaction_id, transaction_state);
 		}
 
@@ -685,7 +669,7 @@ impl<F: Read + Seek> ItemReader<F> {
 	}
 
 	fn read_item_exact(&mut self) -> Result<(NonZeroU64, Item<'static>), FileError> {
-		let header = ItemHeader::deserialize(&mut self.reader)?;
+		let header = ItemHeaderRepr::deserialize(&mut self.reader)?;
 		let mut body_buf: Box<[u8]> = vec![0; header.body_length.into()].into();
 		self.reader.read_exact(&mut body_buf)?;
 		self.prev_item = header.prev_item;
@@ -703,11 +687,11 @@ impl<F: Read + Seek> ItemReader<F> {
 			ItemKind::Checkpoint => Item::Checkpoint(Self::read_checkpoint_data(&mut body_cursor)?),
 		};
 
-		self.reader.seek_relative(ItemFooter::REPR_SIZE as i64)?;
+		self.reader.seek_relative(ItemFooterRepr::SIZE as i64)?;
 
 		let item_offset = self.offset;
 		self.offset +=
-			(ItemHeader::REPR_SIZE + header.body_length as usize + ItemFooter::REPR_SIZE) as u64;
+			(ItemHeaderRepr::SIZE + header.body_length as usize + ItemFooterRepr::SIZE) as u64;
 
 		Ok((
 			NonZeroU64::new(item_offset).expect("WAL was unexpectedly read at offset 0"),
@@ -799,13 +783,13 @@ mod tests {
 		expected_data.extend(
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Wal,
-				content_offset: GenericHeader::REPR_SIZE as u16,
+				content_offset: GenericHeaderRepr::SIZE as u16,
 				version: FORMAT_VERSION,
 			})
 			.as_bytes(),
 		);
 
-		assert_eq!(file.len(), GenericHeader::REPR_SIZE);
+		assert_eq!(file.len(), GenericHeaderRepr::SIZE);
 		assert_buf_eq!(file, expected_data);
 	}
 
@@ -816,7 +800,7 @@ mod tests {
 		file.extend(
 			GenericHeaderRepr::from(GenericHeader {
 				file_type: FileType::Wal,
-				content_offset: GenericHeader::REPR_SIZE as u16,
+				content_offset: GenericHeaderRepr::SIZE as u16,
 				version: FORMAT_VERSION,
 			})
 			.as_bytes(),
@@ -882,13 +866,13 @@ mod tests {
 		expected_body.extend([4, 5, 6, 7]);
 		expected_body.extend(
 			ItemFooterRepr {
-				item_start: GenericHeader::REPR_SIZE as u64,
+				item_start: GenericHeaderRepr::SIZE as u64,
 			}
 			.as_bytes(),
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeaderRepr::SIZE..], expected_body);
 	}
 
 	#[test]
@@ -927,13 +911,13 @@ mod tests {
 		);
 		expected_body.extend(
 			ItemFooterRepr {
-				item_start: GenericHeader::REPR_SIZE as u64,
+				item_start: GenericHeaderRepr::SIZE as u64,
 			}
 			.as_bytes(),
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeaderRepr::SIZE..], expected_body);
 	}
 
 	#[test]
@@ -988,13 +972,13 @@ mod tests {
 		expected_body.extend([4, 5, 6, 7]);
 		expected_body.extend(
 			ItemFooterRepr {
-				item_start: GenericHeader::REPR_SIZE as u64,
+				item_start: GenericHeaderRepr::SIZE as u64,
 			}
 			.as_bytes(),
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeaderRepr::SIZE..], expected_body);
 	}
 
 	#[test]
@@ -1065,13 +1049,13 @@ mod tests {
 		);
 		expected_body.extend(
 			ItemFooterRepr {
-				item_start: GenericHeader::REPR_SIZE as u64,
+				item_start: GenericHeaderRepr::SIZE as u64,
 			}
 			.as_bytes(),
 		);
 
 		assert_eq!(wal_file.size(), file.len());
-		assert_buf_eq!(&file[GenericHeader::REPR_SIZE..], expected_body);
+		assert_buf_eq!(&file[GenericHeaderRepr::SIZE..], expected_body);
 	}
 
 	#[test]
