@@ -13,12 +13,11 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use super::{
 	generic::{GenericHeader, GenericHeaderRepr},
 	utils::Repr,
-	FileError,
+	FileError, WalIndex,
 };
 use crate::{
 	consts::PAGE_SIZE,
 	files::{generic::FileType, utils::CRC16},
-	storage::WalIndex,
 };
 
 const FORMAT_VERSION: u8 = 1;
@@ -216,7 +215,7 @@ mod tests {
 	use zerocopy::AsBytes;
 
 	use crate::{
-		files::generic::GenericHeaderRepr, storage::test_helpers::wal_index,
+		files::{generic::GenericHeaderRepr, test_helpers::wal_index},
 		utils::test_helpers::non_zero,
 	};
 

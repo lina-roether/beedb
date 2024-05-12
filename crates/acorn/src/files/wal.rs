@@ -16,12 +16,10 @@ const FORMAT_VERSION: u8 = 1;
 #[cfg(test)]
 use mockall::automock;
 
-use crate::storage::{PageId, TransactionState, WalIndex};
-
 use super::{
 	generic::{FileType, GenericHeader, GenericHeaderRepr},
 	utils::{Repr, CRC32},
-	FileError,
+	FileError, PageId, TransactionState, WalIndex,
 };
 
 const FLAG_UNDO: u8 = 0b00000001;
@@ -763,8 +761,10 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 
 	use crate::{
-		files::generic::GenericHeaderRepr,
-		storage::test_helpers::{page_id, wal_index},
+		files::{
+			generic::GenericHeaderRepr,
+			test_helpers::{page_id, wal_index},
+		},
 		utils::test_helpers::non_zero,
 	};
 

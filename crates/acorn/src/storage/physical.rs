@@ -136,9 +136,9 @@ mod tests {
 	use crate::{
 		files::{
 			segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
+			test_helpers::{page_id, wal_index},
 			MockDatabaseFolderApi,
 		},
-		storage::test_helpers::{page_id, wal_index},
 		utils::test_helpers::non_zero,
 	};
 	use mockall::predicate::*;
