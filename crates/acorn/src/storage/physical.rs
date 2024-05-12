@@ -1,18 +1,15 @@
-use std::{
-	collections::{HashMap, VecDeque},
-	mem,
-	sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 #[cfg(test)]
 use mockall::automock;
 
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use static_assertions::assert_impl_all;
 
 use crate::{
 	consts::DEFAULT_MAX_NUM_OPEN_SEGMENTS,
 	files::{segment::SegmentFileApi, DatabaseFolder, DatabaseFolderApi},
+	utils::cache::CacheReplacer,
 };
 
 use super::{PageId, StorageError, WalIndex};
@@ -22,7 +19,7 @@ where
 	DF: DatabaseFolderApi,
 {
 	folder: Arc<DF>,
-	descriptor_cache: RwLock<DescriptorCache<DF>>,
+	descriptor_cache: Mutex<DescriptorCache<DF>>,
 }
 
 assert_impl_all!(PhysicalStorage: Send, Sync);
@@ -45,7 +42,7 @@ where
 	DF: DatabaseFolderApi,
 {
 	fn new(folder: Arc<DF>, config: &PhysicalStorageConfig) -> Self {
-		let descriptor_cache = RwLock::new(DescriptorCache::new(config));
+		let descriptor_cache = Mutex::new(DescriptorCache::new(config));
 		Self {
 			folder,
 			descriptor_cache,
@@ -57,13 +54,11 @@ where
 		segment_num: u32,
 		handler: impl FnOnce(&DF::SegmentFile) -> Result<T, StorageError>,
 	) -> Result<T, StorageError> {
-		let cache = self.descriptor_cache.read();
+		let mut cache = self.descriptor_cache.lock();
 		if let Some(segment) = cache.get_descriptor(segment_num) {
 			return handler(segment);
 		}
-		mem::drop(cache);
 
-		let mut cache = self.descriptor_cache.write();
 		let segment_file = self.folder.open_segment_file(segment_num)?;
 		let segment_file = cache.store_descriptor(segment_num, segment_file);
 		handler(segment_file)
@@ -95,22 +90,23 @@ impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
 
 struct DescriptorCache<DF: DatabaseFolderApi> {
 	descriptors: HashMap<u32, DF::SegmentFile>,
-	eviction_queue: VecDeque<u32>,
+	replacer: CacheReplacer<u32>,
 	max_num_open_segments: usize,
 }
 
 impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 	fn new(config: &PhysicalStorageConfig) -> Self {
-		let open_segments = HashMap::with_capacity(config.max_num_open_segments);
-		let eviction_queue = VecDeque::with_capacity(config.max_num_open_segments);
+		let descriptors = HashMap::with_capacity(config.max_num_open_segments);
+		let replacer = CacheReplacer::new(config.max_num_open_segments);
 		Self {
-			descriptors: open_segments,
-			eviction_queue,
+			descriptors,
+			replacer,
 			max_num_open_segments: config.max_num_open_segments,
 		}
 	}
 
-	pub fn get_descriptor(&self, segment_num: u32) -> Option<&DF::SegmentFile> {
+	pub fn get_descriptor(&mut self, segment_num: u32) -> Option<&DF::SegmentFile> {
+		self.replacer.access(&segment_num);
 		self.descriptors.get(&segment_num)
 	}
 
@@ -119,22 +115,12 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 		segment_num: u32,
 		segment_file: DF::SegmentFile,
 	) -> &DF::SegmentFile {
-		while self.descriptors.len() >= self.max_num_open_segments {
-			self.evict_descriptor();
+		if let Some(evicted) = self.replacer.evict_replace(segment_num) {
+			self.descriptors.remove(&evicted);
 		}
 
 		self.descriptors.insert(segment_num, segment_file);
-		self.eviction_queue.push_back(segment_num);
 		self.descriptors.get(&segment_num).unwrap()
-	}
-
-	// TODO: this can be optimized to use a more efficient cache eviction algorithm
-	// in the future
-	fn evict_descriptor(&mut self) {
-		let Some(segment_num) = self.eviction_queue.pop_front() else {
-			return;
-		};
-		self.descriptors.remove(&segment_num);
 	}
 }
 
@@ -146,7 +132,7 @@ mod tests {
 			MockDatabaseFolderApi,
 		},
 		storage::test_helpers::{page_id, wal_index},
-		utils::macros::non_zero,
+		utils::test_helpers::non_zero,
 	};
 	use mockall::predicate::*;
 
