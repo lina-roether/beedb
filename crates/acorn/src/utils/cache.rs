@@ -1,11 +1,18 @@
 use std::{
 	collections::{HashSet, VecDeque},
 	hash::Hash,
+	sync::atomic::{AtomicBool, Ordering},
 };
 
 struct ClockItem<T> {
 	value: T,
-	referenced: bool,
+	referenced: AtomicBool,
+}
+
+impl<T> ClockItem<T> {
+	fn was_referenced(&self) -> bool {
+		self.referenced.load(Ordering::Relaxed)
+	}
 }
 
 struct ClockList<T> {
@@ -36,7 +43,7 @@ impl<T: PartialEq> ClockList<T> {
 	fn insert(&mut self, value: T) {
 		self.items.push_back(ClockItem {
 			value,
-			referenced: false,
+			referenced: AtomicBool::new(false),
 		});
 	}
 
@@ -49,10 +56,10 @@ impl<T: PartialEq> ClockList<T> {
 		self.items.front()
 	}
 
-	fn access(&mut self, value: &T) -> bool {
-		for item in &mut self.items {
+	fn access(&self, value: &T) -> bool {
+		for item in &self.items {
 			if item.value == *value {
-				item.referenced = true;
+				item.referenced.store(true, Ordering::Relaxed);
 				return true;
 			}
 		}
@@ -129,7 +136,7 @@ impl<T: Clone + Hash + Eq> CacheReplacer<T> {
 	}
 
 	/// Track an access to the given value
-	pub fn access(&mut self, value: &T) -> bool {
+	pub fn access(&self, value: &T) -> bool {
 		// Mark the corresponding page as referenced.
 		self.recent.access(value) || self.frequent.access(value)
 	}
@@ -197,7 +204,7 @@ impl<T: Clone + Hash + Eq> CacheReplacer<T> {
 				// If the recent clock is full, we want to look at its head.
 
 				let recent_head = self.recent.remove().unwrap();
-				if !recent_head.referenced {
+				if !recent_head.was_referenced() {
 					// The recent head item was not recently referenced! We evict it, and add it to
 					// the history.
 					self.frequent_history.enqueue(recent_head.value.clone());
@@ -212,7 +219,7 @@ impl<T: Clone + Hash + Eq> CacheReplacer<T> {
 				// maintained.
 
 				let frequent_head = self.frequent.remove()?;
-				if !frequent_head.referenced {
+				if !frequent_head.was_referenced() {
 					// The frequent head item was not recently referenced! We evict it, and add it
 					// to the history.
 					self.frequent_history.enqueue(frequent_head.value.clone());

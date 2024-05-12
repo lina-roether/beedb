@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, mem, sync::Arc};
 
 #[cfg(test)]
 use mockall::automock;
 
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use static_assertions::assert_impl_all;
 
 use crate::{
@@ -19,7 +19,7 @@ where
 	DF: DatabaseFolderApi,
 {
 	folder: Arc<DF>,
-	descriptor_cache: Mutex<DescriptorCache<DF>>,
+	descriptor_cache: RwLock<DescriptorCache<DF>>,
 }
 
 assert_impl_all!(PhysicalStorage: Send, Sync);
@@ -42,7 +42,7 @@ where
 	DF: DatabaseFolderApi,
 {
 	fn new(folder: Arc<DF>, config: &PhysicalStorageConfig) -> Self {
-		let descriptor_cache = Mutex::new(DescriptorCache::new(config));
+		let descriptor_cache = RwLock::new(DescriptorCache::new(config));
 		Self {
 			folder,
 			descriptor_cache,
@@ -54,13 +54,15 @@ where
 		segment_num: u32,
 		handler: impl FnOnce(&DF::SegmentFile) -> Result<T, StorageError>,
 	) -> Result<T, StorageError> {
-		let mut cache = self.descriptor_cache.lock();
+		let cache = self.descriptor_cache.read();
 		if let Some(segment) = cache.get_descriptor(segment_num) {
 			return handler(segment);
 		}
+		mem::drop(cache);
 
 		let segment_file = self.folder.open_segment_file(segment_num)?;
-		let segment_file = cache.store_descriptor(segment_num, segment_file);
+		let mut cache_mut = self.descriptor_cache.write();
+		let segment_file = cache_mut.store_descriptor(segment_num, segment_file);
 		handler(segment_file)
 	}
 }
@@ -105,7 +107,7 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 		}
 	}
 
-	pub fn get_descriptor(&mut self, segment_num: u32) -> Option<&DF::SegmentFile> {
+	pub fn get_descriptor(&self, segment_num: u32) -> Option<&DF::SegmentFile> {
 		self.replacer.access(&segment_num);
 		self.descriptors.get(&segment_num)
 	}
