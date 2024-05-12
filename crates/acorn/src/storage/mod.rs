@@ -19,6 +19,12 @@ pub(crate) enum StorageError {
 	File(#[from] FileError),
 }
 
+#[derive(Debug)]
+pub(crate) struct PageStorage<PhysicalStorage, Wal> {
+	physical: PhysicalStorage,
+	wal: Wal,
+}
+
 #[cfg(test)]
 pub(crate) mod test_helpers {
 	pub(crate) use crate::files::test_helpers::page_id;
