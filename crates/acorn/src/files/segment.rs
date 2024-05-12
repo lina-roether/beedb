@@ -216,7 +216,7 @@ mod tests {
 
 	use crate::{
 		files::generic::GenericHeaderRepr, storage::test_helpers::wal_index,
-		utils::macros::non_zero,
+		utils::test_helpers::non_zero,
 	};
 
 	use super::*;
