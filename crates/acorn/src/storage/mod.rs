@@ -101,6 +101,7 @@ where
 {
 	fn recover(&self) -> Result<(), StorageError> {
 		self.wal.recover(|write_op| {
+			// TODO: This can probably be abstracted to use the page cache somehow
 			let mut page = [0; PAGE_BODY_SIZE];
 			self.physical.read(write_op.page_id, &mut page)?;
 			page[write_op.offset as usize..write_op.offset as usize + write_op.buf.len()]
