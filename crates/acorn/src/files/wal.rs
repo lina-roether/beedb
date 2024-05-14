@@ -353,7 +353,7 @@ impl WalFile {
 impl<F: Seek + Read + Write> WalFile<F> {
 	fn create(mut file: F) -> Result<Self, FileError> {
 		file.seek(SeekFrom::Start(0))?;
-		let content_offset = GenericHeaderRepr::SIZE as u16;
+		let content_offset = u16::try_from(GenericHeaderRepr::SIZE).unwrap();
 		let meta = GenericHeader {
 			file_type: FileType::Wal,
 			content_offset,
@@ -380,7 +380,8 @@ impl<F: Seek + Read + Write> WalFile<F> {
 	}
 
 	fn new(mut file: F, body_start: u64) -> Result<Self, FileError> {
-		let prev_footer_start = file.seek(SeekFrom::End(-(ItemFooterRepr::SIZE as i64)))?;
+		let prev_footer_start =
+			file.seek(SeekFrom::End(-i64::try_from(ItemFooterRepr::SIZE).unwrap()))?;
 		let prev_item = if prev_footer_start > body_start {
 			let footer = ItemFooterRepr::deserialize(&mut file)?;
 			Some(footer.item_start)
@@ -581,7 +582,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 
 	#[inline]
 	fn size(&self) -> usize {
-		self.next_offset.get() as usize
+		usize::try_from(self.next_offset.get()).expect("Wal size exceeded usize::MAX")
 	}
 
 	#[inline]
@@ -685,7 +686,8 @@ impl<F: Read + Seek> ItemReader<F> {
 			ItemKind::Checkpoint => Item::Checkpoint(Self::read_checkpoint_data(&mut body_cursor)?),
 		};
 
-		self.reader.seek_relative(ItemFooterRepr::SIZE as i64)?;
+		self.reader
+			.seek_relative(i64::try_from(ItemFooterRepr::SIZE).unwrap())?;
 
 		let item_offset = self.offset;
 		self.offset +=
@@ -709,8 +711,14 @@ impl<F: Read + Seek> ItemReader<F> {
 		let Some(prev_item) = self.prev_item else {
 			return Ok(None);
 		};
-		let relative_offset = prev_item.get() as i64 - self.offset as i64;
-		self.reader.seek_relative(relative_offset)?;
+		let relative_offset_abs = i64::try_from(prev_item.get().abs_diff(self.offset))
+			.expect("WAL item size exceeded i64::MAX!");
+		self.reader
+			.seek_relative(if self.offset >= prev_item.get() {
+				-relative_offset_abs
+			} else {
+				relative_offset_abs
+			})?;
 		self.offset = prev_item.get();
 		self.read_item()
 	}

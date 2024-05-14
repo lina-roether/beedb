@@ -98,7 +98,7 @@ impl SegmentFile {
 
 		let header = GenericHeader {
 			file_type: FileType::Segment,
-			content_offset: PAGE_SIZE as u16,
+			content_offset: u16::try_from(PAGE_SIZE).unwrap(),
 			version: FORMAT_VERSION,
 		};
 		GenericHeaderRepr::serialize(header, &mut file)?;
