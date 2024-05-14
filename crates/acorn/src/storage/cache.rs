@@ -1,7 +1,9 @@
 use std::{
 	alloc::{alloc_zeroed, dealloc, Layout},
 	collections::HashMap,
-	mem, ptr,
+	mem,
+	ops::{Deref, DerefMut},
+	ptr,
 	sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -103,6 +105,55 @@ impl Drop for PageBuffer {
 	}
 }
 
+#[derive(Clone)]
+pub(crate) struct PageReadGuard<'a> {
+	page: &'a [u8],
+	lock: &'a RawRwLock,
+}
+
+impl<'a> Deref for PageReadGuard<'a> {
+	type Target = [u8];
+
+	fn deref(&self) -> &Self::Target {
+		self.page
+	}
+}
+
+impl<'a> Drop for PageReadGuard<'a> {
+	fn drop(&mut self) {
+		// Safety: the existence of this object guarantees the lock is owned by the
+		// current context
+		unsafe { self.lock.unlock_shared() };
+	}
+}
+
+pub(crate) struct PageWriteGuard<'a> {
+	page: &'a mut [u8],
+	lock: &'a RawRwLock,
+}
+
+impl<'a> Deref for PageWriteGuard<'a> {
+	type Target = [u8];
+
+	fn deref(&self) -> &Self::Target {
+		self.page
+	}
+}
+
+impl<'a> DerefMut for PageWriteGuard<'a> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.page
+	}
+}
+
+impl<'a> Drop for PageWriteGuard<'a> {
+	fn drop(&mut self) {
+		// Safety: the existence of this object guarantees the lock is owned by the
+		// current context
+		unsafe { self.lock.unlock_exclusive() };
+	}
+}
+
 pub(crate) struct PageCache {
 	buf: PageBuffer,
 	indices: RwLock<HashMap<PageId, usize>>,
@@ -136,17 +187,16 @@ impl PageCache {
 }
 
 #[cfg_attr(test, automock)]
+#[allow(clippy::needless_lifetimes)]
 pub(crate) trait PageCacheApi {
-	fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool;
-	fn store(&self, page_id: PageId, buf: &[u8]);
+	fn load<'a>(&'a self, page_id: PageId) -> Option<PageReadGuard<'a>>;
+	fn store<'a>(&'a self, page_id: PageId) -> PageWriteGuard<'a>;
 }
 
 impl PageCacheApi for PageCache {
-	fn load(&self, page_id: PageId, buf: &mut [u8]) -> bool {
+	fn load(&self, page_id: PageId) -> Option<PageReadGuard<'_>> {
 		let indices = self.indices.read();
-		let Some(index) = indices.get(&page_id).copied() else {
-			return false;
-		};
+		let index = indices.get(&page_id).copied()?;
 		mem::drop(indices);
 
 		let replacer = self.replacer.read();
@@ -154,50 +204,47 @@ impl PageCacheApi for PageCache {
 		debug_assert!(access_successful);
 		mem::drop(replacer);
 
-		self.locks[index].lock_shared();
-		buf.copy_from_slice(
-			// Safety: The safety of the reference is guaranteed by acquiring the shared lock.
-			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!"),
-		);
-		// Safety: the lock is acquired at this point
-		unsafe { self.locks[index].unlock_shared() };
+		let lock = &self.locks[index];
+		lock.lock_shared();
+		// Safety: The safety of the reference is guaranteed by acquiring the shared
+		// lock.
+		let page =
+			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!");
 
-		true
+		Some(PageReadGuard { lock, page })
 	}
 
-	fn store(&self, page_id: PageId, buf: &[u8]) {
+	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
 		let mut indices = self.indices.write();
-		if indices.contains_key(&page_id) {
-			return;
-		}
+		let index = indices.get(&page_id).copied().unwrap_or_else(|| {
+			let mut replacer = self.replacer.write();
+			let maybe_evicted = replacer.evict_replace(page_id);
+			mem::drop(replacer);
 
-		let mut replacer = self.replacer.write();
-		let maybe_evicted = replacer.evict_replace(page_id);
-		mem::drop(replacer);
+			if let Some(evicted) = maybe_evicted {
+				let index = indices
+					.remove(&evicted)
+					.expect("Tried to evict a page that is not in the cache!");
+				indices.insert(page_id, index);
+				index
+			} else {
+				let index = self
+					.buf
+					.push_page()
+					.expect("Failed to evict a page when the buffer was full!");
+				indices.insert(page_id, index);
+				index
+			}
+		});
 
-		let index = if let Some(evicted) = maybe_evicted {
-			let index = indices
-				.remove(&evicted)
-				.expect("Tried to evict a page that is not in the cache!");
-			indices.insert(page_id, index);
-			index
-		} else {
-			let index = self
-				.buf
-				.push_page()
-				.expect("Failed to evict a page when the buffer was full!");
-			indices.insert(page_id, index);
-			index
-		};
-
-		self.locks[index].lock_exclusive();
+		let lock = &self.locks[index];
+		lock.lock_exclusive();
 		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
 		// lock.
-		unsafe { self.buf.get_page_mut(index) }
-			.expect("Triet to index page buffer out of bounds!")
-			.copy_from_slice(buf);
-		// Safety: the lock is always acquired at this point
-		unsafe { self.locks[index].unlock_exclusive() };
+		let page = unsafe { self.buf.get_page_mut(index) }
+			.expect("Triet to index page buffer out of bounds!");
+
+		PageWriteGuard { lock, page }
 	}
 }
 
@@ -218,12 +265,14 @@ mod tests {
 
 		// when
 		let expected_page = [69; PAGE_BODY_SIZE];
-		cache.store(page_id!(69, 420), &expected_page);
+		cache
+			.store(page_id!(69, 420))
+			.copy_from_slice(&expected_page);
+
 		let mut received_page = [0; PAGE_BODY_SIZE];
-		let success = cache.load(page_id!(69, 420), &mut received_page);
+		received_page.copy_from_slice(&cache.load(page_id!(69, 420)).unwrap());
 
 		// then
-		assert!(success);
 		assert_buf_eq!(expected_page, received_page);
 	}
 
@@ -235,11 +284,9 @@ mod tests {
 		});
 
 		// when
-		let mut received_page = [0; PAGE_BODY_SIZE];
-		let success = cache.load(page_id!(69, 420), &mut received_page);
+		let guard = cache.load(page_id!(69, 420));
 
 		// then
-		assert!(!success);
-		assert_buf_eq!(received_page, [0; PAGE_BODY_SIZE]);
+		assert!(guard.is_none())
 	}
 }
