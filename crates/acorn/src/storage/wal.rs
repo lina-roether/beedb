@@ -380,7 +380,7 @@ pub(crate) trait WalApi {
 		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>;
 
 	#[cfg_attr(test, concretize)]
-	fn recover<HFn>(&self, handle: HFn) -> Result<(), StorageError>
+	fn recover<HFn>(&self, handle: &mut HFn) -> Result<(), StorageError>
 	where
 		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>;
 
@@ -411,7 +411,7 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		Ok(())
 	}
 
-	fn recover<HFn>(&self, mut handle: HFn) -> Result<(), StorageError>
+	fn recover<HFn>(&self, mut handle: &mut HFn) -> Result<(), StorageError>
 	where
 		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	{
@@ -768,7 +768,7 @@ mod tests {
 		.into_iter();
 
 		let wal = Wal::open(Arc::new(folder), &WalConfig::default()).unwrap();
-		wal.recover(|op| {
+		wal.recover(&mut |op| {
 			// Write operations should appear in the order of expected_ops.
 			assert_eq!(Some(op), expected_ops.next());
 			Ok(())

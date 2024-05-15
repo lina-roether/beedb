@@ -245,7 +245,7 @@ where
 	type Transaction<'a> = Transaction<'a, PS, PC, W> where Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError> {
-		self.wal.recover(|write_op| {
+		self.wal.recover(&mut |write_op| {
 			let mut guard = self.load_into_cache(write_op.page_id)?;
 			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
 			self.physical.write(WriteOp {
@@ -268,6 +268,122 @@ where
 		self.transaction_counter
 			.store(transaction_id.wrapping_add(1), Ordering::Release);
 		Transaction::new(transaction_id, self)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use mockall::{predicate::*, Sequence};
+
+	use crate::files::segment::PAGE_BODY_SIZE;
+
+	use self::{
+		cache::MockPageCacheApi,
+		physical::MockPhysicalStorageApi,
+		test_helpers::{page_id, wal_index},
+		wal::MockWalApi,
+	};
+
+	use super::*;
+
+	#[test]
+	fn recover() {
+		// expect
+		let mut physical = MockPhysicalStorageApi::new();
+		let mut cache = MockPageCacheApi::new();
+		let mut wal = MockWalApi::new();
+		wal.expect_recover().returning(|handler| {
+			handler(wal::PartialWriteOp {
+				index: wal_index!(69, 420),
+				page_id: page_id!(1, 2),
+				offset: 10,
+				buf: &[1, 2, 3],
+			})
+			.unwrap();
+			handler(wal::PartialWriteOp {
+				index: wal_index!(10, 24),
+				page_id: page_id!(4, 5),
+				offset: 12,
+				buf: &[2, 2, 1],
+			})
+			.unwrap();
+			Ok(())
+		});
+		let mut seq = Sequence::new();
+
+		cache
+			.expect_store()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(1, 2)))
+			.returning(|_| {
+				let mut guard = MockPageWriteGuardApi::new();
+				guard
+					.expect_body_mut()
+					.returning(|| vec![0; PAGE_BODY_SIZE]);
+				guard.expect_body().return_const(vec![0; PAGE_BODY_SIZE]);
+				guard
+					.expect_write()
+					.with(eq(10), eq([1, 2, 3]), eq(wal_index!(69, 420)));
+				guard
+			});
+		physical
+			.expect_read()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|read_op| read_op.page_id == page_id!(1, 2))
+			.returning(|read_op| {
+				read_op.buf.fill(0);
+				Ok(wal_index!(69, 420))
+			});
+		physical
+			.expect_write()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|write_op| {
+				write_op.wal_index == wal_index!(69, 420)
+					&& write_op.page_id == page_id!(1, 2)
+					&& write_op.buf[10..13] == [1, 2, 3]
+			});
+		cache
+			.expect_store()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(4, 5)))
+			.returning(|_| {
+				let mut guard = MockPageWriteGuardApi::new();
+				guard
+					.expect_body_mut()
+					.returning(|| vec![0; PAGE_BODY_SIZE]);
+				guard.expect_body().return_const(vec![0; PAGE_BODY_SIZE]);
+				guard
+					.expect_write()
+					.with(eq(12), eq([2, 2, 1]), eq(wal_index!(10, 24)));
+				guard
+			});
+		physical
+			.expect_read()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|read_op| read_op.page_id == page_id!(4, 5))
+			.returning(|read_op| {
+				read_op.buf.fill(0);
+				Ok(wal_index!(10, 24))
+			});
+		physical
+			.expect_write()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|write_op| {
+				write_op.wal_index == wal_index!(10, 24)
+					&& write_op.page_id == page_id!(4, 5)
+					&& write_op.buf[12..15] == [2, 2, 1]
+			});
+		// given
+		let page_storage = PageStorage::new(physical, cache, wal);
+
+		// when
+		page_storage.recover().unwrap();
 	}
 }
 
