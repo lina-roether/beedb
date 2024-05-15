@@ -4,14 +4,20 @@ use std::{
 	mem,
 	ops::{Deref, DerefMut},
 	ptr,
-	sync::atomic::{AtomicUsize, Ordering},
+	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock};
+use parking_lot::{
+	lock_api::{RawRwLock as _, RawRwLockDowngrade},
+	Mutex, RawRwLock, RwLock,
+};
 use static_assertions::assert_impl_all;
 
 #[cfg(test)]
 use mockall::automock;
+
+#[cfg(test)]
+use std::cell::RefMut;
 
 use crate::{
 	consts::DEFAULT_PAGE_CACHE_SIZE, files::segment::PAGE_BODY_SIZE, utils::cache::CacheReplacer,
@@ -128,6 +134,7 @@ impl<'a> Drop for PageReadGuard<'a> {
 }
 
 pub(crate) struct PageWriteGuard<'a> {
+	index: usize,
 	page: &'a mut [u8],
 	lock: &'a RawRwLock,
 }
@@ -158,6 +165,8 @@ pub(crate) struct PageCache {
 	buf: PageBuffer,
 	indices: RwLock<HashMap<PageId, usize>>,
 	replacer: RwLock<CacheReplacer<PageId>>,
+	scrap: Mutex<Vec<usize>>,
+	has_scrap: AtomicBool,
 	locks: Box<[RawRwLock]>,
 }
 assert_impl_all!(PageCache: Send, Sync);
@@ -179,6 +188,8 @@ impl PageCache {
 			buf,
 			replacer: RwLock::new(replacer),
 			indices: RwLock::new(HashMap::new()),
+			scrap: Mutex::new(Vec::new()),
+			has_scrap: AtomicBool::new(false),
 			locks: std::iter::repeat_with(|| RawRwLock::INIT)
 				.take(num_pages)
 				.collect(),
@@ -214,12 +225,19 @@ impl PageCache {
 		maybe_evict
 	}
 
-	fn get_index_for(&self, page_id: PageId) -> usize {
+	fn get_store_index(&self, page_id: PageId) -> usize {
 		let indices = self.indices.read();
 		if let Some(stored_index) = indices.get(&page_id).copied() {
 			return stored_index;
 		}
 		mem::drop(indices);
+
+		if self.has_scrap.load(Ordering::Relaxed) {
+			let mut scrap = self.scrap.lock();
+			if let Some(scrap_index) = scrap.pop() {
+				return scrap_index;
+			}
+		}
 
 		let maybe_evict = self.evict_for(page_id);
 		let mut indices = self.indices.write();
@@ -240,14 +258,35 @@ impl PageCache {
 	}
 }
 
-#[cfg_attr(test, automock)]
+#[cfg_attr(test, automock(
+    type ReadGuard<'a> = Vec<u8>;
+    type WriteGuard<'a> = RefMut<'a, [u8]>;
+))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait PageCacheApi {
-	fn load<'a>(&'a self, page_id: PageId) -> Option<PageReadGuard<'a>>;
-	fn store<'a>(&'a self, page_id: PageId) -> PageWriteGuard<'a>;
+	type ReadGuard<'a>: Deref<Target = [u8]> + 'a
+	where
+		Self: 'a;
+	type WriteGuard<'a>: Deref<Target = [u8]> + DerefMut + 'a
+	where
+		Self: 'a;
+
+	fn has_page(&self, page_id: PageId) -> bool;
+	fn load<'a>(&'a self, page_id: PageId) -> Option<Self::ReadGuard<'a>>;
+	fn store<'a>(&'a self, page_id: PageId) -> Self::WriteGuard<'a>;
+	fn scrap(&self, page_id: PageId);
+	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
 }
 
 impl PageCacheApi for PageCache {
+	type ReadGuard<'a> = PageReadGuard<'a>;
+	type WriteGuard<'a> = PageWriteGuard<'a>;
+
+	fn has_page(&self, page_id: PageId) -> bool {
+		let indices = self.indices.read();
+		indices.contains_key(&page_id)
+	}
+
 	fn load(&self, page_id: PageId) -> Option<PageReadGuard<'_>> {
 		let indices = self.indices.read();
 		let index = indices.get(&page_id).copied()?;
@@ -269,7 +308,7 @@ impl PageCacheApi for PageCache {
 	}
 
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
-		let index = self.get_index_for(page_id);
+		let index = self.get_store_index(page_id);
 
 		let lock = &self.locks[index];
 		lock.lock_exclusive();
@@ -278,7 +317,32 @@ impl PageCacheApi for PageCache {
 		let page = unsafe { self.buf.get_page_mut(index) }
 			.expect("Triet to index page buffer out of bounds!");
 
-		PageWriteGuard { lock, page }
+		PageWriteGuard { index, lock, page }
+	}
+
+	fn scrap(&self, page_id: PageId) {
+		let mut indices = self.indices.write();
+		let Some(index) = indices.remove(&page_id) else {
+			return;
+		};
+		mem::drop(indices);
+
+		self.has_scrap.store(true, Ordering::Relaxed);
+		self.scrap.lock().push(index);
+	}
+
+	fn downgrade_guard<'a>(&'a self, guard: PageWriteGuard<'a>) -> PageReadGuard<'a> {
+		let lock = guard.lock;
+		// Safety: the existance of the PageWriteGuard guarantees that the lock is owned
+		// in the current context
+		unsafe { lock.downgrade() };
+
+		// Safety: we have the shared lock for this page
+		let page = unsafe { self.buf.get_page(guard.index) }
+			.expect("Got out of bounds buffer index while upgrading guard");
+
+		mem::forget(guard);
+		PageReadGuard { page, lock }
 	}
 }
 
