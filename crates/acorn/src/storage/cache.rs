@@ -340,7 +340,7 @@ mod tests {
 		cache.load(page_id!(2, 2)); // 2, 2 was referenced in recent
 		cache.load(page_id!(1, 1)); // 1, 1 is promoted to frequent
 
-		// frequent is large, therefore 3, 3 is evicted as it is the first
+		// recent is large, therefore 3, 3 is evicted as it is the first
 		// non-referenced item in frequent
 		cache.store(page_id!(5, 5));
 
@@ -368,7 +368,7 @@ mod tests {
 		cache.load(page_id!(2, 2)); // 2, 2 was referenced in recent
 		cache.load(page_id!(1, 1)); // 1, 1 is promoted to frequent
 
-		// frequent is large, therefore 3, 3 would be evicted, but it is locked, so 4, 4
+		// recent is large, therefore 3, 3 would be evicted, but it is locked, so 4, 4
 		// is evicted instead
 		cache.store(page_id!(5, 5));
 
