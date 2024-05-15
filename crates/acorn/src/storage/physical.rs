@@ -67,24 +67,38 @@ where
 	}
 }
 
-#[cfg_attr(test, automock)]
-pub(crate) trait PhysicalStorageApi {
-	fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<WalIndex, StorageError>;
+#[derive(Debug)]
+pub(crate) struct ReadOp<'a> {
+	pub page_id: PageId,
+	pub buf: &'a mut [u8],
+}
 
-	fn write(&self, page_id: PageId, buf: &[u8], wal_index: WalIndex) -> Result<(), StorageError>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteOp<'a> {
+	pub wal_index: WalIndex,
+	pub page_id: PageId,
+	pub buf: &'a [u8],
+}
+
+#[cfg_attr(test, automock)]
+#[allow(clippy::needless_lifetimes)]
+pub(crate) trait PhysicalStorageApi {
+	fn read<'a>(&self, op: ReadOp<'a>) -> Result<WalIndex, StorageError>;
+
+	fn write<'a>(&self, op: WriteOp<'a>) -> Result<(), StorageError>;
 }
 
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
-	fn read(&self, page_id: PageId, buf: &mut [u8]) -> Result<WalIndex, StorageError> {
-		self.use_segment(page_id.segment_num, |segment| {
-			let wal_index = segment.read(page_id.page_num, buf)?;
+	fn read(&self, op: ReadOp) -> Result<WalIndex, StorageError> {
+		self.use_segment(op.page_id.segment_num, |segment| {
+			let wal_index = segment.read(op.page_id.page_num, op.buf)?;
 			Ok(wal_index)
 		})
 	}
 
-	fn write(&self, page_id: PageId, buf: &[u8], wal_index: WalIndex) -> Result<(), StorageError> {
-		self.use_segment(page_id.segment_num, |segment| {
-			segment.write(page_id.page_num, buf, wal_index)?;
+	fn write(&self, op: WriteOp) -> Result<(), StorageError> {
+		self.use_segment(op.page_id.segment_num, |segment| {
+			segment.write(op.page_id.page_num, op.buf, op.wal_index)?;
 			Ok(())
 		})
 	}
@@ -172,7 +186,11 @@ mod tests {
 
 		// when
 		storage
-			.write(page_id!(69, 420), &[1; PAGE_BODY_SIZE], wal_index!(69, 420))
+			.write(WriteOp {
+				page_id: page_id!(69, 420),
+				buf: &[1; PAGE_BODY_SIZE],
+				wal_index: wal_index!(69, 420),
+			})
 			.unwrap();
 	}
 
@@ -202,7 +220,12 @@ mod tests {
 
 		// when
 		let mut buf = [0; 3];
-		let wal_index = storage.read(page_id!(69, 420), &mut buf).unwrap();
+		let wal_index = storage
+			.read(ReadOp {
+				page_id: page_id!(69, 420),
+				buf: &mut buf,
+			})
+			.unwrap();
 
 		// then
 		assert_eq!(wal_index, wal_index!(69, 420));

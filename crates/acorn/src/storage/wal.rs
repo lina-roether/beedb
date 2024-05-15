@@ -35,7 +35,7 @@ impl Default for WalConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WriteOp<'a> {
+pub(crate) struct PartialWriteOp<'a> {
 	pub index: WalIndex,
 	pub page_id: PageId,
 	pub offset: u16,
@@ -178,7 +178,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		&self,
 		index: WalIndex,
 		data: wal::WriteData,
-		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
+		mut handle: impl FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
 		let state = self.state.lock();
 		let Some(first_dirty_index) = state.dirty_pages.get(&data.page_id).copied() else {
@@ -190,7 +190,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 			return Ok(());
 		}
 
-		handle(WriteOp {
+		handle(PartialWriteOp {
 			index,
 			page_id: data.page_id,
 			offset: data.offset,
@@ -204,7 +204,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		&self,
 		file: &mut DF::WalFile,
 		gen_num: u64,
-		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
+		mut handle: impl FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
 		for item_result in file.iter_items()? {
 			let (offset, item) = item_result?;
@@ -232,11 +232,11 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		&self,
 		log: UndoLog,
 		gens: &GenerationQueue<DF>,
-		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
+		mut handle: impl FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	) -> Result<WalIndex, StorageError> {
 		let index = self.log_undo(log.clone(), gens)?;
 
-		handle(WriteOp {
+		handle(PartialWriteOp {
 			page_id: log.page_id,
 			offset: log.offset,
 			index,
@@ -249,7 +249,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		&self,
 		transaction_ids: &[u64],
 		gens: &mut GenerationQueue<DF>,
-		mut handle: impl FnMut(WriteOp) -> Result<(), StorageError>,
+		mut handle: impl FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
 		if transaction_ids.is_empty() {
 			return Ok(());
@@ -377,12 +377,12 @@ pub(crate) trait WalApi {
 	#[cfg_attr(test, concretize)]
 	fn undo<HFn>(&self, transaction_id: u64, handle: HFn) -> Result<(), StorageError>
 	where
-		HFn: FnMut(WriteOp) -> Result<(), StorageError>;
+		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>;
 
 	#[cfg_attr(test, concretize)]
 	fn recover<HFn>(&self, handle: HFn) -> Result<(), StorageError>
 	where
-		HFn: FnMut(WriteOp) -> Result<(), StorageError>;
+		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>;
 
 	fn checkpoint(&self) -> Result<(), StorageError>;
 
@@ -404,7 +404,7 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 
 	fn undo<HFn>(&self, transaction_id: u64, handle: HFn) -> Result<(), StorageError>
 	where
-		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
+		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	{
 		let mut gens = self.generations.write();
 		self.undo_all(&[transaction_id], &mut gens, handle)?;
@@ -413,7 +413,7 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 
 	fn recover<HFn>(&self, mut handle: HFn) -> Result<(), StorageError>
 	where
-		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
+		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	{
 		// acquire exclusive gen lock to prevent conflicts
 		let mut gens = self.generations.write();
@@ -751,14 +751,14 @@ mod tests {
 		// when
 		let mut expected_ops = vec![
 			// This reapplies write (3, 10).
-			WriteOp {
+			PartialWriteOp {
 				index: wal_index!(3, 10),
 				page_id: page_id!(25, 69),
 				offset: 100,
 				buf: &[1, 2, 3, 4],
 			},
 			// This reverts write (2, 20).
-			WriteOp {
+			PartialWriteOp {
 				index: wal_index!(3, 40),
 				page_id: page_id!(100, 200),
 				offset: 25,

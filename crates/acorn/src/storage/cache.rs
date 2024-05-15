@@ -3,7 +3,7 @@ use std::{
 	collections::HashMap,
 	marker::PhantomData,
 	mem,
-	ops::{Deref, DerefMut},
+	num::NonZeroU64,
 	ptr,
 	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
@@ -15,16 +15,17 @@ use parking_lot::{
 use static_assertions::assert_impl_all;
 
 #[cfg(test)]
-use mockall::automock;
+use mockall::{automock, concretize};
 
-#[cfg(test)]
-use std::cell::RefMut;
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
-	consts::DEFAULT_PAGE_CACHE_SIZE, files::segment::PAGE_BODY_SIZE, utils::cache::CacheReplacer,
+	consts::DEFAULT_PAGE_CACHE_SIZE,
+	files::{segment::PAGE_BODY_SIZE, WalIndex},
+	utils::cache::CacheReplacer,
 };
 
-use super::PageId;
+use super::{physical::WriteOp, PageId, StorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PageCacheConfig {
@@ -39,6 +40,47 @@ impl Default for PageCacheConfig {
 	}
 }
 
+#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[repr(C, packed)]
+struct BufferedPageHeader {
+	wal_generation: u64,
+	wal_offset: u64,
+	dirty: u8,
+}
+
+impl BufferedPageHeader {
+	fn new(wal_index: WalIndex, dirty: bool) -> Self {
+		Self {
+			wal_generation: wal_index.generation,
+			wal_offset: wal_index.offset.get(),
+			dirty: dirty as u8,
+		}
+	}
+
+	fn wal_index(&self) -> WalIndex {
+		WalIndex::new(
+			self.wal_generation,
+			NonZeroU64::new(self.wal_offset).expect("Buffered page header corrupted!"),
+		)
+	}
+
+	fn set_wal_index(&mut self, index: WalIndex) {
+		self.wal_offset = index.offset.get();
+		self.wal_generation = index.generation;
+	}
+
+	fn dirty(&self) -> bool {
+		self.dirty != 0
+	}
+
+	fn set_dirty(&mut self, dirty: bool) {
+		self.dirty = dirty as u8
+	}
+}
+
+const HEADER_SIZE: usize = mem::size_of::<BufferedPageHeader>();
+const BUFFERED_PAGE_SIZE: usize = PAGE_BODY_SIZE + HEADER_SIZE;
+
 struct PageBuffer {
 	buf: *mut u8,
 	num_pages: usize,
@@ -47,7 +89,7 @@ struct PageBuffer {
 
 impl PageBuffer {
 	fn new(num_pages: usize) -> Self {
-		let buf_size = num_pages * PAGE_BODY_SIZE;
+		let buf_size = num_pages * BUFFERED_PAGE_SIZE;
 		let buf = if buf_size != 0 {
 			// Safety: buf_size is guaranteed not to be zero, so the layout is not
 			// zero-sized.
@@ -76,7 +118,7 @@ impl PageBuffer {
 			return None;
 		}
 		// Safety: the resulting pointer is guaranteed to be in the allocated buffer.
-		Some(unsafe { self.buf.add(index * PAGE_BODY_SIZE) })
+		Some(unsafe { self.buf.add(index * BUFFERED_PAGE_SIZE) })
 	}
 
 	/// # Safety:
@@ -85,7 +127,7 @@ impl PageBuffer {
 	unsafe fn get_page(&self, index: usize) -> Option<&[u8]> {
 		Some(std::slice::from_raw_parts(
 			self.page_ptr(index)?,
-			PAGE_BODY_SIZE,
+			BUFFERED_PAGE_SIZE,
 		))
 	}
 
@@ -95,7 +137,7 @@ impl PageBuffer {
 	unsafe fn get_page_mut(&self, index: usize) -> Option<&mut [u8]> {
 		Some(std::slice::from_raw_parts_mut(
 			self.page_ptr(index)?,
-			PAGE_BODY_SIZE,
+			BUFFERED_PAGE_SIZE,
 		))
 	}
 }
@@ -103,11 +145,17 @@ impl PageBuffer {
 impl Drop for PageBuffer {
 	fn drop(&mut self) {
 		if !self.buf.is_null() {
-			let buf_size = self.num_pages * PAGE_BODY_SIZE;
+			let buf_size = self.num_pages * BUFFERED_PAGE_SIZE;
 			// Safety:
 			// - `self.buf` is guaranteed not to be null
 			// - The buffer is never reallocated, so the layout stays the same
-			unsafe { dealloc(self.buf, Layout::from_size_align(buf_size, 1).unwrap()) }
+			unsafe {
+				dealloc(
+					self.buf,
+					Layout::from_size_align(buf_size, mem::align_of::<BufferedPageHeader>())
+						.unwrap(),
+				)
+			}
 		}
 	}
 }
@@ -119,11 +167,24 @@ pub(crate) struct PageReadGuard<'a> {
 	_marker: PhantomData<RwLockReadGuard<'a, [u8]>>,
 }
 
-impl<'a> Deref for PageReadGuard<'a> {
-	type Target = [u8];
+#[cfg_attr(test, automock)]
+pub(crate) trait PageReadGuardApi {
+	fn header(&self) -> &BufferedPageHeader;
+	fn body(&self) -> &[u8];
+	fn read(&self, offset: usize, buf: &mut [u8]);
+}
 
-	fn deref(&self) -> &Self::Target {
-		self.page
+impl<'a> PageReadGuardApi for PageReadGuard<'a> {
+	fn header(&self) -> &BufferedPageHeader {
+		BufferedPageHeader::ref_from(&self.page[0..HEADER_SIZE]).unwrap()
+	}
+
+	fn body(&self) -> &[u8] {
+		&self.page[HEADER_SIZE..]
+	}
+
+	fn read(&self, offset: usize, buf: &mut [u8]) {
+		buf.copy_from_slice(&self.body()[offset..offset + buf.len()]);
 	}
 }
 
@@ -142,17 +203,41 @@ pub(crate) struct PageWriteGuard<'a> {
 	_marker: PhantomData<RwLockReadGuard<'a, [u8]>>,
 }
 
-impl<'a> Deref for PageWriteGuard<'a> {
-	type Target = [u8];
-
-	fn deref(&self) -> &Self::Target {
-		self.page
+impl<'a> PageWriteGuard<'a> {
+	fn body_mut(&mut self) -> &mut [u8] {
+		&mut self.page[HEADER_SIZE..]
 	}
 }
 
-impl<'a> DerefMut for PageWriteGuard<'a> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.page
+#[cfg_attr(test, automock)]
+pub(crate) trait PageWriteGuardApi {
+	fn header(&self) -> &BufferedPageHeader;
+	fn body(&self) -> &[u8];
+	fn header_mut(&mut self) -> &mut BufferedPageHeader;
+	fn read(&self, offset: usize, buf: &mut [u8]);
+	fn write(&mut self, offset: usize, buf: &[u8], wal_index: WalIndex);
+}
+
+impl<'a> PageWriteGuardApi for PageWriteGuard<'a> {
+	fn header(&self) -> &BufferedPageHeader {
+		BufferedPageHeader::ref_from(&self.page[0..HEADER_SIZE]).unwrap()
+	}
+
+	fn header_mut(&mut self) -> &mut BufferedPageHeader {
+		BufferedPageHeader::mut_from(&mut self.page[0..HEADER_SIZE]).unwrap()
+	}
+
+	fn body(&self) -> &[u8] {
+		&self.page[HEADER_SIZE..]
+	}
+
+	fn read(&self, offset: usize, buf: &mut [u8]) {
+		buf.copy_from_slice(&self.body()[offset..offset + buf.len()]);
+	}
+
+	fn write(&mut self, offset: usize, buf: &[u8], wal_index: WalIndex) {
+		self.header_mut().set_wal_index(wal_index);
+		self.body_mut()[offset..offset + buf.len()].copy_from_slice(buf);
 	}
 }
 
@@ -170,6 +255,7 @@ pub(crate) struct PageCache {
 	replacer: RwLock<CacheReplacer<PageId>>,
 	scrap: Mutex<Vec<usize>>,
 	has_scrap: AtomicBool,
+	dirty_list: Mutex<Vec<PageId>>,
 	locks: Box<[RawRwLock]>,
 }
 assert_impl_all!(PageCache: Send, Sync);
@@ -184,7 +270,7 @@ unsafe impl Sync for PageCache {}
 
 impl PageCache {
 	pub fn new(config: &PageCacheConfig) -> Self {
-		let num_pages = config.page_cache_size / PAGE_BODY_SIZE;
+		let num_pages = config.page_cache_size / BUFFERED_PAGE_SIZE;
 		let buf = PageBuffer::new(num_pages);
 		let replacer = CacheReplacer::new(num_pages);
 		Self {
@@ -193,6 +279,7 @@ impl PageCache {
 			indices: RwLock::new(HashMap::new()),
 			scrap: Mutex::new(Vec::new()),
 			has_scrap: AtomicBool::new(false),
+			dirty_list: Mutex::new(Vec::new()),
 			locks: std::iter::repeat_with(|| RawRwLock::INIT)
 				.take(num_pages)
 				.collect(),
@@ -259,18 +346,49 @@ impl PageCache {
 			index
 		}
 	}
+
+	fn load_direct(&self, index: usize) -> PageReadGuard<'_> {
+		let lock = &self.locks[index];
+		lock.lock_shared();
+		// Safety: The safety of the reference is guaranteed by acquiring the shared
+		// lock.
+		let page =
+			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!");
+
+		PageReadGuard {
+			lock,
+			page,
+			_marker: PhantomData,
+		}
+	}
+
+	fn store_direct(&self, index: usize) -> PageWriteGuard<'_> {
+		let lock = &self.locks[index];
+		lock.lock_exclusive();
+		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
+		// lock.
+		let page = unsafe { self.buf.get_page_mut(index) }
+			.expect("Triet to index page buffer out of bounds!");
+
+		PageWriteGuard {
+			index,
+			lock,
+			page,
+			_marker: PhantomData,
+		}
+	}
 }
 
 #[cfg_attr(test, automock(
-    type ReadGuard<'a> = Vec<u8>;
-    type WriteGuard<'a> = RefMut<'a, [u8]>;
+    type ReadGuard<'a> = MockPageReadGuardApi;
+    type WriteGuard<'a> = MockPageWriteGuardApi;
 ))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait PageCacheApi {
-	type ReadGuard<'a>: Deref<Target = [u8]> + 'a
+	type ReadGuard<'a>: PageReadGuardApi + 'a
 	where
 		Self: 'a;
-	type WriteGuard<'a>: Deref<Target = [u8]> + DerefMut + 'a
+	type WriteGuard<'a>: PageWriteGuardApi + 'a
 	where
 		Self: 'a;
 
@@ -279,6 +397,11 @@ pub(crate) trait PageCacheApi {
 	fn store<'a>(&'a self, page_id: PageId) -> Self::WriteGuard<'a>;
 	fn scrap(&self, page_id: PageId);
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
+
+	#[cfg_attr(test, concretize)]
+	fn flush<HFn>(&self, handler: HFn) -> Result<(), StorageError>
+	where
+		HFn: FnMut(WriteOp) -> Result<(), StorageError>;
 }
 
 impl PageCacheApi for PageCache {
@@ -300,36 +423,16 @@ impl PageCacheApi for PageCache {
 		debug_assert!(access_successful);
 		mem::drop(replacer);
 
-		let lock = &self.locks[index];
-		lock.lock_shared();
-		// Safety: The safety of the reference is guaranteed by acquiring the shared
-		// lock.
-		let page =
-			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!");
-
-		Some(PageReadGuard {
-			lock,
-			page,
-			_marker: PhantomData,
-		})
+		Some(self.load_direct(index))
 	}
 
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
+		let mut dirty_list = self.dirty_list.lock();
+		dirty_list.push(page_id);
+		mem::drop(dirty_list);
+
 		let index = self.get_store_index(page_id);
-
-		let lock = &self.locks[index];
-		lock.lock_exclusive();
-		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
-		// lock.
-		let page = unsafe { self.buf.get_page_mut(index) }
-			.expect("Triet to index page buffer out of bounds!");
-
-		PageWriteGuard {
-			index,
-			lock,
-			page,
-			_marker: PhantomData,
-		}
+		self.store_direct(index)
 	}
 
 	fn scrap(&self, page_id: PageId) {
@@ -360,13 +463,54 @@ impl PageCacheApi for PageCache {
 			_marker: PhantomData,
 		}
 	}
+
+	fn flush<HFn>(&self, mut handler: HFn) -> Result<(), StorageError>
+	where
+		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
+	{
+		let mut dirty_list_guard = self.dirty_list.lock();
+		let dirty_list = dirty_list_guard.clone();
+		dirty_list_guard.clear();
+		mem::drop(dirty_list_guard);
+
+		let mut error: Option<StorageError> = None;
+		for page_id in dirty_list.iter().copied() {
+			let indices = self.indices.read();
+			let Some(index) = indices.get(&page_id).copied() else {
+				continue;
+			};
+			let guard = self.load_direct(index);
+			if !guard.header().dirty() {
+				continue;
+			}
+			if let Err(err) = handler(WriteOp {
+				wal_index: guard.header().wal_index(),
+				page_id,
+				buf: guard.page,
+			}) {
+				error = Some(err);
+				break;
+			};
+		}
+
+		if let Some(err) = error {
+			let mut dirty_list_guard = self.dirty_list.lock();
+			dirty_list_guard.extend(&dirty_list);
+			return Err(err);
+		}
+
+		Ok(())
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use pretty_assertions::assert_buf_eq;
 
-	use crate::{storage::test_helpers::page_id, utils::units::MIB};
+	use crate::{
+		storage::test_helpers::{page_id, wal_index},
+		utils::units::MIB,
+	};
 
 	use super::*;
 
@@ -381,10 +525,13 @@ mod tests {
 		let expected_page = [69; PAGE_BODY_SIZE];
 		cache
 			.store(page_id!(69, 420))
-			.copy_from_slice(&expected_page);
+			.write(0, &expected_page, wal_index!(1, 2));
 
 		let mut received_page = [0; PAGE_BODY_SIZE];
-		received_page.copy_from_slice(&cache.load(page_id!(69, 420)).unwrap());
+		cache
+			.load(page_id!(69, 420))
+			.unwrap()
+			.read(0, &mut received_page);
 
 		// then
 		assert_buf_eq!(expected_page, received_page);
