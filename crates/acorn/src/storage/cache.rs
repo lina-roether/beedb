@@ -184,6 +184,60 @@ impl PageCache {
 				.collect(),
 		}
 	}
+
+	fn evict_for(&self, page_id: PageId) -> Option<PageId> {
+		let mut replacer = self.replacer.write();
+		let mut maybe_evict = replacer.evict_replace(page_id);
+		mem::drop(replacer);
+
+		loop {
+			if let Some(evicted) = maybe_evict {
+				let indices = self.indices.read();
+				let index = *indices
+					.get(&evicted)
+					.expect("Tried to evict a page that is not in the cache!");
+
+				// If we are trying to evict the same page that we're inserting, or if the page
+				// we're trying to evict is currently locked, we reinsert it and try the next
+				// candidate.
+				//
+				// Note that this ends up in an infinite loop if all pages in the cache are
+				// locked over an extended period, but that should rarely happen.
+				if evicted == page_id || self.locks[index].is_locked() {
+					let mut replacer = self.replacer.write();
+					maybe_evict = replacer.evict_replace(evicted);
+					continue;
+				}
+			}
+			break;
+		}
+		maybe_evict
+	}
+
+	fn get_index_for(&self, page_id: PageId) -> usize {
+		let indices = self.indices.read();
+		if let Some(stored_index) = indices.get(&page_id).copied() {
+			return stored_index;
+		}
+		mem::drop(indices);
+
+		let maybe_evict = self.evict_for(page_id);
+		let mut indices = self.indices.write();
+		if let Some(evict) = maybe_evict {
+			let index = indices
+				.remove(&evict)
+				.expect("Tried to evict a page that is not in the cache!");
+			indices.insert(page_id, index);
+			index
+		} else {
+			let index = self
+				.buf
+				.push_page()
+				.expect("Failed to evict a page when the buffer was full!");
+			indices.insert(page_id, index);
+			index
+		}
+	}
 }
 
 #[cfg_attr(test, automock)]
@@ -215,27 +269,7 @@ impl PageCacheApi for PageCache {
 	}
 
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
-		let mut indices = self.indices.write();
-		let index = indices.get(&page_id).copied().unwrap_or_else(|| {
-			let mut replacer = self.replacer.write();
-			let maybe_evicted = replacer.evict_replace(page_id);
-			mem::drop(replacer);
-
-			if let Some(evicted) = maybe_evicted {
-				let index = indices
-					.remove(&evicted)
-					.expect("Tried to evict a page that is not in the cache!");
-				indices.insert(page_id, index);
-				index
-			} else {
-				let index = self
-					.buf
-					.push_page()
-					.expect("Failed to evict a page when the buffer was full!");
-				indices.insert(page_id, index);
-				index
-			}
-		});
+		let index = self.get_index_for(page_id);
 
 		let lock = &self.locks[index];
 		lock.lock_exclusive();
@@ -288,5 +322,63 @@ mod tests {
 
 		// then
 		assert!(guard.is_none())
+	}
+
+	#[test]
+	fn evict_correct_page() {
+		// given
+		let cache = PageCache::new(&PageCacheConfig {
+			page_cache_size: 4 * PAGE_BODY_SIZE,
+		});
+
+		// when
+		cache.store(page_id!(1, 1)); // add 1, 1 to recent
+		cache.store(page_id!(2, 2)); // add 2, 2 to recent
+		cache.store(page_id!(3, 3)); // add 3, 3 to recent
+		cache.store(page_id!(4, 4)); // add 4, 4 to recent
+		cache.load(page_id!(1, 1)); // 1, 1 was referenced in recent
+		cache.load(page_id!(2, 2)); // 2, 2 was referenced in recent
+		cache.load(page_id!(1, 1)); // 1, 1 is promoted to frequent
+
+		// frequent is large, therefore 3, 3 is evicted as it is the first
+		// non-referenced item in frequent
+		cache.store(page_id!(5, 5));
+
+		// then
+		assert!(cache.load(page_id!(1, 1)).is_some());
+		assert!(cache.load(page_id!(2, 2)).is_some());
+		assert!(cache.load(page_id!(3, 3)).is_none());
+		assert!(cache.load(page_id!(4, 4)).is_some());
+		assert!(cache.load(page_id!(5, 5)).is_some());
+	}
+
+	#[test]
+	fn doesnt_evict_locked_page() {
+		// given
+		let cache = PageCache::new(&PageCacheConfig {
+			page_cache_size: 4 * PAGE_BODY_SIZE,
+		});
+
+		// when
+		cache.store(page_id!(1, 1)); // add 1, 1 to recent
+		cache.store(page_id!(2, 2)); // add 2, 2 to recent
+		let guard = cache.store(page_id!(3, 3)); // add 3, 3 to recent
+		cache.store(page_id!(4, 4)); // add 4, 4 to recent
+		cache.load(page_id!(1, 1)); // 1, 1 was referenced in recent
+		cache.load(page_id!(2, 2)); // 2, 2 was referenced in recent
+		cache.load(page_id!(1, 1)); // 1, 1 is promoted to frequent
+
+		// frequent is large, therefore 3, 3 would be evicted, but it is locked, so 4, 4
+		// is evicted instead
+		cache.store(page_id!(5, 5));
+
+		mem::drop(guard);
+
+		// then
+		assert!(cache.load(page_id!(1, 1)).is_some());
+		assert!(cache.load(page_id!(2, 2)).is_some());
+		assert!(cache.load(page_id!(3, 3)).is_some());
+		assert!(cache.load(page_id!(4, 4)).is_none());
+		assert!(cache.load(page_id!(5, 5)).is_some());
 	}
 }
