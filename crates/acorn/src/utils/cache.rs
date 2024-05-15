@@ -259,6 +259,9 @@ impl<T: Clone + Hash + Eq> CacheReplacer<T> {
 		// We want to change it by at least one, but if there is a lot more traffic on
 		// the frequent clock than on the recent clock, we should increase it by more.
 		// The goal is to get the two roughly equal.
+		if self.recent_history.len() == 0 {
+			return 1;
+		}
 		usize::max(1, self.frequent_history.len() / self.recent_history.len())
 	}
 
