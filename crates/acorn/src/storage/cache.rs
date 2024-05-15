@@ -1,6 +1,7 @@
 use std::{
 	alloc::{alloc_zeroed, dealloc, Layout},
 	collections::HashMap,
+	marker::PhantomData,
 	mem,
 	ops::{Deref, DerefMut},
 	ptr,
@@ -9,7 +10,7 @@ use std::{
 
 use parking_lot::{
 	lock_api::{RawRwLock as _, RawRwLockDowngrade},
-	Mutex, RawRwLock, RwLock,
+	Mutex, RawRwLock, RwLock, RwLockReadGuard,
 };
 use static_assertions::assert_impl_all;
 
@@ -115,6 +116,7 @@ impl Drop for PageBuffer {
 pub(crate) struct PageReadGuard<'a> {
 	page: &'a [u8],
 	lock: &'a RawRwLock,
+	_marker: PhantomData<RwLockReadGuard<'a, [u8]>>,
 }
 
 impl<'a> Deref for PageReadGuard<'a> {
@@ -137,6 +139,7 @@ pub(crate) struct PageWriteGuard<'a> {
 	index: usize,
 	page: &'a mut [u8],
 	lock: &'a RawRwLock,
+	_marker: PhantomData<RwLockReadGuard<'a, [u8]>>,
 }
 
 impl<'a> Deref for PageWriteGuard<'a> {
@@ -304,7 +307,11 @@ impl PageCacheApi for PageCache {
 		let page =
 			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!");
 
-		Some(PageReadGuard { lock, page })
+		Some(PageReadGuard {
+			lock,
+			page,
+			_marker: PhantomData,
+		})
 	}
 
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
@@ -317,7 +324,12 @@ impl PageCacheApi for PageCache {
 		let page = unsafe { self.buf.get_page_mut(index) }
 			.expect("Triet to index page buffer out of bounds!");
 
-		PageWriteGuard { index, lock, page }
+		PageWriteGuard {
+			index,
+			lock,
+			page,
+			_marker: PhantomData,
+		}
 	}
 
 	fn scrap(&self, page_id: PageId) {
@@ -342,7 +354,11 @@ impl PageCacheApi for PageCache {
 			.expect("Got out of bounds buffer index while upgrading guard");
 
 		mem::forget(guard);
-		PageReadGuard { page, lock }
+		PageReadGuard {
+			page,
+			lock,
+			_marker: PhantomData,
+		}
 	}
 }
 
