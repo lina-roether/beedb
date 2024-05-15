@@ -1,3 +1,5 @@
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -20,6 +22,8 @@ use physical::{PhysicalStorage, PhysicalStorageApi, PhysicalStorageConfig};
 
 use wal::{Wal, WalApi, WalConfig};
 
+use self::cache::PageWriteGuard;
+
 mod cache;
 mod physical;
 mod wal;
@@ -38,6 +42,99 @@ pub(crate) struct PageStorageConfig {
 	pub physical_storage: PhysicalStorageConfig,
 	pub page_cache: PageCacheConfig,
 	pub wal: WalConfig,
+}
+
+pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
+	id: u64,
+	locks: HashMap<PageId, PC::WriteGuard<'a>>,
+	storage: &'a PageStorage<PS, PC, W>,
+}
+
+impl<'a, PS, PC, W> Transaction<'a, PS, PC, W>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
+	fn new(id: u64, storage: &'a PageStorage<PS, PC, W>) -> Self {
+		Self {
+			id,
+			storage,
+			locks: HashMap::new(),
+		}
+	}
+
+	fn acquire_lock(&mut self, page_id: PageId) -> Result<(), StorageError> {
+		if let Entry::Vacant(e) = self.locks.entry(page_id) {
+			let guard = self.storage.load_into_cache(page_id)?;
+			e.insert(guard);
+		}
+		Ok(())
+	}
+}
+
+#[cfg_attr(test, automock)]
+pub(crate) trait TransactionApi {
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
+	fn commit(self) -> Result<(), StorageError>;
+	fn undo(self) -> Result<(), StorageError>;
+}
+
+impl<'a, PS, PC, W> TransactionApi for Transaction<'a, PS, PC, W>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		if let Some(guard) = self.locks.get(&page_id) {
+			buf.copy_from_slice(&guard[offset..offset + buf.len()]);
+		} else {
+			buf.copy_from_slice(&self.storage.read(page_id)?[offset..offset + buf.len()]);
+		}
+		Ok(())
+	}
+
+	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
+		self.acquire_lock(page_id)?;
+		let guard = self.locks.get_mut(&page_id).unwrap();
+		let mut from: Box<[u8]> = vec![0; buf.len()].into();
+		from.copy_from_slice(&guard[offset..offset + buf.len()]);
+
+		self.storage.wal.log_write(wal::WriteLog {
+			transaction_id: self.id,
+			page_id,
+			offset: u16::try_from(offset).expect("Write offset must be 16-bit!"),
+			from: &from,
+			to: buf,
+		})?;
+
+		guard[offset..offset + buf.len()].copy_from_slice(buf);
+		Ok(())
+	}
+
+	fn commit(self) -> Result<(), StorageError> {
+		self.storage.wal.log_commit(wal::CommitLog {
+			transaction_id: self.id,
+		})?;
+		Ok(())
+	}
+
+	fn undo(self) -> Result<(), StorageError> {
+		self.storage.wal.undo(self.id, |write_op| {
+			let Some(guard) = self.locks.get(&write_op.page_id) else {
+				panic!("An undo operation tried to undo a write to a page that the transaction did not access!");
+			};
+			todo!("Need to remember the WAL index for write operations");
+			Ok(())
+		})
+	}
 }
 
 #[derive(Debug)]
