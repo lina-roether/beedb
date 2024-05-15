@@ -1,7 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::ops::Deref;
-use std::ops::DerefMut;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -9,9 +9,12 @@ use thiserror::Error;
 #[cfg(test)]
 use mockall::automock;
 
-use crate::files::segment::PAGE_BODY_SIZE;
+#[cfg(test)]
+use crate::storage::cache::{MockPageReadGuardApi, MockPageWriteGuardApi};
+
 use crate::files::DatabaseFolder;
 use crate::files::FileError;
+use crate::storage::cache::PageWriteGuardApi;
 
 pub(crate) use crate::files::PageId;
 use crate::files::TransactionState;
@@ -22,7 +25,9 @@ use physical::{PhysicalStorage, PhysicalStorageApi, PhysicalStorageConfig};
 
 use wal::{Wal, WalApi, WalConfig};
 
-use self::cache::PageWriteGuard;
+use self::cache::PageReadGuardApi;
+use self::physical::ReadOp;
+use self::physical::WriteOp;
 
 mod cache;
 mod physical;
@@ -94,9 +99,9 @@ where
 {
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
 		if let Some(guard) = self.locks.get(&page_id) {
-			buf.copy_from_slice(&guard[offset..offset + buf.len()]);
+			guard.read(offset, buf);
 		} else {
-			buf.copy_from_slice(&self.storage.read(page_id)?[offset..offset + buf.len()]);
+			self.storage.read_guard(page_id)?.read(offset, buf);
 		}
 		Ok(())
 	}
@@ -105,9 +110,9 @@ where
 		self.acquire_lock(page_id)?;
 		let guard = self.locks.get_mut(&page_id).unwrap();
 		let mut from: Box<[u8]> = vec![0; buf.len()].into();
-		from.copy_from_slice(&guard[offset..offset + buf.len()]);
+		guard.read(0, &mut from);
 
-		self.storage.wal.log_write(wal::WriteLog {
+		let wal_index = self.storage.wal.log_write(wal::WriteLog {
 			transaction_id: self.id,
 			page_id,
 			offset: u16::try_from(offset).expect("Write offset must be 16-bit!"),
@@ -115,7 +120,7 @@ where
 			to: buf,
 		})?;
 
-		guard[offset..offset + buf.len()].copy_from_slice(buf);
+		guard.write(offset, buf, wal_index);
 		Ok(())
 	}
 
@@ -126,12 +131,12 @@ where
 		Ok(())
 	}
 
-	fn undo(self) -> Result<(), StorageError> {
+	fn undo(mut self) -> Result<(), StorageError> {
 		self.storage.wal.undo(self.id, |write_op| {
-			let Some(guard) = self.locks.get(&write_op.page_id) else {
+			let Some(guard) = self.locks.get_mut(&write_op.page_id) else {
 				panic!("An undo operation tried to undo a write to a page that the transaction did not access!");
 			};
-			todo!("Need to remember the WAL index for write operations");
+			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
 			Ok(())
 		})
 	}
@@ -147,6 +152,7 @@ where
 	physical: PS,
 	cache: PC,
 	wal: W,
+	transaction_counter: AtomicU64,
 }
 
 impl PageStorage {
@@ -184,34 +190,48 @@ where
 			physical,
 			cache,
 			wal,
+			transaction_counter: AtomicU64::new(0),
 		}
 	}
 
 	fn load_into_cache(&self, page_id: PageId) -> Result<PC::WriteGuard<'_>, StorageError> {
 		let mut guard = self.cache.store(page_id);
-		if let Err(error) = self.physical.read(page_id, &mut guard) {
+		if let Err(error) = self.physical.read(ReadOp {
+			page_id,
+			buf: guard.body_mut(),
+		}) {
 			self.cache.scrap(page_id);
 			return Err(error);
 		}
 		Ok(guard)
 	}
+
+	fn read_guard(&self, page_id: PageId) -> Result<PC::ReadGuard<'_>, StorageError> {
+		let guard = self.load_into_cache(page_id)?;
+		Ok(self.cache.downgrade_guard(guard))
+	}
 }
 
 #[cfg_attr(test, automock(
-    type ReadGuard<'a> = &'a [u8];
-    type WriteGuard<'a> = &'a mut [u8];
+    type ReadGuard<'a> = MockPageReadGuardApi;
+    type WriteGuard<'a> = MockPageWriteGuardApi;
+    type Transaction<'a> = MockTransactionApi;
 ))]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait PageStorageApi {
-	type ReadGuard<'a>: Deref<Target = [u8]> + 'a
+	type ReadGuard<'a>: PageReadGuardApi + 'a
 	where
 		Self: 'a;
-	type WriteGuard<'a>: Deref<Target = [u8]> + DerefMut + 'a
+	type WriteGuard<'a>: PageWriteGuardApi + 'a
+	where
+		Self: 'a;
+	type Transaction<'a>: TransactionApi + 'a
 	where
 		Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError>;
-	fn read<'a>(&'a self, page_id: PageId) -> Result<Self::ReadGuard<'a>, StorageError>;
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	fn transaction<'a>(&'a self) -> Self::Transaction<'a>;
 }
 
 impl<PS, PC, W> PageStorageApi for PageStorage<PS, PC, W>
@@ -222,23 +242,32 @@ where
 {
 	type ReadGuard<'a> = PC::ReadGuard<'a> where Self: 'a;
 	type WriteGuard<'a> = PC::WriteGuard<'a> where Self: 'a;
+	type Transaction<'a> = Transaction<'a, PS, PC, W> where Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError> {
 		self.wal.recover(|write_op| {
-			// TODO: This can probably be abstracted to use the page cache somehow
-			let mut page = [0; PAGE_BODY_SIZE];
-			self.physical.read(write_op.page_id, &mut page)?;
-			page[write_op.offset as usize..write_op.offset as usize + write_op.buf.len()]
-				.copy_from_slice(write_op.buf);
-			self.physical
-				.write(write_op.page_id, write_op.buf, write_op.index)?;
+			let mut guard = self.load_into_cache(write_op.page_id)?;
+			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
+			self.physical.write(WriteOp {
+				wal_index: write_op.index,
+				page_id: write_op.page_id,
+				buf: guard.body(),
+			})?;
 			Ok(())
 		})
 	}
 
-	fn read(&self, page_id: PageId) -> Result<Self::ReadGuard<'_>, StorageError> {
-		let guard = self.load_into_cache(page_id)?;
-		Ok(self.cache.downgrade_guard(guard))
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		self.read_guard(page_id)?.read(offset, buf);
+		Ok(())
+	}
+
+	fn transaction(&self) -> Transaction<'_, PS, PC, W> {
+		let transaction_id = self.transaction_counter.load(Ordering::Acquire);
+		// FIXME: This can theoretically lead to duplicate transaction ids.
+		self.transaction_counter
+			.store(transaction_id.wrapping_add(1), Ordering::Release);
+		Transaction::new(transaction_id, self)
 	}
 }
 

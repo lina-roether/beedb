@@ -42,7 +42,7 @@ impl Default for PageCacheConfig {
 
 #[derive(Debug, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
-struct BufferedPageHeader {
+pub(crate) struct BufferedPageHeader {
 	wal_generation: u64,
 	wal_offset: u64,
 	dirty: u8,
@@ -57,23 +57,23 @@ impl BufferedPageHeader {
 		}
 	}
 
-	fn wal_index(&self) -> WalIndex {
+	pub fn wal_index(&self) -> WalIndex {
 		WalIndex::new(
 			self.wal_generation,
 			NonZeroU64::new(self.wal_offset).expect("Buffered page header corrupted!"),
 		)
 	}
 
-	fn set_wal_index(&mut self, index: WalIndex) {
+	pub fn set_wal_index(&mut self, index: WalIndex) {
 		self.wal_offset = index.offset.get();
 		self.wal_generation = index.generation;
 	}
 
-	fn dirty(&self) -> bool {
+	pub fn dirty(&self) -> bool {
 		self.dirty != 0
 	}
 
-	fn set_dirty(&mut self, dirty: bool) {
+	pub fn set_dirty(&mut self, dirty: bool) {
 		self.dirty = dirty as u8
 	}
 }
@@ -203,16 +203,11 @@ pub(crate) struct PageWriteGuard<'a> {
 	_marker: PhantomData<RwLockReadGuard<'a, [u8]>>,
 }
 
-impl<'a> PageWriteGuard<'a> {
-	fn body_mut(&mut self) -> &mut [u8] {
-		&mut self.page[HEADER_SIZE..]
-	}
-}
-
 #[cfg_attr(test, automock)]
 pub(crate) trait PageWriteGuardApi {
 	fn header(&self) -> &BufferedPageHeader;
 	fn body(&self) -> &[u8];
+	fn body_mut(&mut self) -> &mut [u8];
 	fn header_mut(&mut self) -> &mut BufferedPageHeader;
 	fn read(&self, offset: usize, buf: &mut [u8]);
 	fn write(&mut self, offset: usize, buf: &[u8], wal_index: WalIndex);
@@ -229,6 +224,10 @@ impl<'a> PageWriteGuardApi for PageWriteGuard<'a> {
 
 	fn body(&self) -> &[u8] {
 		&self.page[HEADER_SIZE..]
+	}
+
+	fn body_mut(&mut self) -> &mut [u8] {
+		&mut self.page[HEADER_SIZE..]
 	}
 
 	fn read(&self, offset: usize, buf: &mut [u8]) {
