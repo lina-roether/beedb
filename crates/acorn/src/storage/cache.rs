@@ -554,7 +554,7 @@ mod tests {
 	fn evict_correct_page() {
 		// given
 		let cache = PageCache::new(&PageCacheConfig {
-			page_cache_size: 4 * PAGE_BODY_SIZE,
+			page_cache_size: 4 * BUFFERED_PAGE_SIZE,
 		});
 
 		// when
@@ -582,7 +582,7 @@ mod tests {
 	fn doesnt_evict_locked_page() {
 		// given
 		let cache = PageCache::new(&PageCacheConfig {
-			page_cache_size: 4 * PAGE_BODY_SIZE,
+			page_cache_size: 4 * BUFFERED_PAGE_SIZE,
 		});
 
 		// when
