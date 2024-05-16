@@ -321,7 +321,7 @@ mod tests {
 				guard
 					.expect_body_mut()
 					.returning(|| vec![0; PAGE_BODY_SIZE]);
-				guard.expect_body().return_const(vec![0; PAGE_BODY_SIZE]);
+				guard.expect_body().return_const(vec![10; PAGE_BODY_SIZE]);
 				guard
 					.expect_write()
 					.with(eq(10), eq([1, 2, 3]), eq(wal_index!(69, 420)));
@@ -343,8 +343,9 @@ mod tests {
 			.withf(|write_op| {
 				write_op.wal_index == wal_index!(69, 420)
 					&& write_op.page_id == page_id!(1, 2)
-					&& write_op.buf[10..13] == [1, 2, 3]
-			});
+					&& write_op.buf == [10; PAGE_BODY_SIZE]
+			})
+			.returning(|_| Ok(()));
 		cache
 			.expect_store()
 			.once()
@@ -355,7 +356,7 @@ mod tests {
 				guard
 					.expect_body_mut()
 					.returning(|| vec![0; PAGE_BODY_SIZE]);
-				guard.expect_body().return_const(vec![0; PAGE_BODY_SIZE]);
+				guard.expect_body().return_const(vec![20; PAGE_BODY_SIZE]);
 				guard
 					.expect_write()
 					.with(eq(12), eq([2, 2, 1]), eq(wal_index!(10, 24)));
@@ -377,8 +378,9 @@ mod tests {
 			.withf(|write_op| {
 				write_op.wal_index == wal_index!(10, 24)
 					&& write_op.page_id == page_id!(4, 5)
-					&& write_op.buf[12..15] == [2, 2, 1]
-			});
+					&& write_op.buf == [20; PAGE_BODY_SIZE]
+			})
+			.returning(|_| Ok(()));
 		// given
 		let page_storage = PageStorage::new(physical, cache, wal);
 
