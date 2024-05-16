@@ -274,6 +274,7 @@ where
 #[cfg(test)]
 mod tests {
 	use mockall::{predicate::*, Sequence};
+	use pretty_assertions::assert_buf_eq;
 
 	use crate::files::segment::PAGE_BODY_SIZE;
 
@@ -386,6 +387,64 @@ mod tests {
 
 		// when
 		page_storage.recover().unwrap();
+	}
+
+	#[test]
+	fn read() {
+		// expect
+		let mut physical = MockPhysicalStorageApi::new();
+		let mut cache = MockPageCacheApi::new();
+		let wal = MockWalApi::new();
+		let mut seq = Sequence::new();
+		cache
+			.expect_store()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(69, 420)))
+			.returning(|_| {
+				let mut guard = MockPageWriteGuardApi::new();
+				guard
+					.expect_body_mut()
+					.returning(|| vec![0; PAGE_BODY_SIZE]);
+				guard
+			});
+		physical
+			.expect_read()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|read_op| read_op.page_id == page_id!(69, 420))
+			.returning(|read_op| {
+				read_op
+					.buf
+					.iter_mut()
+					.enumerate()
+					.for_each(|(i, b)| *b = i as u8);
+				Ok(wal_index!(1, 2))
+			});
+		cache
+			.expect_downgrade_guard()
+			.once()
+			.in_sequence(&mut seq)
+			.returning(|_| {
+				let mut guard = MockPageReadGuardApi::new();
+				guard
+					.expect_read()
+					.with(eq(10), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[10, 11, 12, 13, 14]);
+					});
+				guard
+			});
+
+		// given
+		let storage = PageStorage::new(physical, cache, wal);
+
+		// when
+		let mut buf = [0; 5];
+		storage.read(page_id!(69, 420), 10, &mut buf).unwrap();
+
+		// then
+		assert_buf_eq!(buf, [10, 11, 12, 13, 14]);
 	}
 }
 
