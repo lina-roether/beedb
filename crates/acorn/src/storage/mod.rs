@@ -110,7 +110,7 @@ where
 		self.acquire_lock(page_id)?;
 		let guard = self.locks.get_mut(&page_id).unwrap();
 		let mut from: Box<[u8]> = vec![0; buf.len()].into();
-		guard.read(0, &mut from);
+		guard.read(offset, &mut from);
 
 		let wal_index = self.storage.wal.log_write(wal::WriteLog {
 			transaction_id: self.id,
@@ -275,6 +275,7 @@ where
 mod tests {
 	use mockall::{predicate::*, Sequence};
 	use pretty_assertions::assert_buf_eq;
+	use tests::wal::{CommitLog, WriteLog};
 
 	use crate::files::segment::PAGE_BODY_SIZE;
 
@@ -445,6 +446,89 @@ mod tests {
 
 		// then
 		assert_buf_eq!(buf, [10, 11, 12, 13, 14]);
+	}
+
+	#[test]
+	fn transaction() {
+		// expect
+		let mut physical = MockPhysicalStorageApi::new();
+		let mut cache = MockPageCacheApi::new();
+		let mut wal = MockWalApi::new();
+
+		let mut seq = Sequence::new();
+		cache
+			.expect_store()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(1, 2)))
+			.returning(|_| {
+				let mut guard = MockPageWriteGuardApi::new();
+				let mut seq = Sequence::new();
+				guard
+					.expect_body_mut()
+					.once()
+					.in_sequence(&mut seq)
+					.returning(|| vec![0; PAGE_BODY_SIZE]);
+				guard
+					.expect_read()
+					.once()
+					.in_sequence(&mut seq)
+					.with(eq(10), always())
+					.returning(|_, buf| buf.copy_from_slice(&[69, 25]));
+				guard.expect_write().once().in_sequence(&mut seq).with(
+					eq(10),
+					eq([1, 2]),
+					eq(wal_index!(24, 25)),
+				);
+				guard
+					.expect_read()
+					.once()
+					.in_sequence(&mut seq)
+					.with(eq(10), always())
+					.returning(|_, buf| buf.copy_from_slice(&[1, 2]));
+				guard
+			});
+		physical
+			.expect_read()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|read_op| read_op.page_id == page_id!(1, 2))
+			.returning(|read_op| {
+				read_op.buf.fill(0);
+				Ok(wal_index!(69, 420))
+			});
+		wal.expect_log_write()
+			.once()
+			.in_sequence(&mut seq)
+			.withf(|write_log| {
+				*write_log
+					== WriteLog {
+						transaction_id: 0,
+						page_id: page_id!(1, 2),
+						offset: 10,
+						from: &[69, 25],
+						to: &[1, 2],
+					}
+			})
+			.returning(|_| Ok(wal_index!(24, 25)));
+		wal.expect_log_commit()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(CommitLog { transaction_id: 0 }))
+			.returning(|_| Ok(wal_index!(24, 25)));
+
+		// given
+		let storage = PageStorage::new(physical, cache, wal);
+
+		// when
+		let mut t = storage.transaction();
+		t.write(page_id!(1, 2), 10, &[1, 2]).unwrap();
+		let mut received = [0; 2];
+		t.read(page_id!(1, 2), 10, &mut received).unwrap();
+		t.commit().unwrap();
+
+		// then
+		assert_buf_eq!(received, [1, 2]);
 	}
 }
 

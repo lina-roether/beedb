@@ -42,7 +42,7 @@ pub(crate) struct PartialWriteOp<'a> {
 	pub buf: &'a [u8],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteLog<'a> {
 	pub transaction_id: u64,
 	pub page_id: PageId,
@@ -59,7 +59,7 @@ struct UndoLog<'a> {
 	to: Cow<'a, [u8]>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitLog {
 	pub transaction_id: u64,
 }
