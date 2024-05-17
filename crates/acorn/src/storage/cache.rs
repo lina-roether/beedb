@@ -346,6 +346,19 @@ impl PageCache {
 		}
 	}
 
+	fn get_load_index(&self, page_id: PageId) -> Option<usize> {
+		let indices = self.indices.read();
+		let index = indices.get(&page_id).copied()?;
+		mem::drop(indices);
+
+		let replacer = self.replacer.read();
+		let access_successful = replacer.access(&page_id);
+		debug_assert!(access_successful);
+		mem::drop(replacer);
+
+		Some(index)
+	}
+
 	fn load_direct(&self, index: usize) -> PageReadGuard<'_> {
 		let lock = &self.locks[index];
 		lock.lock_shared();
@@ -361,7 +374,7 @@ impl PageCache {
 		}
 	}
 
-	fn store_direct(&self, index: usize) -> PageWriteGuard<'_> {
+	fn load_mut_direct(&self, index: usize) -> PageWriteGuard<'_> {
 		let lock = &self.locks[index];
 		lock.lock_exclusive();
 		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
@@ -393,6 +406,7 @@ pub(crate) trait PageCacheApi {
 
 	fn has_page(&self, page_id: PageId) -> bool;
 	fn load<'a>(&'a self, page_id: PageId) -> Option<Self::ReadGuard<'a>>;
+	fn load_mut<'a>(&'a self, page_id: PageId) -> Option<Self::WriteGuard<'a>>;
 	fn store<'a>(&'a self, page_id: PageId) -> Self::WriteGuard<'a>;
 	fn scrap(&self, page_id: PageId);
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
@@ -413,16 +427,13 @@ impl PageCacheApi for PageCache {
 	}
 
 	fn load(&self, page_id: PageId) -> Option<PageReadGuard<'_>> {
-		let indices = self.indices.read();
-		let index = indices.get(&page_id).copied()?;
-		mem::drop(indices);
-
-		let replacer = self.replacer.read();
-		let access_successful = replacer.access(&page_id);
-		debug_assert!(access_successful);
-		mem::drop(replacer);
-
+		let index = self.get_load_index(page_id)?;
 		Some(self.load_direct(index))
+	}
+
+	fn load_mut(&self, page_id: PageId) -> Option<Self::WriteGuard<'_>> {
+		let index = self.get_load_index(page_id)?;
+		Some(self.load_mut_direct(index))
 	}
 
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
@@ -431,7 +442,7 @@ impl PageCacheApi for PageCache {
 		mem::drop(dirty_list);
 
 		let index = self.get_store_index(page_id);
-		self.store_direct(index)
+		self.load_mut_direct(index)
 	}
 
 	fn scrap(&self, page_id: PageId) {

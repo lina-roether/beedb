@@ -81,7 +81,7 @@ where
 
 	fn acquire_lock(&mut self, page_id: PageId) -> Result<(), StorageError> {
 		if let Entry::Vacant(e) = self.locks.entry(page_id) {
-			let guard = self.storage.load_into_cache(page_id)?;
+			let guard = self.storage.write_guard(page_id)?;
 			e.insert(guard);
 		}
 		Ok(())
@@ -273,8 +273,18 @@ where
 	}
 
 	fn read_guard(&self, page_id: PageId) -> Result<PC::ReadGuard<'_>, StorageError> {
+		if let Some(guard) = self.cache.load(page_id) {
+			return Ok(guard);
+		}
 		let guard = self.load_into_cache(page_id)?;
 		Ok(self.cache.downgrade_guard(guard))
+	}
+
+	fn write_guard(&self, page_id: PageId) -> Result<PC::WriteGuard<'_>, StorageError> {
+		if let Some(guard) = self.cache.load_mut(page_id) {
+			return Ok(guard);
+		}
+		self.load_into_cache(page_id)
 	}
 }
 
@@ -312,7 +322,7 @@ where
 
 	fn recover(&self) -> Result<(), StorageError> {
 		self.wal.recover(&mut |write_op| {
-			let mut guard = self.load_into_cache(write_op.page_id)?;
+			let mut guard = self.write_guard(write_op.page_id)?;
 			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
 			self.physical.write(WriteOp {
 				wal_index: write_op.index,
@@ -379,6 +389,12 @@ mod tests {
 		let mut seq = Sequence::new();
 
 		cache
+			.expect_load_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(1, 2)))
+			.returning(|_| None);
+		cache
 			.expect_store()
 			.once()
 			.in_sequence(&mut seq)
@@ -414,7 +430,7 @@ mod tests {
 			})
 			.returning(|_| Ok(()));
 		cache
-			.expect_store()
+			.expect_load_mut()
 			.once()
 			.in_sequence(&mut seq)
 			.with(eq(page_id!(4, 5)))
@@ -427,16 +443,7 @@ mod tests {
 				guard
 					.expect_write()
 					.with(eq(12), eq([2, 2, 1]), eq(wal_index!(10, 24)));
-				guard
-			});
-		physical
-			.expect_read()
-			.once()
-			.in_sequence(&mut seq)
-			.withf(|read_op| read_op.page_id == page_id!(4, 5))
-			.returning(|read_op| {
-				read_op.buf.fill(0);
-				Ok(wal_index!(10, 24))
+				Some(guard)
 			});
 		physical
 			.expect_write()
@@ -462,6 +469,12 @@ mod tests {
 		let mut cache = MockPageCacheApi::new();
 		let wal = MockWalApi::new();
 		let mut seq = Sequence::new();
+		cache
+			.expect_load()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(69, 420)))
+			.returning(|_| None);
 		cache
 			.expect_store()
 			.once()
@@ -521,6 +534,12 @@ mod tests {
 		let mut wal = MockWalApi::new();
 
 		let mut seq = Sequence::new();
+		cache
+			.expect_load_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(1, 2)))
+			.returning(|_| None);
 		cache
 			.expect_store()
 			.once()
