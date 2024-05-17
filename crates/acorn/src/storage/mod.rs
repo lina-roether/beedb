@@ -38,6 +38,9 @@ pub(crate) enum StorageError {
 	#[error("The WAL was never initialized!")]
 	WalNotInitialized,
 
+	#[error("The maximum number of in-flight transactions has been reached")]
+	TransactionLimitReached,
+
 	#[error(transparent)]
 	File(#[from] FileError),
 }
@@ -58,6 +61,7 @@ where
 	id: u64,
 	locks: HashMap<PageId, PC::WriteGuard<'a>>,
 	storage: &'a PageStorage<PS, PC, W>,
+	completed: bool,
 }
 
 impl<'a, PS, PC, W> Transaction<'a, PS, PC, W>
@@ -71,6 +75,7 @@ where
 			id,
 			storage,
 			locks: HashMap::new(),
+			completed: false,
 		}
 	}
 
@@ -81,10 +86,38 @@ where
 		}
 		Ok(())
 	}
+
+	fn undo_impl(&mut self) -> Result<(), StorageError> {
+		self.storage.wal.undo(self.id, |write_op| {
+			let Some(guard) = self.locks.get_mut(&write_op.page_id) else {
+				panic!("An undo operation tried to undo a write to a page that the transaction did not access!");
+			};
+			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
+			Ok(())
+		})?;
+		self.storage.transaction_enumerator.end();
+		Ok(())
+	}
+}
+
+impl<'a, PS, PC, W> Drop for Transaction<'a, PS, PC, W>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
+	fn drop(&mut self) {
+		if !self.completed {
+			eprintln!("WARNING: A transaction was dropped without being completed!");
+			self.undo_impl()
+				.expect("A transaction was dropped without being completed, and failed to undo!");
+		}
+	}
 }
 
 #[cfg_attr(test, automock)]
 pub(crate) trait TransactionApi {
+	fn id(&self) -> u64;
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
 	fn commit(self) -> Result<(), StorageError>;
@@ -97,6 +130,10 @@ where
 	PC: PageCacheApi,
 	W: WalApi,
 {
+	fn id(&self) -> u64 {
+		self.id
+	}
+
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
 		if let Some(guard) = self.locks.get(&page_id) {
 			guard.read(offset, buf);
@@ -124,21 +161,50 @@ where
 		Ok(())
 	}
 
-	fn commit(self) -> Result<(), StorageError> {
+	fn commit(mut self) -> Result<(), StorageError> {
 		self.storage.wal.log_commit(wal::CommitLog {
 			transaction_id: self.id,
 		})?;
+		self.storage.transaction_enumerator.end();
+		self.completed = true;
 		Ok(())
 	}
 
 	fn undo(mut self) -> Result<(), StorageError> {
-		self.storage.wal.undo(self.id, |write_op| {
-			let Some(guard) = self.locks.get_mut(&write_op.page_id) else {
-				panic!("An undo operation tried to undo a write to a page that the transaction did not access!");
-			};
-			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
-			Ok(())
-		})
+		self.undo_impl()?;
+		self.completed = true;
+		Ok(())
+	}
+}
+
+#[derive(Debug)]
+struct TransactionEnumerator {
+	next_id: AtomicU64,
+	num_transactions: AtomicU64,
+}
+
+impl TransactionEnumerator {
+	fn new() -> Self {
+		Self {
+			next_id: AtomicU64::new(0),
+			num_transactions: AtomicU64::new(0),
+		}
+	}
+
+	fn begin(&self) -> Option<u64> {
+		let num_transactions = self.num_transactions.load(Ordering::Acquire);
+		let num_transactions = num_transactions.checked_add(1)?;
+		self.num_transactions
+			.store(num_transactions, Ordering::Release);
+		let id = self.next_id.load(Ordering::Acquire);
+		self.next_id.store(id.wrapping_add(1), Ordering::Release);
+		Some(id)
+	}
+
+	fn end(&self) {
+		let num_transactions = self.num_transactions.load(Ordering::Acquire);
+		self.num_transactions
+			.store(num_transactions.saturating_sub(1), Ordering::Release);
 	}
 }
 
@@ -152,7 +218,7 @@ where
 	physical: PS,
 	cache: PC,
 	wal: W,
-	transaction_counter: AtomicU64,
+	transaction_enumerator: TransactionEnumerator,
 }
 
 impl PageStorage {
@@ -190,7 +256,7 @@ where
 			physical,
 			cache,
 			wal,
-			transaction_counter: AtomicU64::new(0),
+			transaction_enumerator: TransactionEnumerator::new(),
 		}
 	}
 
@@ -231,7 +297,7 @@ pub(crate) trait PageStorageApi {
 
 	fn recover(&self) -> Result<(), StorageError>;
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
-	fn transaction<'a>(&'a self) -> Self::Transaction<'a>;
+	fn transaction<'a>(&'a self) -> Result<Self::Transaction<'a>, StorageError>;
 }
 
 impl<PS, PC, W> PageStorageApi for PageStorage<PS, PC, W>
@@ -262,12 +328,11 @@ where
 		Ok(())
 	}
 
-	fn transaction(&self) -> Transaction<'_, PS, PC, W> {
-		let transaction_id = self.transaction_counter.load(Ordering::Acquire);
-		// FIXME: This can theoretically lead to duplicate transaction ids.
-		self.transaction_counter
-			.store(transaction_id.wrapping_add(1), Ordering::Release);
-		Transaction::new(transaction_id, self)
+	fn transaction(&self) -> Result<Transaction<'_, PS, PC, W>, StorageError> {
+		let Some(transaction_id) = self.transaction_enumerator.begin() else {
+			return Err(StorageError::TransactionLimitReached);
+		};
+		Ok(Transaction::new(transaction_id, self))
 	}
 }
 
@@ -521,7 +586,7 @@ mod tests {
 		let storage = PageStorage::new(physical, cache, wal);
 
 		// when
-		let mut t = storage.transaction();
+		let mut t = storage.transaction().unwrap();
 		t.write(page_id!(1, 2), 10, &[1, 2]).unwrap();
 		let mut received = [0; 2];
 		t.read(page_id!(1, 2), 10, &mut received).unwrap();
