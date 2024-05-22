@@ -4,7 +4,7 @@ use std::{
 	marker::PhantomData,
 	mem,
 	num::NonZeroU64,
-	ptr,
+	ptr::{self, NonNull},
 	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -82,7 +82,7 @@ const HEADER_SIZE: usize = mem::size_of::<BufferedPageHeader>();
 const BUFFERED_PAGE_SIZE: usize = PAGE_BODY_SIZE + HEADER_SIZE;
 
 struct PageBuffer {
-	buf: *mut u8,
+	buf: Option<NonNull<u8>>,
 	num_pages: usize,
 	num_filled: AtomicUsize,
 }
@@ -98,7 +98,7 @@ impl PageBuffer {
 			ptr::null_mut()
 		};
 		Self {
-			buf,
+			buf: NonNull::new(buf),
 			num_pages,
 			num_filled: AtomicUsize::new(0),
 		}
@@ -113,12 +113,12 @@ impl PageBuffer {
 		Some(num_filled)
 	}
 
-	fn page_ptr(&self, index: usize) -> Option<*mut u8> {
+	fn page_ptr(&self, index: usize) -> Option<NonNull<u8>> {
 		if index >= self.num_pages {
 			return None;
 		}
 		// Safety: the resulting pointer is guaranteed to be in the allocated buffer.
-		Some(unsafe { self.buf.add(index * BUFFERED_PAGE_SIZE) })
+		Some(unsafe { self.buf?.add(index * BUFFERED_PAGE_SIZE) })
 	}
 
 	/// # Safety:
@@ -126,7 +126,7 @@ impl PageBuffer {
 	/// exists.
 	unsafe fn get_page(&self, index: usize) -> Option<&[u8]> {
 		Some(std::slice::from_raw_parts(
-			self.page_ptr(index)?,
+			self.page_ptr(index)?.as_ptr(),
 			BUFFERED_PAGE_SIZE,
 		))
 	}
@@ -136,7 +136,7 @@ impl PageBuffer {
 	/// references to the same page exist.
 	unsafe fn get_page_mut(&self, index: usize) -> Option<&mut [u8]> {
 		Some(std::slice::from_raw_parts_mut(
-			self.page_ptr(index)?,
+			self.page_ptr(index)?.as_ptr(),
 			BUFFERED_PAGE_SIZE,
 		))
 	}
@@ -144,14 +144,14 @@ impl PageBuffer {
 
 impl Drop for PageBuffer {
 	fn drop(&mut self) {
-		if !self.buf.is_null() {
+		if let Some(buf) = self.buf {
 			let buf_size = self.num_pages * BUFFERED_PAGE_SIZE;
 			// Safety:
 			// - `self.buf` is guaranteed not to be null
 			// - The buffer is never reallocated, so the layout stays the same
 			unsafe {
 				dealloc(
-					self.buf,
+					buf.as_ptr(),
 					Layout::from_size_align(buf_size, mem::align_of::<BufferedPageHeader>())
 						.unwrap(),
 				)
