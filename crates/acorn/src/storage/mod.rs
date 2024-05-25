@@ -58,8 +58,8 @@ pub(crate) struct PageStorageConfig {
 
 pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal, T = TaskRunner>
 where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
+	PS: PhysicalStorageApi + Send + Sync + 'static,
+	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
 	T: TaskRunnerApi,
 {
@@ -71,8 +71,8 @@ where
 
 impl<'a, PS, PC, W, T> Transaction<'a, PS, PC, W, T>
 where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
+	PS: PhysicalStorageApi + Send + Sync + 'static,
+	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
 	T: TaskRunnerApi,
 {
@@ -111,8 +111,8 @@ where
 
 impl<'a, PS, PC, W, T> Drop for Transaction<'a, PS, PC, W, T>
 where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
+	PS: PhysicalStorageApi + Send + Sync + 'static,
+	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
 	T: TaskRunnerApi,
 {
@@ -136,8 +136,8 @@ pub(crate) trait TransactionApi {
 
 impl<'a, PS, PC, W, T> TransactionApi for Transaction<'a, PS, PC, W, T>
 where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
+	PS: PhysicalStorageApi + Send + Sync + 'static,
+	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
 	T: TaskRunnerApi,
 {
@@ -333,12 +333,13 @@ pub(crate) trait PageStorageApi {
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 	fn transaction<'a>(&'a self) -> Result<Self::Transaction<'a>, StorageError>;
 	fn checkpoint(&self);
+	fn flush(&self);
 }
 
 impl<PS, PC, W, T> PageStorageApi for PageStorage<PS, PC, W, T>
 where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
+	PS: PhysicalStorageApi + Send + Sync + 'static,
+	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
 	T: TaskRunnerApi,
 {
@@ -383,6 +384,23 @@ where
 				retries: 3,
 			},
 		)
+	}
+
+	fn flush(&self) {
+		let wal = Arc::clone(&self.wal);
+		let physical = Arc::clone(&self.physical);
+		let cache = Arc::clone(&self.cache);
+		self.task_runner.run_fallible(
+			move || {
+				cache.flush(|op| physical.write(op))?;
+				wal.did_flush();
+				Ok(())
+			},
+			FailureStrategy {
+				fatal: false,
+				retries: 3,
+			},
+		);
 	}
 }
 
