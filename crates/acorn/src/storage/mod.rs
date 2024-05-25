@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use log::warn;
 use thiserror::Error;
 
 #[cfg(test)]
@@ -108,7 +109,7 @@ where
 {
 	fn drop(&mut self) {
 		if !self.completed {
-			eprintln!("WARNING: A transaction was dropped without being completed!");
+			warn!("A transaction was dropped without being completed!");
 			self.undo_impl()
 				.expect("A transaction was dropped without being completed, and failed to undo!");
 		}
