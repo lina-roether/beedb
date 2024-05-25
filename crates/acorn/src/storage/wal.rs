@@ -2,7 +2,10 @@ use std::{
 	borrow::{Borrow, Cow},
 	collections::{hash_map::Entry, HashMap, VecDeque},
 	mem,
-	sync::Arc,
+	sync::{
+		atomic::{AtomicBool, Ordering},
+		Arc,
+	},
 };
 
 #[cfg(test)]
@@ -69,6 +72,7 @@ pub(crate) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
 	generations: RwLock<GenerationQueue<DF>>,
 	state: Mutex<State>,
 	max_generation_size: usize,
+	should_checkpoint: AtomicBool,
 }
 assert_impl_all!(Wal: Send, Sync);
 
@@ -107,6 +111,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 			generations: RwLock::new(generations),
 			state: Mutex::new(state),
 			max_generation_size: config.max_generation_size,
+			should_checkpoint: AtomicBool::new(false),
 		}
 	}
 
@@ -317,8 +322,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		wal_file.push_item(item)?;
 
 		if wal_file.size() >= self.max_generation_size {
-			mem::drop(wal_file);
-			self.checkpoint()?;
+			self.should_checkpoint.store(true, Ordering::Relaxed);
 		}
 
 		Ok(index)
@@ -384,6 +388,8 @@ pub(crate) trait WalApi {
 	where
 		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>;
 
+	fn should_checkpoint(&self) -> bool;
+
 	fn checkpoint(&self) -> Result<(), StorageError>;
 
 	fn did_flush(&self);
@@ -436,7 +442,13 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		Ok(())
 	}
 
+	fn should_checkpoint(&self) -> bool {
+		self.should_checkpoint.load(Ordering::Relaxed)
+	}
+
 	fn checkpoint(&self) -> Result<(), StorageError> {
+		self.should_checkpoint.store(false, Ordering::Relaxed);
+
 		// Acquire exclusive generations lock
 		let mut generations_mut = self.generations.write();
 
