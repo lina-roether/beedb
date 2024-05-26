@@ -49,7 +49,7 @@ pub(crate) enum StorageError {
 	File(#[from] FileError),
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct PageStorageConfig {
 	pub physical_storage: PhysicalStorageConfig,
 	pub page_cache: PageCacheConfig,
@@ -101,11 +101,18 @@ where
 			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
 			Ok(())
 		})?;
-		if self.storage.wal.should_checkpoint() {
-			self.storage.checkpoint();
-		}
+		Self::maybe_commit_flush(self.storage);
 		self.storage.transaction_enumerator.end();
 		Ok(())
+	}
+
+	fn maybe_commit_flush(storage: &PageStorage<PS, PC, W, T>) {
+		if storage.wal.should_checkpoint() {
+			storage.checkpoint();
+		}
+		if storage.cache.should_flush() {
+			storage.flush();
+		}
 	}
 }
 
@@ -167,11 +174,8 @@ where
 			from: &from,
 			to: buf,
 		})?;
-		if self.storage.wal.should_checkpoint() {
-			self.storage.checkpoint();
-		}
-
 		guard.write(offset, buf, wal_index);
+		Self::maybe_commit_flush(self.storage);
 		Ok(())
 	}
 
@@ -179,9 +183,7 @@ where
 		self.storage.wal.log_commit(wal::CommitLog {
 			transaction_id: self.id,
 		})?;
-		if self.storage.wal.should_checkpoint() {
-			self.storage.checkpoint();
-		}
+		Self::maybe_commit_flush(self.storage);
 		self.storage.transaction_enumerator.end();
 		self.completed = true;
 		Ok(())
@@ -594,6 +596,10 @@ mod tests {
 		let mut wal = MockWalApi::new();
 		let mut task_runner = MockTaskRunnerApi::new();
 
+		task_runner
+			.expect_run_fallible()
+			.returning(|cb, _| cb().unwrap());
+
 		let mut seq = Sequence::new();
 		cache
 			.expect_load_mut()
@@ -660,6 +666,17 @@ mod tests {
 			.once()
 			.in_sequence(&mut seq)
 			.returning(|| false);
+		cache
+			.expect_should_flush()
+			.once()
+			.in_sequence(&mut seq)
+			.returning(|| true);
+		cache
+			.expect_flush()
+			.once()
+			.in_sequence(&mut seq)
+			.returning(|_| Ok(()));
+		wal.expect_cache_did_flush().once().in_sequence(&mut seq);
 		wal.expect_log_commit()
 			.once()
 			.in_sequence(&mut seq)
@@ -669,15 +686,15 @@ mod tests {
 			.once()
 			.in_sequence(&mut seq)
 			.returning(|| true);
-		task_runner
-			.expect_run_fallible()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|cb, _| cb().unwrap());
 		wal.expect_checkpoint()
 			.once()
 			.in_sequence(&mut seq)
 			.returning(|| Ok(()));
+		cache
+			.expect_should_flush()
+			.once()
+			.in_sequence(&mut seq)
+			.returning(|| false);
 
 		// given
 		let storage = PageStorage::new(physical, cache, wal, Arc::new(task_runner));

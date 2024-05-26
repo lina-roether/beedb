@@ -20,22 +20,24 @@ use mockall::{automock, concretize};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
-	consts::DEFAULT_PAGE_CACHE_SIZE,
+	consts::{DEFAULT_MAX_DIRTY_PAGES, DEFAULT_PAGE_CACHE_SIZE},
 	files::{segment::PAGE_BODY_SIZE, WalIndex},
 	utils::cache::CacheReplacer,
 };
 
 use super::{physical::WriteOp, PageId, StorageError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PageCacheConfig {
 	pub page_cache_size: usize,
+	pub max_dirty_pages: f32,
 }
 
 impl Default for PageCacheConfig {
 	fn default() -> Self {
 		Self {
 			page_cache_size: DEFAULT_PAGE_CACHE_SIZE,
+			max_dirty_pages: DEFAULT_MAX_DIRTY_PAGES,
 		}
 	}
 }
@@ -256,6 +258,8 @@ pub(crate) struct PageCache {
 	has_scrap: AtomicBool,
 	dirty_list: Mutex<Vec<PageId>>,
 	locks: Box<[RawRwLock]>,
+	max_num_dirty: usize,
+	should_flush: AtomicBool,
 }
 assert_impl_all!(PageCache: Send, Sync);
 
@@ -282,6 +286,9 @@ impl PageCache {
 			locks: std::iter::repeat_with(|| RawRwLock::INIT)
 				.take(num_pages)
 				.collect(),
+			#[allow(clippy::cast_possible_truncation)]
+			max_num_dirty: (num_pages as f32 * config.max_dirty_pages) as usize,
+			should_flush: AtomicBool::new(false),
 		}
 	}
 
@@ -411,6 +418,8 @@ pub(crate) trait PageCacheApi {
 	fn scrap(&self, page_id: PageId);
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
 
+	fn should_flush(&self) -> bool;
+
 	#[cfg_attr(test, concretize)]
 	fn flush<HFn>(&self, handler: HFn) -> Result<(), StorageError>
 	where
@@ -439,6 +448,9 @@ impl PageCacheApi for PageCache {
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
 		let mut dirty_list = self.dirty_list.lock();
 		dirty_list.push(page_id);
+		if dirty_list.len() >= self.max_num_dirty {
+			self.should_flush.store(true, Ordering::Relaxed);
+		}
 		mem::drop(dirty_list);
 
 		let index = self.get_store_index(page_id);
@@ -474,6 +486,10 @@ impl PageCacheApi for PageCache {
 		}
 	}
 
+	fn should_flush(&self) -> bool {
+		self.should_flush.load(Ordering::Relaxed)
+	}
+
 	fn flush<HFn>(&self, mut handler: HFn) -> Result<(), StorageError>
 	where
 		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
@@ -482,6 +498,7 @@ impl PageCacheApi for PageCache {
 		let dirty_list = dirty_list_guard.clone();
 		dirty_list_guard.clear();
 		mem::drop(dirty_list_guard);
+		self.should_flush.store(false, Ordering::Relaxed);
 
 		let mut error: Option<StorageError> = None;
 		for page_id in dirty_list.iter().copied() {
@@ -529,6 +546,7 @@ mod tests {
 		// given
 		let cache = PageCache::new(&PageCacheConfig {
 			page_cache_size: 2 * MIB,
+			..Default::default()
 		});
 
 		// when
@@ -552,6 +570,7 @@ mod tests {
 		// given
 		let cache = PageCache::new(&PageCacheConfig {
 			page_cache_size: 2 * MIB,
+			..Default::default()
 		});
 
 		// when
@@ -566,6 +585,7 @@ mod tests {
 		// given
 		let cache = PageCache::new(&PageCacheConfig {
 			page_cache_size: 4 * BUFFERED_PAGE_SIZE,
+			..Default::default()
 		});
 
 		// when
@@ -594,6 +614,7 @@ mod tests {
 		// given
 		let cache = PageCache::new(&PageCacheConfig {
 			page_cache_size: 4 * BUFFERED_PAGE_SIZE,
+			..Default::default()
 		});
 
 		// when
