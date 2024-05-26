@@ -6,6 +6,7 @@ use std::{
 		atomic::{AtomicBool, Ordering},
 		Arc,
 	},
+	time::Duration,
 };
 
 #[cfg(test)]
@@ -15,7 +16,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use static_assertions::assert_impl_all;
 
 use crate::{
-	consts::DEFAULT_MAX_WAL_GENERATION_SIZE,
+	consts::{DEFAULT_CHECKPOINT_PERIOD, DEFAULT_MAX_WAL_GENERATION_SIZE},
 	files::{
 		wal::{self, CheckpointData, WalFileApi},
 		DatabaseFolder, DatabaseFolderApi,
@@ -27,12 +28,14 @@ use super::{PageId, StorageError, TransactionState, WalIndex};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalConfig {
 	pub max_generation_size: usize,
+	pub checkpoint_period: Duration,
 }
 
 impl Default for WalConfig {
 	fn default() -> Self {
 		Self {
 			max_generation_size: DEFAULT_MAX_WAL_GENERATION_SIZE,
+			checkpoint_period: DEFAULT_CHECKPOINT_PERIOD,
 		}
 	}
 }

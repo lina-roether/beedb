@@ -302,14 +302,14 @@ pub(crate) trait TaskRunnerApi {
 	#[cfg_attr(test, concretize)]
 	fn run_fallible<F: FallibleTaskFn + 'static>(&self, cb: F, failure_strategy: FailureStrategy);
 	#[cfg_attr(test, concretize)]
-	fn schedule<F: TaskFn + 'static>(&self, cb: F, period: Duration) -> ScheduledTaskHandle;
+	fn schedule<F: TaskFn + 'static>(&self, cb: F, period: Duration) -> Self::ScheduledTaskHandle;
 	#[cfg_attr(test, concretize)]
 	fn schedule_fallible<F: FallibleTaskFn + 'static>(
 		&self,
 		cb: F,
 		period: Duration,
 		failure_strategy: FailureStrategy,
-	) -> ScheduledTaskHandle;
+	) -> Self::ScheduledTaskHandle;
 }
 
 impl TaskRunnerApi for TaskRunner {

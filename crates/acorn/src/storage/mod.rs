@@ -21,6 +21,7 @@ pub(crate) use crate::files::PageId;
 use crate::files::TransactionState;
 use crate::files::WalIndex;
 use crate::tasks::FailureStrategy;
+use crate::tasks::FallibleTaskFn;
 use crate::tasks::TaskRunner;
 use crate::tasks::TaskRunnerApi;
 
@@ -61,7 +62,7 @@ where
 	PS: PhysicalStorageApi + Send + Sync + 'static,
 	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi,
+	T: TaskRunnerApi + 'static,
 {
 	id: u64,
 	locks: HashMap<PageId, PC::WriteGuard<'a>>,
@@ -74,7 +75,7 @@ where
 	PS: PhysicalStorageApi + Send + Sync + 'static,
 	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi,
+	T: TaskRunnerApi + 'static,
 {
 	fn new(id: u64, storage: &'a PageStorage<PS, PC, W, T>) -> Self {
 		Self {
@@ -121,7 +122,7 @@ where
 	PS: PhysicalStorageApi + Send + Sync + 'static,
 	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi,
+	T: TaskRunnerApi + 'static,
 {
 	fn drop(&mut self) {
 		if !self.completed {
@@ -146,7 +147,7 @@ where
 	PS: PhysicalStorageApi + Send + Sync + 'static,
 	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi,
+	T: TaskRunnerApi + 'static,
 {
 	fn id(&self) -> u64 {
 		self.id
@@ -239,6 +240,7 @@ where
 	wal: Arc<W>,
 	task_runner: Arc<T>,
 	transaction_enumerator: TransactionEnumerator,
+	scheduled_tasks: Vec<T::ScheduledTaskHandle>,
 }
 
 impl PageStorage {
@@ -248,6 +250,7 @@ impl PageStorage {
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
 		Ok(Self::new(
+			config,
 			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
 			PageCache::new(&config.page_cache),
 			Wal::create(Arc::clone(&folder), &config.wal)?,
@@ -261,6 +264,7 @@ impl PageStorage {
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
 		Ok(Self::new(
+			config,
 			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
 			PageCache::new(&config.page_cache),
 			Wal::open(Arc::clone(&folder), &config.wal)?,
@@ -271,19 +275,49 @@ impl PageStorage {
 
 impl<PS, PC, W, T> PageStorage<PS, PC, W, T>
 where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
-	W: WalApi,
-	T: TaskRunnerApi,
+	PS: PhysicalStorageApi + Send + Sync + 'static,
+	PC: PageCacheApi + Send + Sync + 'static,
+	W: WalApi + Send + Sync + 'static,
+	T: TaskRunnerApi + 'static,
 {
-	fn new(physical: PS, cache: PC, wal: W, task_runner: Arc<T>) -> Self {
-		Self {
+	fn new(
+		config: &PageStorageConfig,
+		physical: PS,
+		cache: PC,
+		wal: W,
+		task_runner: Arc<T>,
+	) -> Self {
+		let mut storage = Self {
 			physical: Arc::new(physical),
 			cache: Arc::new(cache),
 			wal: Arc::new(wal),
 			task_runner,
 			transaction_enumerator: TransactionEnumerator::new(),
-		}
+			scheduled_tasks: Vec::new(),
+		};
+
+		let flush_task = storage.task_runner.schedule_fallible(
+			storage.flush_task(),
+			config.page_cache.flush_period,
+			FailureStrategy {
+				fatal: false,
+				retries: 3,
+			},
+		);
+
+		let checkpoint_task = storage.task_runner.schedule_fallible(
+			storage.checkpoint_task(),
+			config.wal.checkpoint_period,
+			FailureStrategy {
+				fatal: false,
+				retries: 3,
+			},
+		);
+		storage
+			.scheduled_tasks
+			.extend([flush_task, checkpoint_task]);
+
+		storage
 	}
 
 	fn load_into_cache(&self, page_id: PageId) -> Result<PC::WriteGuard<'_>, StorageError> {
@@ -311,6 +345,25 @@ where
 			return Ok(guard);
 		}
 		self.load_into_cache(page_id)
+	}
+
+	fn checkpoint_task(&self) -> impl FallibleTaskFn {
+		let wal = Arc::clone(&self.wal);
+		move || {
+			wal.checkpoint()?;
+			Ok(())
+		}
+	}
+
+	fn flush_task(&self) -> impl FallibleTaskFn {
+		let wal = Arc::clone(&self.wal);
+		let physical = Arc::clone(&self.physical);
+		let cache = Arc::clone(&self.cache);
+		move || {
+			cache.flush(|op| physical.write(op))?;
+			wal.cache_did_flush();
+			Ok(())
+		}
 	}
 }
 
@@ -343,7 +396,7 @@ where
 	PS: PhysicalStorageApi + Send + Sync + 'static,
 	PC: PageCacheApi + Send + Sync + 'static,
 	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi,
+	T: TaskRunnerApi + 'static,
 {
 	type ReadGuard<'a> = PC::ReadGuard<'a> where Self: 'a;
 	type WriteGuard<'a> = PC::WriteGuard<'a> where Self: 'a;
@@ -375,12 +428,8 @@ where
 	}
 
 	fn checkpoint(&self) {
-		let wal = Arc::clone(&self.wal);
 		self.task_runner.run_fallible(
-			move || {
-				wal.checkpoint()?;
-				Ok(())
-			},
+			self.checkpoint_task(),
 			FailureStrategy {
 				fatal: false,
 				retries: 3,
@@ -389,15 +438,8 @@ where
 	}
 
 	fn flush(&self) {
-		let wal = Arc::clone(&self.wal);
-		let physical = Arc::clone(&self.physical);
-		let cache = Arc::clone(&self.cache);
 		self.task_runner.run_fallible(
-			move || {
-				cache.flush(|op| physical.write(op))?;
-				wal.cache_did_flush();
-				Ok(())
-			},
+			self.flush_task(),
 			FailureStrategy {
 				fatal: false,
 				retries: 3,
@@ -412,7 +454,10 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 	use tests::wal::{CommitLog, WriteLog};
 
-	use crate::{files::segment::PAGE_BODY_SIZE, tasks::MockTaskRunnerApi};
+	use crate::{
+		files::segment::PAGE_BODY_SIZE,
+		tasks::{MockScheduledTaskHandleApi, MockTaskRunnerApi},
+	};
 
 	use self::{
 		cache::MockPageCacheApi,
@@ -429,7 +474,11 @@ mod tests {
 		let mut physical = MockPhysicalStorageApi::new();
 		let mut cache = MockPageCacheApi::new();
 		let mut wal = MockWalApi::new();
-		let task_runner = MockTaskRunnerApi::new();
+		let mut task_runner = MockTaskRunnerApi::new();
+		task_runner
+			.expect_schedule_fallible()
+			.returning(|_, _, _| MockScheduledTaskHandleApi::new());
+
 		wal.expect_recover().returning(|handler| {
 			handler(wal::PartialWriteOp {
 				index: wal_index!(69, 420),
@@ -517,7 +566,13 @@ mod tests {
 			})
 			.returning(|_| Ok(()));
 		// given
-		let page_storage = PageStorage::new(physical, cache, wal, Arc::new(task_runner));
+		let page_storage = PageStorage::new(
+			&Default::default(),
+			physical,
+			cache,
+			wal,
+			Arc::new(task_runner),
+		);
 
 		// when
 		page_storage.recover().unwrap();
@@ -529,7 +584,10 @@ mod tests {
 		let mut physical = MockPhysicalStorageApi::new();
 		let mut cache = MockPageCacheApi::new();
 		let wal = MockWalApi::new();
-		let task_runner = MockTaskRunnerApi::new();
+		let mut task_runner = MockTaskRunnerApi::new();
+		task_runner
+			.expect_schedule_fallible()
+			.returning(|_, _, _| MockScheduledTaskHandleApi::new());
 		let mut seq = Sequence::new();
 		cache
 			.expect_load()
@@ -578,7 +636,13 @@ mod tests {
 			});
 
 		// given
-		let storage = PageStorage::new(physical, cache, wal, Arc::new(task_runner));
+		let storage = PageStorage::new(
+			&Default::default(),
+			physical,
+			cache,
+			wal,
+			Arc::new(task_runner),
+		);
 
 		// when
 		let mut buf = [0; 5];
@@ -595,6 +659,9 @@ mod tests {
 		let mut cache = MockPageCacheApi::new();
 		let mut wal = MockWalApi::new();
 		let mut task_runner = MockTaskRunnerApi::new();
+		task_runner
+			.expect_schedule_fallible()
+			.returning(|_, _, _| MockScheduledTaskHandleApi::new());
 
 		task_runner
 			.expect_run_fallible()
@@ -697,7 +764,13 @@ mod tests {
 			.returning(|| false);
 
 		// given
-		let storage = PageStorage::new(physical, cache, wal, Arc::new(task_runner));
+		let storage = PageStorage::new(
+			&Default::default(),
+			physical,
+			cache,
+			wal,
+			Arc::new(task_runner),
+		);
 
 		// when
 		let mut t = storage.transaction().unwrap();

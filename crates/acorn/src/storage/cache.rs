@@ -6,6 +6,7 @@ use std::{
 	num::NonZeroU64,
 	ptr::{self, NonNull},
 	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+	time::Duration,
 };
 
 use parking_lot::{
@@ -20,7 +21,7 @@ use mockall::{automock, concretize};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
-	consts::{DEFAULT_MAX_DIRTY_PAGES, DEFAULT_PAGE_CACHE_SIZE},
+	consts::{DEFAULT_FLUSH_PERIOD, DEFAULT_MAX_DIRTY_PAGES, DEFAULT_PAGE_CACHE_SIZE},
 	files::{segment::PAGE_BODY_SIZE, WalIndex},
 	utils::cache::CacheReplacer,
 };
@@ -31,6 +32,7 @@ use super::{physical::WriteOp, PageId, StorageError};
 pub(crate) struct PageCacheConfig {
 	pub page_cache_size: usize,
 	pub max_dirty_pages: f32,
+	pub flush_period: Duration,
 }
 
 impl Default for PageCacheConfig {
@@ -38,6 +40,7 @@ impl Default for PageCacheConfig {
 		Self {
 			page_cache_size: DEFAULT_PAGE_CACHE_SIZE,
 			max_dirty_pages: DEFAULT_MAX_DIRTY_PAGES,
+			flush_period: DEFAULT_FLUSH_PERIOD,
 		}
 	}
 }
