@@ -6,6 +6,7 @@
 	warn(clippy::cast_possible_truncation)
 )]
 // Unstable features
+#![feature(trait_alias)]
 #![feature(buf_read_has_data_left)]
 #![feature(cfg_match)]
 #![feature(os_str_display)]
