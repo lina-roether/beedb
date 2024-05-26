@@ -2,8 +2,7 @@ use std::{
 	borrow::Cow,
 	collections::HashMap,
 	fs::{File, OpenOptions},
-	io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
-	mem,
+	io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
 	num::{NonZeroU16, NonZeroU64},
 	path::Path,
 };
@@ -328,6 +327,7 @@ impl TryFrom<TransactionStateRepr> for TransactionState {
 pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
+	write_buf: Vec<u8>,
 	file: F,
 	next_offset: NonZeroU64,
 }
@@ -392,6 +392,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		Ok(Self {
 			body_start,
 			file,
+			write_buf: Vec::new(),
 			prev_item,
 			next_offset,
 		})
@@ -491,6 +492,7 @@ pub(crate) trait WalFileApi {
 		Self: 'a;
 
 	fn push_item<'a>(&mut self, item: Item<'a>) -> Result<NonZeroU64, FileError>;
+	fn flush(&mut self) -> Result<(), FileError>;
 	fn read_item_at(&mut self, offset: NonZeroU64) -> Result<Item<'static>, FileError>;
 	fn iter_items<'a>(&'a mut self) -> Result<Self::IterItems<'a>, FileError>;
 	fn iter_items_reverse<'a>(&'a mut self) -> Result<Self::IterItemsReverse<'a>, FileError>;
@@ -503,9 +505,7 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 	type IterItemsReverse<'a> = IterItemsReverse<&'a mut F> where F: 'a;
 
 	fn push_item(&mut self, item: Item<'_>) -> Result<NonZeroU64, FileError> {
-		let current_pos = NonZeroU64::new(self.file.seek(SeekFrom::End(0))?)
-			.expect("Cannot write at position 0!");
-		let mut writer = BufWriter::new(&mut self.file);
+		let current_pos = self.next_offset;
 
 		let mut body_buffer: Vec<u8> = vec![];
 		let kind: ItemKind;
@@ -539,27 +539,33 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 			crc,
 			prev_item: self.prev_item,
 		};
-		ItemHeaderRepr::serialize(item_header, &mut writer)?;
+		ItemHeaderRepr::serialize(item_header, &mut self.write_buf)?;
 
-		writer.write_all(&body_buffer)?;
+		self.write_buf.write_all(&body_buffer)?;
 
 		let item_footer = ItemFooter {
 			item_start: current_pos,
 		};
-		ItemFooterRepr::serialize(item_footer, &mut writer)?;
+		ItemFooterRepr::serialize(item_footer, &mut self.write_buf)?;
 
 		self.prev_item = Some(current_pos);
-		writer.flush()?;
-		mem::drop(writer);
 
-		self.next_offset = NonZeroU64::new(self.file.seek(SeekFrom::End(0))?)
-			.expect("WAL file unexpectedly at position 0");
+		self.next_offset =
+			NonZeroU64::new(self.file.seek(SeekFrom::End(0))? + self.write_buf.len() as u64)
+				.expect("WAL file unexpectedly at position 0");
 		Ok(current_pos)
+	}
+
+	fn flush(&mut self) -> Result<(), FileError> {
+		self.file.write_all(&self.write_buf)?;
+		self.write_buf.clear();
+		Ok(())
 	}
 
 	fn read_item_at(&mut self, offset: NonZeroU64) -> Result<Item<'static>, FileError> {
 		debug_assert!(offset.get() >= self.body_start);
 
+		self.flush()?;
 		self.file.seek(SeekFrom::Start(offset.get()))?;
 		let mut reader = ItemReader::new(&mut self.file, None)?;
 		let Some((read_offset, item)) = reader.read_item()? else {
@@ -571,11 +577,13 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 	}
 
 	fn iter_items(&mut self) -> Result<Self::IterItems<'_>, FileError> {
+		self.flush()?;
 		self.file.seek(SeekFrom::Start(self.body_start))?;
 		IterItems::new(&mut self.file)
 	}
 
 	fn iter_items_reverse(&mut self) -> Result<Self::IterItemsReverse<'_>, FileError> {
+		self.flush()?;
 		self.file.seek(SeekFrom::End(0))?;
 		IterItemsReverse::new(&mut self.file, self.prev_item)
 	}
@@ -840,6 +848,7 @@ mod tests {
 				to: Cow::Owned(vec![4, 5, 6, 7]),
 			}))
 			.unwrap();
+		wal_file.flush().unwrap();
 
 		// then
 		let mut expected_body = Vec::<u8>::new();
@@ -896,6 +905,7 @@ mod tests {
 				prev_transaction_item: Some(wal_index!(123, 25)),
 			}))
 			.unwrap();
+		wal_file.flush().unwrap();
 
 		// then
 		let mut expected_body = Vec::<u8>::new();
@@ -947,6 +957,7 @@ mod tests {
 				to: vec![4, 5, 6, 7].into(),
 			}))
 			.unwrap();
+		wal_file.flush().unwrap();
 
 		// then
 		let mut expected_body = Vec::<u8>::new();
@@ -1012,6 +1023,7 @@ mod tests {
 				transactions: Cow::Borrowed(&transactions),
 			}))
 			.unwrap();
+		wal_file.flush().unwrap();
 
 		// then
 		let mut expected_body = Vec::<u8>::new();
@@ -1083,6 +1095,7 @@ mod tests {
 
 		// when
 		let offset = wal_file.push_item(item.clone()).unwrap();
+		wal_file.flush().unwrap();
 
 		// then
 		assert_eq!(wal_file.read_item_at(offset).unwrap(), item)
@@ -1113,6 +1126,7 @@ mod tests {
 		for item in &items {
 			wal_file.push_item(item.clone()).unwrap();
 		}
+		wal_file.flush().unwrap();
 
 		// then
 		let mut iter = wal_file.iter_items().unwrap();
@@ -1124,7 +1138,7 @@ mod tests {
 			iter.next().unwrap().unwrap(),
 			(non_zero!(75), items[1].clone())
 		);
-		assert!(iter.next().is_none());
+		assert!(dbg!(iter.next()).is_none());
 	}
 
 	#[test]
@@ -1152,6 +1166,7 @@ mod tests {
 		for item in &items {
 			wal_file.push_item(item.clone()).unwrap();
 		}
+		wal_file.flush().unwrap();
 
 		// then
 		let mut iter = wal_file.iter_items_reverse().unwrap();

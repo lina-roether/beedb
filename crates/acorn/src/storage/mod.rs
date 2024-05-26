@@ -393,7 +393,7 @@ where
 		self.task_runner.run_fallible(
 			move || {
 				cache.flush(|op| physical.write(op))?;
-				wal.did_flush();
+				wal.cache_did_flush();
 				Ok(())
 			},
 			FailureStrategy {

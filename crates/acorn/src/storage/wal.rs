@@ -369,6 +369,13 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		let write_data = self.create_undo_write_data(undo_log);
 		self.push_raw_item(wal::Item::Write(write_data), gens)
 	}
+
+	fn flush_impl(gens: &GenerationQueue<DF>) -> Result<(), StorageError> {
+		if let Some(mut gen) = gens.current_generation() {
+			gen.flush()?;
+		}
+		Ok(())
+	}
 }
 
 #[cfg_attr(test, automock)]
@@ -392,7 +399,9 @@ pub(crate) trait WalApi {
 
 	fn checkpoint(&self) -> Result<(), StorageError>;
 
-	fn did_flush(&self);
+	fn flush(&self) -> Result<(), StorageError>;
+
+	fn cache_did_flush(&self);
 }
 
 impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
@@ -405,7 +414,9 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 	fn log_commit(&self, log: CommitLog) -> Result<WalIndex, StorageError> {
 		let transaction_data = self.create_transaction_data(log.transaction_id);
 		let gens = self.generations.read();
-		self.push_raw_item(wal::Item::Commit(transaction_data), &gens)
+		let index = self.push_raw_item(wal::Item::Commit(transaction_data), &gens)?;
+		Self::flush_impl(&gens)?;
+		Ok(index)
 	}
 
 	fn undo<HFn>(&self, transaction_id: u64, handle: HFn) -> Result<(), StorageError>
@@ -413,6 +424,7 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	{
 		let mut gens = self.generations.write();
+		Self::flush_impl(&gens)?;
 		self.undo_all(&[transaction_id], &mut gens, handle)?;
 		Ok(())
 	}
@@ -469,9 +481,15 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 		Ok(())
 	}
 
-	fn did_flush(&self) {
+	fn flush(&self) -> Result<(), StorageError> {
+		let gens = self.generations.read();
+		Self::flush_impl(&gens)?;
+		Ok(())
+	}
+
+	fn cache_did_flush(&self) {
 		let mut state = self.state.lock();
-		state.did_flush();
+		state.cache_did_flush();
 	}
 }
 
@@ -555,7 +573,7 @@ impl State {
 		self.dirty_pages.entry(data.page_id).or_insert(index);
 	}
 
-	fn did_flush(&mut self) {
+	fn cache_did_flush(&mut self) {
 		self.dirty_pages.clear();
 	}
 
