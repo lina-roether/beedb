@@ -12,6 +12,7 @@ thiserror = "1.0.58"
 static_assertions = { version = "1.1.0", features = ["nightly"] }
 parking_lot = { version = "0.12.2", features = ["nightly"] }
 log = "0.4.21"
+futures = { version = "0.3.30", features = ["thread-pool"] }
 
 [dev-dependencies]
 mockall = { version = "0.12.1", features = ["nightly"] }

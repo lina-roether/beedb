@@ -5,10 +5,14 @@ use std::{
 	mem,
 	num::NonZeroU64,
 	ptr::{self, NonNull},
-	sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+	sync::{
+		atomic::{AtomicBool, AtomicUsize, Ordering},
+		Arc,
+	},
 	time::Duration,
 };
 
+use futures::Future;
 use parking_lot::{
 	lock_api::{RawRwLock as _, RawRwLockDowngrade},
 	Mutex, RawRwLock, RwLock, RwLockReadGuard,
@@ -147,6 +151,14 @@ impl PageBuffer {
 	}
 }
 
+// Safety: The PageBuffer has no functionality that would make it unsafe
+// to transfer across threads.
+unsafe impl Send for PageBuffer {}
+
+// Safety: The necessary conditions for safety are required from the caller of
+// `get_page` and `get_page_mut`
+unsafe impl Sync for PageBuffer {}
+
 impl Drop for PageBuffer {
 	fn drop(&mut self) {
 		if let Some(buf) = self.buf {
@@ -254,15 +266,15 @@ impl<'a> Drop for PageWriteGuard<'a> {
 }
 
 pub(crate) struct PageCache {
-	buf: PageBuffer,
-	indices: RwLock<HashMap<PageId, usize>>,
+	buf: Arc<PageBuffer>,
+	indices: Arc<RwLock<HashMap<PageId, usize>>>,
 	replacer: RwLock<CacheReplacer<PageId>>,
 	scrap: Mutex<Vec<usize>>,
 	has_scrap: AtomicBool,
-	dirty_list: Mutex<Vec<PageId>>,
-	locks: Box<[RawRwLock]>,
+	dirty_list: Arc<Mutex<Vec<PageId>>>,
+	locks: Arc<Box<[RawRwLock]>>,
 	max_num_dirty: usize,
-	should_flush: AtomicBool,
+	should_flush: Arc<AtomicBool>,
 }
 assert_impl_all!(PageCache: Send, Sync);
 
@@ -280,18 +292,18 @@ impl PageCache {
 		let buf = PageBuffer::new(num_pages);
 		let replacer = CacheReplacer::new(num_pages);
 		Self {
-			buf,
+			buf: Arc::new(buf),
 			replacer: RwLock::new(replacer),
-			indices: RwLock::new(HashMap::new()),
+			indices: Arc::new(RwLock::new(HashMap::new())),
 			scrap: Mutex::new(Vec::new()),
 			has_scrap: AtomicBool::new(false),
-			dirty_list: Mutex::new(Vec::new()),
-			locks: std::iter::repeat_with(|| RawRwLock::INIT)
+			dirty_list: Arc::new(Mutex::new(Vec::new())),
+			locks: Arc::new(std::iter::repeat_with(|| RawRwLock::INIT)
 				.take(num_pages)
-				.collect(),
+				.collect()),
 			#[allow(clippy::cast_possible_truncation)]
 			max_num_dirty: (num_pages as f32 * config.max_dirty_pages) as usize,
-			should_flush: AtomicBool::new(false),
+			should_flush: Arc::new(AtomicBool::new(false)),
 		}
 	}
 
@@ -369,13 +381,13 @@ impl PageCache {
 		Some(index)
 	}
 
-	fn load_direct(&self, index: usize) -> PageReadGuard<'_> {
-		let lock = &self.locks[index];
+	fn load_direct<'a>(locks: &'a [RawRwLock], buf: &'a PageBuffer, index: usize) -> PageReadGuard<'a> {
+		let lock = &locks[index];
 		lock.lock_shared();
 		// Safety: The safety of the reference is guaranteed by acquiring the shared
 		// lock.
 		let page =
-			unsafe { self.buf.get_page(index) }.expect("Tried to index page buffer out of bounds!");
+			unsafe { buf.get_page(index) }.expect("Tried to index page buffer out of bounds!");
 
 		PageReadGuard {
 			lock,
@@ -384,12 +396,12 @@ impl PageCache {
 		}
 	}
 
-	fn load_mut_direct(&self, index: usize) -> PageWriteGuard<'_> {
-		let lock = &self.locks[index];
+	fn load_mut_direct<'a>(locks: &'a [RawRwLock], buf: &'a PageBuffer, index: usize) -> PageWriteGuard<'a> {
+		let lock = &locks[index];
 		lock.lock_exclusive();
 		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
 		// lock.
-		let page = unsafe { self.buf.get_page_mut(index) }
+		let page = unsafe { buf.get_page_mut(index) }
 			.expect("Triet to index page buffer out of bounds!");
 
 		PageWriteGuard {
@@ -398,6 +410,53 @@ impl PageCache {
 			page,
 			_marker: PhantomData,
 		}
+	}
+
+	fn flush_task(
+		&self,
+		mut handler: impl FnMut(WriteOp) -> Result<(), StorageError>,
+	) -> impl Future<Output = Result<(), StorageError>> {
+        let dirty_list = Arc::clone(&self.dirty_list);
+        let should_flush = Arc::clone(&self.should_flush);
+        let indices = Arc::clone(&self.indices);
+        let locks = Arc::clone(&self.locks);
+        let buf = Arc::clone(&self.buf);
+
+        async move {
+            let mut dirty_list_guard = dirty_list.lock();
+            let dirty_list_copy = dirty_list_guard.clone();
+            dirty_list_guard.clear();
+            mem::drop(dirty_list_guard);
+            should_flush.store(false, Ordering::Relaxed);
+
+            let mut error: Option<StorageError> = None;
+            for page_id in dirty_list_copy.iter().copied() {
+                let indices = indices.read();
+                let Some(index) = indices.get(&page_id).copied() else {
+                    continue;
+                };
+                let guard = Self::load_direct(&locks, &buf, index);
+                if !guard.header().dirty() {
+                    continue;
+                }
+                if let Err(err) = handler(WriteOp {
+                    wal_index: guard.header().wal_index(),
+                    page_id,
+                    buf: guard.page,
+                }) {
+                    error = Some(err);
+                    break;
+                };
+            }
+
+            if let Some(err) = error {
+                let mut dirty_list_guard = dirty_list.lock();
+                dirty_list_guard.extend(&dirty_list_copy);
+                return Err(err);
+            }
+
+            Ok(())
+        }
 	}
 }
 
@@ -440,12 +499,12 @@ impl PageCacheApi for PageCache {
 
 	fn load(&self, page_id: PageId) -> Option<PageReadGuard<'_>> {
 		let index = self.get_load_index(page_id)?;
-		Some(self.load_direct(index))
+		Some(Self::load_direct(&self.locks, &self.buf, index))
 	}
 
 	fn load_mut(&self, page_id: PageId) -> Option<Self::WriteGuard<'_>> {
 		let index = self.get_load_index(page_id)?;
-		Some(self.load_mut_direct(index))
+		Some(Self::load_mut_direct(&self.locks, &self.buf, index))
 	}
 
 	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
@@ -457,7 +516,7 @@ impl PageCacheApi for PageCache {
 		mem::drop(dirty_list);
 
 		let index = self.get_store_index(page_id);
-		self.load_mut_direct(index)
+		Self::load_mut_direct(&self.locks, &self.buf, index)
 	}
 
 	fn scrap(&self, page_id: PageId) {
@@ -493,43 +552,11 @@ impl PageCacheApi for PageCache {
 		self.should_flush.load(Ordering::Relaxed)
 	}
 
-	fn flush<HFn>(&self, mut handler: HFn) -> Result<(), StorageError>
+	fn flush<HFn>(&self, handler: HFn) -> Result<(), StorageError>
 	where
 		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
 	{
-		let mut dirty_list_guard = self.dirty_list.lock();
-		let dirty_list = dirty_list_guard.clone();
-		dirty_list_guard.clear();
-		mem::drop(dirty_list_guard);
-		self.should_flush.store(false, Ordering::Relaxed);
-
-		let mut error: Option<StorageError> = None;
-		for page_id in dirty_list.iter().copied() {
-			let indices = self.indices.read();
-			let Some(index) = indices.get(&page_id).copied() else {
-				continue;
-			};
-			let guard = self.load_direct(index);
-			if !guard.header().dirty() {
-				continue;
-			}
-			if let Err(err) = handler(WriteOp {
-				wal_index: guard.header().wal_index(),
-				page_id,
-				buf: guard.page,
-			}) {
-				error = Some(err);
-				break;
-			};
-		}
-
-		if let Some(err) = error {
-			let mut dirty_list_guard = self.dirty_list.lock();
-			dirty_list_guard.extend(&dirty_list);
-			return Err(err);
-		}
-
-		Ok(())
+        todo!("This should spawn flush_task asynchronously!")
 	}
 }
 

@@ -9,6 +9,7 @@ use std::{
 	time::Duration,
 };
 
+use futures::Future;
 #[cfg(test)]
 use mockall::{automock, concretize};
 
@@ -72,10 +73,10 @@ pub(crate) struct CommitLog {
 
 pub(crate) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
 	folder: Arc<DF>,
-	generations: RwLock<GenerationQueue<DF>>,
-	state: Mutex<State>,
+	generations: Arc<RwLock<GenerationQueue<DF>>>,
+	state: Arc<Mutex<State>>,
 	max_generation_size: usize,
-	should_checkpoint: AtomicBool,
+	should_checkpoint: Arc<AtomicBool>,
 }
 assert_impl_all!(Wal: Send, Sync);
 
@@ -86,7 +87,7 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		gens.push_generation(0, folder.open_wal_file(0)?);
 
 		let wal = Self::new(folder, config, gens, State::default());
-		wal.log_checkpoint()?;
+		Self::log_checkpoint(&wal.generations, &wal.state)?;
 
 		Ok(wal)
 	}
@@ -111,20 +112,23 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 	) -> Self {
 		Self {
 			folder,
-			generations: RwLock::new(generations),
-			state: Mutex::new(state),
+			generations: Arc::new(RwLock::new(generations)),
+			state: Arc::new(Mutex::new(state)),
 			max_generation_size: config.max_generation_size,
-			should_checkpoint: AtomicBool::new(false),
+			should_checkpoint: Arc::new(AtomicBool::new(false)),
 		}
 	}
 
-	fn log_checkpoint(&self) -> Result<(), StorageError> {
-		let generations = self.generations.read();
+	fn log_checkpoint(
+		generations: &RwLock<GenerationQueue<DF>>,
+		state: &Mutex<State>,
+	) -> Result<(), StorageError> {
+		let generations = generations.read();
 		let Some(mut wal_file) = generations.current_generation() else {
 			return Err(StorageError::WalNotInitialized);
 		};
 
-		let state = self.state.lock();
+		let state = state.lock();
 		wal_file.push_item(wal::Item::Checkpoint(CheckpointData {
 			dirty_pages: Cow::Borrowed(&state.dirty_pages),
 			transactions: Cow::Borrowed(&state.transactions),
@@ -133,22 +137,26 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		Ok(())
 	}
 
-	fn cleanup_generations(&self, gens: &mut GenerationQueue<DF>) -> Result<(), StorageError> {
-		let state = self.state.lock();
+	fn cleanup_generations(
+		generations: &mut GenerationQueue<DF>,
+		state: &Mutex<State>,
+		folder: &DF,
+	) -> Result<(), StorageError> {
+		let state = state.lock();
 		let first_needed = state.first_needed_generation();
 		mem::drop(state);
 
 		let mut delete_gens: Vec<u64> = Vec::new();
-		for gen in &gens.generations {
-			if gen.gen_num >= first_needed || gen.gen_num == gens.current_gen_num {
+		for gen in &generations.generations {
+			if gen.gen_num >= first_needed || gen.gen_num == generations.current_gen_num {
 				break;
 			}
 			delete_gens.push(gen.gen_num);
 		}
 
 		for gen_num in delete_gens {
-			gens.generations.pop_front();
-			self.folder.delete_wal_file(gen_num)?;
+			generations.generations.pop_front();
+			folder.delete_wal_file(gen_num)?;
 		}
 		Ok(())
 	}
@@ -379,6 +387,27 @@ impl<DF: DatabaseFolderApi> Wal<DF> {
 		}
 		Ok(())
 	}
+
+	fn checkpoint_task(&self) -> impl Future<Output = Result<(), StorageError>> {
+		let generations = Arc::clone(&self.generations);
+		let state = Arc::clone(&self.state);
+		let folder = Arc::clone(&self.folder);
+        let should_checkpoint = Arc::clone(&self.should_checkpoint);
+        async move {
+            should_checkpoint.store(false, Ordering::Relaxed);
+            
+            let mut gens_mut = generations.write();
+            let gen_num = gens_mut.current_gen_num + 1;
+            let file = folder.open_wal_file(gen_num)?;
+            gens_mut.push_generation(gen_num, file);
+            Self::cleanup_generations(&mut gens_mut, &state, &folder)?;
+            mem::drop(gens_mut);
+
+            Self::log_checkpoint(&generations, &state)?;
+
+            Ok(())
+        }
+	}
 }
 
 #[cfg_attr(test, automock)]
@@ -445,6 +474,7 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 
 		self.read_initial_state(&mut file)?;
 		self.recover_state(&mut file, gens.current_gen_num)?;
+		#[allow(clippy::needless_borrows_for_generic_args)]
 		self.redo(&mut file, gens.current_gen_num, &mut handle)?;
 		mem::drop(file);
 
@@ -464,24 +494,7 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 	fn checkpoint(&self) -> Result<(), StorageError> {
 		self.should_checkpoint.store(false, Ordering::Relaxed);
 
-		// Acquire exclusive generations lock
-		let mut generations_mut = self.generations.write();
-
-		// Create the new generation and save it to the state object
-		let gen_num = generations_mut.current_gen_num + 1;
-		let file = self.folder.open_wal_file(gen_num)?;
-		generations_mut.push_generation(gen_num, file);
-
-		// Delete old generations if possible
-		self.cleanup_generations(&mut generations_mut)?;
-
-		// Release exclusive generations lock
-		mem::drop(generations_mut);
-
-		// Write checkpoint item to new generation
-		self.log_checkpoint()?;
-
-		Ok(())
+        todo!("This should spawn checkpoint_task asynchronously");
 	}
 
 	fn flush(&self) -> Result<(), StorageError> {
