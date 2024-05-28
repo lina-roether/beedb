@@ -80,7 +80,7 @@ pub(crate) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
 }
 assert_impl_all!(Wal: Send, Sync);
 
-impl<DF: DatabaseFolderApi> Wal<DF> {
+impl<DF: DatabaseFolderApi + Send + Sync> Wal<DF> {
 	pub fn create(folder: Arc<DF>, config: &WalConfig) -> Result<Self, StorageError> {
 		folder.clear_wal_files()?;
 		let mut gens: GenerationQueue<DF> = GenerationQueue::new();
@@ -427,16 +427,10 @@ pub(crate) trait WalApi {
 	where
 		HFn: FnMut(PartialWriteOp) -> Result<(), StorageError>;
 
-	fn should_checkpoint(&self) -> bool;
-
-	fn checkpoint(&self) -> Result<(), StorageError>;
-
-	fn flush(&self) -> Result<(), StorageError>;
-
 	fn cache_did_flush(&self);
 }
 
-impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
+impl<DF: DatabaseFolderApi + Send + Sync + 'static> WalApi for Wal<DF> {
 	fn log_write(&self, log: WriteLog) -> Result<WalIndex, StorageError> {
 		let write_data = self.create_write_data(log);
 		let gens = self.generations.read();
@@ -484,22 +478,6 @@ impl<DF: DatabaseFolderApi> WalApi for Wal<DF> {
 
 		self.undo_all(&all_tids, &mut gens, handle)?;
 
-		Ok(())
-	}
-
-	fn should_checkpoint(&self) -> bool {
-		self.should_checkpoint.load(Ordering::Relaxed)
-	}
-
-	fn checkpoint(&self) -> Result<(), StorageError> {
-		self.should_checkpoint.store(false, Ordering::Relaxed);
-
-        todo!("This should spawn checkpoint_task asynchronously");
-	}
-
-	fn flush(&self) -> Result<(), StorageError> {
-		let gens = self.generations.read();
-		Self::flush_impl(&gens)?;
 		Ok(())
 	}
 

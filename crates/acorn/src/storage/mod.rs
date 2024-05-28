@@ -20,10 +20,6 @@ use crate::storage::cache::PageWriteGuardApi;
 pub(crate) use crate::files::PageId;
 use crate::files::TransactionState;
 use crate::files::WalIndex;
-use crate::tasks::FailureStrategy;
-use crate::tasks::FallibleTaskFn;
-use crate::tasks::TaskRunner;
-use crate::tasks::TaskRunnerApi;
 
 use cache::{PageCache, PageCacheApi, PageCacheConfig};
 use physical::{PhysicalStorage, PhysicalStorageApi, PhysicalStorageConfig};
@@ -57,27 +53,25 @@ pub(crate) struct PageStorageConfig {
 	pub wal: WalConfig,
 }
 
-pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal, T = TaskRunner>
+pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal>
 where
-	PS: PhysicalStorageApi + Send + Sync + 'static,
-	PC: PageCacheApi + Send + Sync + 'static,
-	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi + 'static,
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
 {
 	id: u64,
 	locks: HashMap<PageId, PC::WriteGuard<'a>>,
-	storage: &'a PageStorage<PS, PC, W, T>,
+	storage: &'a PageStorage<PS, PC, W>,
 	completed: bool,
 }
 
-impl<'a, PS, PC, W, T> Transaction<'a, PS, PC, W, T>
+impl<'a, PS, PC, W> Transaction<'a, PS, PC, W>
 where
-	PS: PhysicalStorageApi + Send + Sync + 'static,
-	PC: PageCacheApi + Send + Sync + 'static,
-	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi + 'static,
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
 {
-	fn new(id: u64, storage: &'a PageStorage<PS, PC, W, T>) -> Self {
+	fn new(id: u64, storage: &'a PageStorage<PS, PC, W>) -> Self {
 		Self {
 			id,
 			storage,
@@ -102,27 +96,16 @@ where
 			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
 			Ok(())
 		})?;
-		Self::maybe_commit_flush(self.storage);
 		self.storage.transaction_enumerator.end();
 		Ok(())
 	}
-
-	fn maybe_commit_flush(storage: &PageStorage<PS, PC, W, T>) {
-		if storage.wal.should_checkpoint() {
-			storage.checkpoint();
-		}
-		if storage.cache.should_flush() {
-			storage.flush();
-		}
-	}
 }
 
-impl<'a, PS, PC, W, T> Drop for Transaction<'a, PS, PC, W, T>
+impl<'a, PS, PC, W> Drop for Transaction<'a, PS, PC, W>
 where
-	PS: PhysicalStorageApi + Send + Sync + 'static,
-	PC: PageCacheApi + Send + Sync + 'static,
-	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi + 'static,
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
 {
 	fn drop(&mut self) {
 		if !self.completed {
@@ -142,12 +125,11 @@ pub(crate) trait TransactionApi {
 	fn undo(self) -> Result<(), StorageError>;
 }
 
-impl<'a, PS, PC, W, T> TransactionApi for Transaction<'a, PS, PC, W, T>
+impl<'a, PS, PC, W> TransactionApi for Transaction<'a, PS, PC, W>
 where
-	PS: PhysicalStorageApi + Send + Sync + 'static,
-	PC: PageCacheApi + Send + Sync + 'static,
-	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi + 'static,
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
 {
 	fn id(&self) -> u64 {
 		self.id
@@ -176,7 +158,6 @@ where
 			to: buf,
 		})?;
 		guard.write(offset, buf, wal_index);
-		Self::maybe_commit_flush(self.storage);
 		Ok(())
 	}
 
@@ -184,7 +165,6 @@ where
 		self.storage.wal.log_commit(wal::CommitLog {
 			transaction_id: self.id,
 		})?;
-		Self::maybe_commit_flush(self.storage);
 		self.storage.transaction_enumerator.end();
 		self.completed = true;
 		Ok(())
@@ -228,96 +208,55 @@ impl TransactionEnumerator {
 	}
 }
 
-pub(crate) struct PageStorage<PS = PhysicalStorage, PC = PageCache, W = Wal, T = TaskRunner>
+pub(crate) struct PageStorage<PS = PhysicalStorage, PC = PageCache, W = Wal>
 where
 	PS: PhysicalStorageApi,
 	PC: PageCacheApi,
 	W: WalApi,
-	T: TaskRunnerApi,
 {
-	physical: Arc<PS>,
-	cache: Arc<PC>,
-	wal: Arc<W>,
-	task_runner: Arc<T>,
+	physical: PS,
+	cache: PC,
+	wal: W,
 	transaction_enumerator: TransactionEnumerator,
-	scheduled_tasks: Vec<T::ScheduledTaskHandle>,
 }
 
 impl PageStorage {
 	pub fn create(
 		folder: Arc<DatabaseFolder>,
-		task_runner: Arc<TaskRunner>,
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
 		Ok(Self::new(
-			config,
 			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
 			PageCache::new(&config.page_cache),
 			Wal::create(Arc::clone(&folder), &config.wal)?,
-			task_runner,
 		))
 	}
 
 	pub fn open(
 		folder: Arc<DatabaseFolder>,
-		task_runner: Arc<TaskRunner>,
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
 		Ok(Self::new(
-			config,
 			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
 			PageCache::new(&config.page_cache),
 			Wal::open(Arc::clone(&folder), &config.wal)?,
-			task_runner,
 		))
 	}
 }
 
-impl<PS, PC, W, T> PageStorage<PS, PC, W, T>
+impl<PS, PC, W> PageStorage<PS, PC, W>
 where
-	PS: PhysicalStorageApi + Send + Sync + 'static,
-	PC: PageCacheApi + Send + Sync + 'static,
-	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi + 'static,
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
 {
-	fn new(
-		config: &PageStorageConfig,
-		physical: PS,
-		cache: PC,
-		wal: W,
-		task_runner: Arc<T>,
-	) -> Self {
-		let mut storage = Self {
-			physical: Arc::new(physical),
-			cache: Arc::new(cache),
-			wal: Arc::new(wal),
-			task_runner,
+	fn new(physical: PS, cache: PC, wal: W) -> Self {
+		Self {
+			physical,
+			cache,
+			wal,
 			transaction_enumerator: TransactionEnumerator::new(),
-			scheduled_tasks: Vec::new(),
-		};
-
-		let flush_task = storage.task_runner.schedule_fallible(
-			storage.flush_task(),
-			config.page_cache.flush_period,
-			FailureStrategy {
-				fatal: false,
-				retries: 3,
-			},
-		);
-
-		let checkpoint_task = storage.task_runner.schedule_fallible(
-			storage.checkpoint_task(),
-			config.wal.checkpoint_period,
-			FailureStrategy {
-				fatal: false,
-				retries: 3,
-			},
-		);
-		storage
-			.scheduled_tasks
-			.extend([flush_task, checkpoint_task]);
-
-		storage
+		}
 	}
 
 	fn load_into_cache(&self, page_id: PageId) -> Result<PC::WriteGuard<'_>, StorageError> {
@@ -346,25 +285,6 @@ where
 		}
 		self.load_into_cache(page_id)
 	}
-
-	fn checkpoint_task(&self) -> impl FallibleTaskFn {
-		let wal = Arc::clone(&self.wal);
-		move || {
-			wal.checkpoint()?;
-			Ok(())
-		}
-	}
-
-	fn flush_task(&self) -> impl FallibleTaskFn {
-		let wal = Arc::clone(&self.wal);
-		let physical = Arc::clone(&self.physical);
-		let cache = Arc::clone(&self.cache);
-		move || {
-			cache.flush(|op| physical.write(op))?;
-			wal.cache_did_flush();
-			Ok(())
-		}
-	}
 }
 
 #[cfg_attr(test, automock(
@@ -387,20 +307,17 @@ pub(crate) trait PageStorageApi {
 	fn recover(&self) -> Result<(), StorageError>;
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 	fn transaction<'a>(&'a self) -> Result<Self::Transaction<'a>, StorageError>;
-	fn checkpoint(&self);
-	fn flush(&self);
 }
 
-impl<PS, PC, W, T> PageStorageApi for PageStorage<PS, PC, W, T>
+impl<PS, PC, W> PageStorageApi for PageStorage<PS, PC, W>
 where
-	PS: PhysicalStorageApi + Send + Sync + 'static,
-	PC: PageCacheApi + Send + Sync + 'static,
-	W: WalApi + Send + Sync + 'static,
-	T: TaskRunnerApi + 'static,
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
 {
 	type ReadGuard<'a> = PC::ReadGuard<'a> where Self: 'a;
 	type WriteGuard<'a> = PC::WriteGuard<'a> where Self: 'a;
-	type Transaction<'a> = Transaction<'a, PS, PC, W, T> where Self: 'a;
+	type Transaction<'a> = Transaction<'a, PS, PC, W> where Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError> {
 		self.wal.recover(&mut |write_op| {
@@ -420,31 +337,11 @@ where
 		Ok(())
 	}
 
-	fn transaction(&self) -> Result<Transaction<'_, PS, PC, W, T>, StorageError> {
+	fn transaction(&self) -> Result<Transaction<'_, PS, PC, W>, StorageError> {
 		let Some(transaction_id) = self.transaction_enumerator.begin() else {
 			return Err(StorageError::TransactionLimitReached);
 		};
 		Ok(Transaction::new(transaction_id, self))
-	}
-
-	fn checkpoint(&self) {
-		self.task_runner.run_fallible(
-			self.checkpoint_task(),
-			FailureStrategy {
-				fatal: false,
-				retries: 3,
-			},
-		)
-	}
-
-	fn flush(&self) {
-		self.task_runner.run_fallible(
-			self.flush_task(),
-			FailureStrategy {
-				fatal: false,
-				retries: 3,
-			},
-		);
 	}
 }
 
@@ -566,13 +463,7 @@ mod tests {
 			})
 			.returning(|_| Ok(()));
 		// given
-		let page_storage = PageStorage::new(
-			&Default::default(),
-			physical,
-			cache,
-			wal,
-			Arc::new(task_runner),
-		);
+		let page_storage = PageStorage::new(physical, cache, wal);
 
 		// when
 		page_storage.recover().unwrap();
@@ -636,13 +527,7 @@ mod tests {
 			});
 
 		// given
-		let storage = PageStorage::new(
-			&Default::default(),
-			physical,
-			cache,
-			wal,
-			Arc::new(task_runner),
-		);
+		let storage = PageStorage::new(physical, cache, wal);
 
 		// when
 		let mut buf = [0; 5];
@@ -729,48 +614,15 @@ mod tests {
 					}
 			})
 			.returning(|_| Ok(wal_index!(24, 25)));
-		wal.expect_should_checkpoint()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|| false);
-		cache
-			.expect_should_flush()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|| true);
-		cache
-			.expect_flush()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|_| Ok(()));
 		wal.expect_cache_did_flush().once().in_sequence(&mut seq);
 		wal.expect_log_commit()
 			.once()
 			.in_sequence(&mut seq)
 			.with(eq(CommitLog { transaction_id: 0 }))
 			.returning(|_| Ok(wal_index!(24, 25)));
-		wal.expect_should_checkpoint()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|| true);
-		wal.expect_checkpoint()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|| Ok(()));
-		cache
-			.expect_should_flush()
-			.once()
-			.in_sequence(&mut seq)
-			.returning(|| false);
 
 		// given
-		let storage = PageStorage::new(
-			&Default::default(),
-			physical,
-			cache,
-			wal,
-			Arc::new(task_runner),
-		);
+		let storage = PageStorage::new(physical, cache, wal);
 
 		// when
 		let mut t = storage.transaction().unwrap();

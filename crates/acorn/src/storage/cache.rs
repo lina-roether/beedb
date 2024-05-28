@@ -20,7 +20,7 @@ use parking_lot::{
 use static_assertions::assert_impl_all;
 
 #[cfg(test)]
-use mockall::{automock, concretize};
+use mockall::automock;
 
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
@@ -458,6 +458,7 @@ impl PageCache {
             Ok(())
         }
 	}
+
 }
 
 #[cfg_attr(test, automock(
@@ -479,13 +480,6 @@ pub(crate) trait PageCacheApi {
 	fn store<'a>(&'a self, page_id: PageId) -> Self::WriteGuard<'a>;
 	fn scrap(&self, page_id: PageId);
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
-
-	fn should_flush(&self) -> bool;
-
-	#[cfg_attr(test, concretize)]
-	fn flush<HFn>(&self, handler: HFn) -> Result<(), StorageError>
-	where
-		HFn: FnMut(WriteOp) -> Result<(), StorageError>;
 }
 
 impl PageCacheApi for PageCache {
@@ -546,17 +540,6 @@ impl PageCacheApi for PageCache {
 			lock,
 			_marker: PhantomData,
 		}
-	}
-
-	fn should_flush(&self) -> bool {
-		self.should_flush.load(Ordering::Relaxed)
-	}
-
-	fn flush<HFn>(&self, handler: HFn) -> Result<(), StorageError>
-	where
-		HFn: FnMut(WriteOp) -> Result<(), StorageError>,
-	{
-        todo!("This should spawn flush_task asynchronously!")
 	}
 }
 

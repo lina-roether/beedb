@@ -146,8 +146,8 @@ impl DatabaseFolder {
     type IterWalFiles = std::vec::IntoIter<Result<(u64, MockWalFileApi), FileError>>;
 ), allow(clippy::type_complexity))]
 pub(crate) trait DatabaseFolderApi {
-	type SegmentFile: SegmentFileApi;
-	type WalFile: WalFileApi;
+	type SegmentFile: SegmentFileApi + Send + Sync;
+	type WalFile: WalFileApi + Send + Sync;
 	type IterWalFiles: Iterator<Item = Result<(u64, Self::WalFile), FileError>>;
 
 	fn open_segment_file(&self, segment_num: u32) -> Result<Self::SegmentFile, FileError>;
