@@ -2,14 +2,12 @@ use std::{
 	borrow::{Borrow, Cow},
 	collections::{hash_map::Entry, HashMap, VecDeque},
 	mem,
-	sync::{
-		atomic::{AtomicBool, Ordering},
-		Arc,
-	},
+	sync::Arc,
 	time::Duration,
 };
 
-use futures::Future;
+use futures::executor::ThreadPool;
+use log::error;
 #[cfg(test)]
 use mockall::{automock, concretize};
 
@@ -22,6 +20,7 @@ use crate::{
 		wal::{self, CheckpointData, WalFileApi},
 		DatabaseFolder, DatabaseFolderApi,
 	},
+	tasks::{Timer, TimerHandle},
 };
 
 use super::{PageId, StorageError, TransactionState, WalIndex};
@@ -73,26 +72,35 @@ pub(crate) struct CommitLog {
 
 pub(crate) struct Wal<DF: DatabaseFolderApi = DatabaseFolder> {
 	folder: Arc<DF>,
+	thread_pool: Arc<ThreadPool>,
 	generations: Arc<RwLock<GenerationQueue<DF>>>,
 	state: Arc<Mutex<State>>,
 	max_generation_size: usize,
-	should_checkpoint: Arc<AtomicBool>,
+	checkpoint_timer_handle: TimerHandle,
 }
 assert_impl_all!(Wal: Send, Sync);
 
-impl<DF: DatabaseFolderApi + Send + Sync> Wal<DF> {
-	pub fn create(folder: Arc<DF>, config: &WalConfig) -> Result<Self, StorageError> {
+impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
+	pub fn create(
+		folder: Arc<DF>,
+		thread_pool: Arc<ThreadPool>,
+		config: &WalConfig,
+	) -> Result<Self, StorageError> {
 		folder.clear_wal_files()?;
 		let mut gens: GenerationQueue<DF> = GenerationQueue::new();
 		gens.push_generation(0, folder.open_wal_file(0)?);
 
-		let wal = Self::new(folder, config, gens, State::default());
+		let wal = Self::new(folder, thread_pool, config, gens, State::default());
 		Self::log_checkpoint(&wal.generations, &wal.state)?;
 
 		Ok(wal)
 	}
 
-	pub fn open(folder: Arc<DF>, config: &WalConfig) -> Result<Self, StorageError> {
+	pub fn open(
+		folder: Arc<DF>,
+		thread_pool: Arc<ThreadPool>,
+		config: &WalConfig,
+	) -> Result<Self, StorageError> {
 		let mut wal_files: Vec<(u64, DF::WalFile)> = Result::from_iter(folder.iter_wal_files()?)?;
 		wal_files.sort_by(|(gen_1, _), (gen_2, _)| u64::cmp(gen_1, gen_2));
 
@@ -101,21 +109,40 @@ impl<DF: DatabaseFolderApi + Send + Sync> Wal<DF> {
 			gens.push_generation(gen, file);
 		}
 
-		Ok(Self::new(folder, config, gens, State::default()))
+		Ok(Self::new(
+			folder,
+			thread_pool,
+			config,
+			gens,
+			State::default(),
+		))
 	}
 
 	fn new(
 		folder: Arc<DF>,
+		thread_pool: Arc<ThreadPool>,
 		config: &WalConfig,
 		generations: GenerationQueue<DF>,
 		state: State,
 	) -> Self {
+		let generations = Arc::new(RwLock::new(generations));
+		let state = Arc::new(Mutex::new(state));
+
+		let (checkpoint_timer, checkpoint_timer_handle) = Timer::new(config.checkpoint_period);
+		thread_pool.spawn_ok(Self::periodic_checkpoint_task(
+			checkpoint_timer,
+			Arc::clone(&generations),
+			Arc::clone(&state),
+			Arc::clone(&folder),
+		));
+
 		Self {
 			folder,
-			generations: Arc::new(RwLock::new(generations)),
-			state: Arc::new(Mutex::new(state)),
+			thread_pool,
+			generations,
+			state,
 			max_generation_size: config.max_generation_size,
-			should_checkpoint: Arc::new(AtomicBool::new(false)),
+			checkpoint_timer_handle,
 		}
 	}
 
@@ -333,7 +360,11 @@ impl<DF: DatabaseFolderApi + Send + Sync> Wal<DF> {
 		wal_file.push_item(item)?;
 
 		if wal_file.size() >= self.max_generation_size {
-			self.should_checkpoint.store(true, Ordering::Relaxed);
+			let generations = Arc::clone(&self.generations);
+			let state = Arc::clone(&self.state);
+			let folder = Arc::clone(&self.folder);
+			self.thread_pool
+				.spawn_ok(Self::single_checkpoint_task(generations, state, folder))
 		}
 
 		Ok(index)
@@ -388,25 +419,48 @@ impl<DF: DatabaseFolderApi + Send + Sync> Wal<DF> {
 		Ok(())
 	}
 
-	fn checkpoint_task(&self) -> impl Future<Output = Result<(), StorageError>> {
-		let generations = Arc::clone(&self.generations);
-		let state = Arc::clone(&self.state);
-		let folder = Arc::clone(&self.folder);
-        let should_checkpoint = Arc::clone(&self.should_checkpoint);
-        async move {
-            should_checkpoint.store(false, Ordering::Relaxed);
-            
-            let mut gens_mut = generations.write();
-            let gen_num = gens_mut.current_gen_num + 1;
-            let file = folder.open_wal_file(gen_num)?;
-            gens_mut.push_generation(gen_num, file);
-            Self::cleanup_generations(&mut gens_mut, &state, &folder)?;
-            mem::drop(gens_mut);
+	async fn checkpoint(
+		generations: &RwLock<GenerationQueue<DF>>,
+		state: &Mutex<State>,
+		folder: &DF,
+	) -> Result<(), StorageError> {
+		let mut gens_mut = generations.write();
+		let gen_num = gens_mut.current_gen_num + 1;
+		let file = folder.open_wal_file(gen_num)?;
+		gens_mut.push_generation(gen_num, file);
+		Self::cleanup_generations(&mut gens_mut, state, folder)?;
+		mem::drop(gens_mut);
+		Self::log_checkpoint(generations, state)?;
+		Ok(())
+	}
 
-            Self::log_checkpoint(&generations, &state)?;
+	async fn checkpoint_ok(
+		generations: &RwLock<GenerationQueue<DF>>,
+		state: &Mutex<State>,
+		folder: &DF,
+	) {
+		if let Err(err) = Self::checkpoint(generations, state, folder).await {
+			error!("A WAL checkpoint failed: {err}");
+		}
+	}
 
-            Ok(())
-        }
+	async fn single_checkpoint_task(
+		generations: Arc<RwLock<GenerationQueue<DF>>>,
+		state: Arc<Mutex<State>>,
+		folder: Arc<DF>,
+	) {
+		Self::checkpoint_ok(&generations, &state, &folder).await;
+	}
+
+	async fn periodic_checkpoint_task(
+		timer: Timer,
+		generations: Arc<RwLock<GenerationQueue<DF>>>,
+		state: Arc<Mutex<State>>,
+		folder: Arc<DF>,
+	) {
+		while timer.wait() {
+			Self::checkpoint_ok(&generations, &state, &folder).await;
+		}
 	}
 }
 
@@ -635,7 +689,12 @@ mod tests {
 			});
 
 		// when
-		Wal::create(Arc::new(folder), &WalConfig::default()).unwrap();
+		Wal::create(
+			Arc::new(folder),
+			Arc::new(ThreadPool::new().unwrap()),
+			&WalConfig::default(),
+		)
+		.unwrap();
 	}
 
 	#[test]
@@ -791,7 +850,12 @@ mod tests {
 		]
 		.into_iter();
 
-		let wal = Wal::open(Arc::new(folder), &WalConfig::default()).unwrap();
+		let wal = Wal::open(
+			Arc::new(folder),
+			Arc::new(ThreadPool::new().unwrap()),
+			&WalConfig::default(),
+		)
+		.unwrap();
 		wal.recover(&mut |op| {
 			// Write operations should appear in the order of expected_ops.
 			assert_eq!(Some(op), expected_ops.next());

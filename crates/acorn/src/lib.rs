@@ -8,6 +8,7 @@
 // Unstable features
 #![feature(trait_alias)]
 #![feature(duration_constructors)]
+#![feature(async_closure)]
 #![feature(buf_read_has_data_left)]
 #![feature(cfg_match)]
 #![feature(os_str_display)]

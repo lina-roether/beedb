@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use futures::executor::ThreadPool;
 use log::warn;
 use thiserror::Error;
 
@@ -223,23 +224,25 @@ where
 impl PageStorage {
 	pub fn create(
 		folder: Arc<DatabaseFolder>,
+		thread_pool: Arc<ThreadPool>,
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
 		Ok(Self::new(
 			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
 			PageCache::new(&config.page_cache),
-			Wal::create(Arc::clone(&folder), &config.wal)?,
+			Wal::create(Arc::clone(&folder), thread_pool, &config.wal)?,
 		))
 	}
 
 	pub fn open(
 		folder: Arc<DatabaseFolder>,
+		thread_pool: Arc<ThreadPool>,
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
 		Ok(Self::new(
 			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
 			PageCache::new(&config.page_cache),
-			Wal::open(Arc::clone(&folder), &config.wal)?,
+			Wal::open(Arc::clone(&folder), thread_pool, &config.wal)?,
 		))
 	}
 }
@@ -595,7 +598,6 @@ mod tests {
 					}
 			})
 			.returning(|_| Ok(wal_index!(24, 25)));
-		wal.expect_cache_did_flush().once().in_sequence(&mut seq);
 		wal.expect_log_commit()
 			.once()
 			.in_sequence(&mut seq)
