@@ -351,10 +351,7 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 	use tests::wal::{CommitLog, WriteLog};
 
-	use crate::{
-		files::segment::PAGE_BODY_SIZE,
-		tasks::{MockScheduledTaskHandleApi, MockTaskRunnerApi},
-	};
+	use crate::files::segment::PAGE_BODY_SIZE;
 
 	use self::{
 		cache::MockPageCacheApi,
@@ -371,10 +368,6 @@ mod tests {
 		let mut physical = MockPhysicalStorageApi::new();
 		let mut cache = MockPageCacheApi::new();
 		let mut wal = MockWalApi::new();
-		let mut task_runner = MockTaskRunnerApi::new();
-		task_runner
-			.expect_schedule_fallible()
-			.returning(|_, _, _| MockScheduledTaskHandleApi::new());
 
 		wal.expect_recover().returning(|handler| {
 			handler(wal::PartialWriteOp {
@@ -475,10 +468,6 @@ mod tests {
 		let mut physical = MockPhysicalStorageApi::new();
 		let mut cache = MockPageCacheApi::new();
 		let wal = MockWalApi::new();
-		let mut task_runner = MockTaskRunnerApi::new();
-		task_runner
-			.expect_schedule_fallible()
-			.returning(|_, _, _| MockScheduledTaskHandleApi::new());
 		let mut seq = Sequence::new();
 		cache
 			.expect_load()
@@ -543,14 +532,6 @@ mod tests {
 		let mut physical = MockPhysicalStorageApi::new();
 		let mut cache = MockPageCacheApi::new();
 		let mut wal = MockWalApi::new();
-		let mut task_runner = MockTaskRunnerApi::new();
-		task_runner
-			.expect_schedule_fallible()
-			.returning(|_, _, _| MockScheduledTaskHandleApi::new());
-
-		task_runner
-			.expect_run_fallible()
-			.returning(|cb, _| cb().unwrap());
 
 		let mut seq = Sequence::new();
 		cache

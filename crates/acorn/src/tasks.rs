@@ -1,10 +1,9 @@
 use std::{
 	error::Error,
-	io, iter, mem,
-	num::NonZero,
+	io,
+	pin::Pin,
 	sync::{
-		atomic::{AtomicBool, AtomicUsize, Ordering},
-		mpsc::{channel, Receiver, Sender},
+		atomic::{AtomicBool, Ordering},
 		Arc,
 	},
 	thread,
@@ -12,18 +11,23 @@ use std::{
 };
 
 use futures::{executor::ThreadPool, Future};
-#[cfg(test)]
-use mockall::{automock, concretize};
-
 use log::warn;
-use parking_lot::Mutex;
-
-use crate::consts::DEFAULT_NUM_WORKERS;
+#[cfg(test)]
+use mockall::automock;
 
 #[derive(Clone)]
 pub(crate) struct FailureStrategy {
 	pub fatal: bool,
 	pub retries: usize,
+}
+
+impl Default for FailureStrategy {
+	fn default() -> Self {
+		Self {
+			fatal: false,
+			retries: 3,
+		}
+	}
 }
 
 pub(crate) struct Timer {
@@ -61,8 +65,74 @@ impl Timer {
 	}
 }
 
-trait TaskFuture = Future<Output = ()>;
-trait FallibleTaskFuture = Future<Output = Result<(), Box<dyn Error>>>;
+pub(crate) struct ScheduledTaskHandle {
+	running: Arc<AtomicBool>,
+}
+
+impl Drop for ScheduledTaskHandle {
+	fn drop(&mut self) {
+		self.running.store(false, Ordering::Relaxed);
+	}
+}
+
+pub(crate) trait TaskFuture = Future<Output = ()> + Send;
+pub(crate) trait FallibleTaskFuture = Future<Output = Result<(), Box<dyn Error>>> + Send;
+pub(crate) trait Task = (Fn() -> Pin<Box<dyn TaskFuture>>) + Send;
+
+pub trait IntoTask {
+	fn into_task(self) -> Box<dyn Task>;
+}
+
+impl<F: TaskFuture + Send + 'static, T: (Fn() -> F) + Send + 'static> IntoTask for T {
+	fn into_task(self) -> Box<dyn Task> {
+		Box::new(move || Box::pin((self)()))
+	}
+}
+
+pub(crate) struct FallibleTask<F: FallibleTaskFuture, B: Fn() -> F> {
+	future_builder: B,
+	failure_strategy: FailureStrategy,
+}
+
+impl<F: FallibleTaskFuture, B: Fn() -> F> FallibleTask<F, B> {
+	fn new(future_builder: B, failure_strategy: FailureStrategy) -> Self {
+		Self {
+			future_builder,
+			failure_strategy,
+		}
+	}
+}
+
+impl<F: FallibleTaskFuture + Send, B: (Fn() -> F) + Send + Sync + 'static> IntoTask
+	for FallibleTask<F, B>
+{
+	fn into_task(self) -> Box<dyn Task> {
+		let future_builder = Arc::new(self.future_builder);
+		Box::new(move || {
+			let builder = Arc::clone(&future_builder);
+			Box::pin(async move {
+				let mut num_tries = self.failure_strategy.retries;
+				let err = loop {
+					let Err(err) = (builder)().await else {
+						return;
+					};
+					if num_tries == 0 {
+						break err;
+					} else {
+						warn!("An asynchronous task failed ({num_tries} retries remaining): {err}");
+						num_tries -= 1;
+						continue;
+					}
+				};
+				if self.failure_strategy.fatal {
+					panic!("A required asynchronous task failed: {err}");
+				} else {
+					warn!("An asynchronous task failed: {err}");
+				}
+			})
+		})
+	}
+}
 
 pub(crate) struct TaskRunner {
 	pool: ThreadPool,
@@ -70,62 +140,46 @@ pub(crate) struct TaskRunner {
 
 impl TaskRunner {
 	pub fn new() -> Result<Self, io::Error> {
-		Self {
-			pool: ThreadPool::new(),
-		}
+		Ok(Self {
+			pool: ThreadPool::new()?,
+		})
 	}
 }
 
 #[cfg_attr(test, automock(
-    type ScheduledTaskHandle = MockScheduledTaskHandleApi;
+    type ScheduledTaskHandle = ();
 ))]
 pub(crate) trait TaskRunnerApi {
-	type ScheduledTaskHandle: ScheduledTaskHandleApi;
+	type ScheduledTaskHandle;
 
-	#[cfg_attr(test, concretize)]
-	fn run<F: TaskFn + 'static>(&self, cb: F);
-	#[cfg_attr(test, concretize)]
-	fn run_fallible<F: FallibleTaskFn + 'static>(&self, cb: F, failure_strategy: FailureStrategy);
-	#[cfg_attr(test, concretize)]
-	fn schedule<F: TaskFn + 'static>(&self, cb: F, period: Duration) -> Self::ScheduledTaskHandle;
-	#[cfg_attr(test, concretize)]
-	fn schedule_fallible<F: FallibleTaskFn + 'static>(
+	fn run<T: IntoTask + 'static>(&self, task: T);
+	fn schedule<F: IntoTask + 'static>(
 		&self,
-		cb: F,
+		task: F,
 		period: Duration,
-		failure_strategy: FailureStrategy,
 	) -> Self::ScheduledTaskHandle;
 }
 
 impl TaskRunnerApi for TaskRunner {
 	type ScheduledTaskHandle = ScheduledTaskHandle;
 
-	fn run<F: Fn() + Send + Sync + 'static>(&self, cb: F) {
-		self.pool.next_worker().run(Task::new_infallible(cb))
+	fn run<T: IntoTask + 'static>(&self, task: T) {
+		self.pool.spawn_ok(task.into_task()());
 	}
 
-	fn run_fallible<F: Fn() -> Result<(), Box<dyn Error>> + Send + Sync + 'static>(
+	fn schedule<F: IntoTask + 'static>(
 		&self,
-		cb: F,
-		failure_strategy: FailureStrategy,
-	) {
-		self.pool
-			.next_worker()
-			.run(Task::new_fallible(cb, failure_strategy))
-	}
-
-	fn schedule<F: TaskFn + 'static>(&self, cb: F, period: Duration) -> ScheduledTaskHandle {
-		self.scheduler
-			.schedule_task(Task::new_infallible(cb), period)
-	}
-
-	fn schedule_fallible<F: FallibleTaskFn + 'static>(
-		&self,
-		cb: F,
+		task: F,
 		period: Duration,
-		failure_strategy: FailureStrategy,
-	) -> ScheduledTaskHandle {
-		self.scheduler
-			.schedule_task(Task::new_fallible(cb, failure_strategy), period)
+	) -> Self::ScheduledTaskHandle {
+		let task = task.into_task();
+		let (timer, running) = Timer::new(period);
+		self.pool.spawn_ok(async move {
+			while let Some(duration) = timer.sleep_duration() {
+				thread::sleep(duration);
+				task().await
+			}
+		});
+		ScheduledTaskHandle { running }
 	}
 }
