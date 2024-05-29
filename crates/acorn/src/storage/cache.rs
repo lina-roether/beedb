@@ -12,7 +12,8 @@ use std::{
 	time::Duration,
 };
 
-use futures::Future;
+use futures::executor::ThreadPool;
+use log::error;
 use parking_lot::{
 	lock_api::{RawRwLock as _, RawRwLockDowngrade},
 	Mutex, RawRwLock, RwLock, RwLockReadGuard,
@@ -27,10 +28,14 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use crate::{
 	consts::{DEFAULT_FLUSH_PERIOD, DEFAULT_MAX_DIRTY_PAGES, DEFAULT_PAGE_CACHE_SIZE},
 	files::{segment::PAGE_BODY_SIZE, WalIndex},
+	tasks::{Timer, TimerHandle},
 	utils::cache::CacheReplacer,
 };
 
-use super::{physical::WriteOp, PageId, StorageError};
+use super::{
+	physical::{PhysicalStorage, PhysicalStorageApi, WriteOp},
+	PageId, StorageError,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PageCacheConfig {
@@ -265,8 +270,10 @@ impl<'a> Drop for PageWriteGuard<'a> {
 	}
 }
 
-pub(crate) struct PageCache {
+pub(crate) struct PageCache<PS: PhysicalStorageApi = PhysicalStorage> {
 	buf: Arc<PageBuffer>,
+	physical_storage: Arc<PS>,
+	thread_pool: Arc<ThreadPool>,
 	indices: Arc<RwLock<HashMap<PageId, usize>>>,
 	replacer: RwLock<CacheReplacer<PageId>>,
 	scrap: Mutex<Vec<usize>>,
@@ -274,36 +281,58 @@ pub(crate) struct PageCache {
 	dirty_list: Arc<Mutex<Vec<PageId>>>,
 	locks: Arc<Box<[RawRwLock]>>,
 	max_num_dirty: usize,
-	should_flush: Arc<AtomicBool>,
+	flush_timer_handle: TimerHandle,
 }
 assert_impl_all!(PageCache: Send, Sync);
 
 // Safety: `buf`'s internal pointer is never leaked in any form.
-unsafe impl Send for PageCache {}
+unsafe impl<PS: PhysicalStorageApi + Send + Sync> Send for PageCache<PS> {}
 
 // Safety: `buf` is only accessed through the `load` and `store` methods,
 // which guarantee the safety of the references by acquiring the corresponding
 // locks.
-unsafe impl Sync for PageCache {}
+unsafe impl<PS: PhysicalStorageApi + Send + Sync> Sync for PageCache<PS> {}
 
-impl PageCache {
-	pub fn new(config: &PageCacheConfig) -> Self {
+impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
+	pub fn new(
+		config: &PageCacheConfig,
+		physical_storage: Arc<PS>,
+		thread_pool: Arc<ThreadPool>,
+	) -> Self {
 		let num_pages = config.page_cache_size / BUFFERED_PAGE_SIZE;
-		let buf = PageBuffer::new(num_pages);
+		let buf = Arc::new(PageBuffer::new(num_pages));
 		let replacer = CacheReplacer::new(num_pages);
+		let indices = Arc::new(RwLock::new(HashMap::new()));
+		let dirty_list = Arc::new(Mutex::new(Vec::new()));
+		let locks = Arc::new(
+			std::iter::repeat_with(|| RawRwLock::INIT)
+				.take(num_pages)
+				.collect(),
+		);
+
+		let (flush_timer, flush_timer_handle) = Timer::new(config.flush_period);
+		thread_pool.spawn_ok(Self::periodic_flush_task(
+			flush_timer,
+			Arc::clone(&physical_storage),
+			Arc::clone(&dirty_list),
+			Arc::clone(&indices),
+			Arc::clone(&locks),
+			Arc::clone(&buf),
+		));
+
 		Self {
-			buf: Arc::new(buf),
+			buf,
+			physical_storage,
+			thread_pool,
 			replacer: RwLock::new(replacer),
-			indices: Arc::new(RwLock::new(HashMap::new())),
+			indices,
 			scrap: Mutex::new(Vec::new()),
 			has_scrap: AtomicBool::new(false),
-			dirty_list: Arc::new(Mutex::new(Vec::new())),
-			locks: Arc::new(std::iter::repeat_with(|| RawRwLock::INIT)
-				.take(num_pages)
-				.collect()),
+			dirty_list,
+			locks,
 			#[allow(clippy::cast_possible_truncation)]
 			max_num_dirty: (num_pages as f32 * config.max_dirty_pages) as usize,
-			should_flush: Arc::new(AtomicBool::new(false)),
+			flush_timer_handle,
 		}
 	}
 
@@ -381,7 +410,11 @@ impl PageCache {
 		Some(index)
 	}
 
-	fn load_direct<'a>(locks: &'a [RawRwLock], buf: &'a PageBuffer, index: usize) -> PageReadGuard<'a> {
+	fn load_direct<'a>(
+		locks: &'a [RawRwLock],
+		buf: &'a PageBuffer,
+		index: usize,
+	) -> PageReadGuard<'a> {
 		let lock = &locks[index];
 		lock.lock_shared();
 		// Safety: The safety of the reference is guaranteed by acquiring the shared
@@ -396,13 +429,17 @@ impl PageCache {
 		}
 	}
 
-	fn load_mut_direct<'a>(locks: &'a [RawRwLock], buf: &'a PageBuffer, index: usize) -> PageWriteGuard<'a> {
+	fn load_mut_direct<'a>(
+		locks: &'a [RawRwLock],
+		buf: &'a PageBuffer,
+		index: usize,
+	) -> PageWriteGuard<'a> {
 		let lock = &locks[index];
 		lock.lock_exclusive();
 		// Safety: The safety of the reference is guaranteed by acquiring the exclusive
 		// lock.
-		let page = unsafe { buf.get_page_mut(index) }
-			.expect("Triet to index page buffer out of bounds!");
+		let page =
+			unsafe { buf.get_page_mut(index) }.expect("Triet to index page buffer out of bounds!");
 
 		PageWriteGuard {
 			index,
@@ -412,53 +449,81 @@ impl PageCache {
 		}
 	}
 
-	fn flush_task(
-		&self,
-		mut handler: impl FnMut(WriteOp) -> Result<(), StorageError>,
-	) -> impl Future<Output = Result<(), StorageError>> {
-        let dirty_list = Arc::clone(&self.dirty_list);
-        let should_flush = Arc::clone(&self.should_flush);
-        let indices = Arc::clone(&self.indices);
-        let locks = Arc::clone(&self.locks);
-        let buf = Arc::clone(&self.buf);
+	async fn flush(
+		physical_storage: &PS,
+		dirty_list: &Mutex<Vec<PageId>>,
+		indices: &RwLock<HashMap<PageId, usize>>,
+		locks: &[RawRwLock],
+		buf: &PageBuffer,
+	) -> Result<(), StorageError> {
+		let mut dirty_list_guard = dirty_list.lock();
+		let dirty_list_copy = dirty_list_guard.clone();
+		dirty_list_guard.clear();
+		mem::drop(dirty_list_guard);
 
-        async move {
-            let mut dirty_list_guard = dirty_list.lock();
-            let dirty_list_copy = dirty_list_guard.clone();
-            dirty_list_guard.clear();
-            mem::drop(dirty_list_guard);
-            should_flush.store(false, Ordering::Relaxed);
+		let mut error: Option<StorageError> = None;
+		for page_id in dirty_list_copy.iter().copied() {
+			let indices = indices.read();
+			let Some(index) = indices.get(&page_id).copied() else {
+				continue;
+			};
+			let guard = Self::load_direct(locks, buf, index);
+			if !guard.header().dirty() {
+				continue;
+			}
+			if let Err(err) = physical_storage.write(WriteOp {
+				wal_index: guard.header().wal_index(),
+				page_id,
+				buf: guard.page,
+			}) {
+				error = Some(err);
+				break;
+			};
+		}
 
-            let mut error: Option<StorageError> = None;
-            for page_id in dirty_list_copy.iter().copied() {
-                let indices = indices.read();
-                let Some(index) = indices.get(&page_id).copied() else {
-                    continue;
-                };
-                let guard = Self::load_direct(&locks, &buf, index);
-                if !guard.header().dirty() {
-                    continue;
-                }
-                if let Err(err) = handler(WriteOp {
-                    wal_index: guard.header().wal_index(),
-                    page_id,
-                    buf: guard.page,
-                }) {
-                    error = Some(err);
-                    break;
-                };
-            }
+		if let Some(err) = error {
+			let mut dirty_list_guard = dirty_list.lock();
+			dirty_list_guard.extend(&dirty_list_copy);
+			return Err(err);
+		}
 
-            if let Some(err) = error {
-                let mut dirty_list_guard = dirty_list.lock();
-                dirty_list_guard.extend(&dirty_list_copy);
-                return Err(err);
-            }
-
-            Ok(())
-        }
+		Ok(())
 	}
 
+	async fn flush_ok(
+		physical_storage: &PS,
+		dirty_list: &Mutex<Vec<PageId>>,
+		indices: &RwLock<HashMap<PageId, usize>>,
+		locks: &[RawRwLock],
+		buf: &PageBuffer,
+	) {
+		if let Err(err) = Self::flush(physical_storage, dirty_list, indices, locks, buf).await {
+			error!("Page cache flush failed: {err}");
+		}
+	}
+
+	async fn single_flush_task(
+		physical_storage: Arc<PS>,
+		dirty_list: Arc<Mutex<Vec<PageId>>>,
+		indices: Arc<RwLock<HashMap<PageId, usize>>>,
+		locks: Arc<Box<[RawRwLock]>>,
+		buf: Arc<PageBuffer>,
+	) {
+		Self::flush_ok(&physical_storage, &dirty_list, &indices, &locks, &buf).await;
+	}
+
+	async fn periodic_flush_task(
+		timer: Timer,
+		physical_storage: Arc<PS>,
+		dirty_list: Arc<Mutex<Vec<PageId>>>,
+		indices: Arc<RwLock<HashMap<PageId, usize>>>,
+		locks: Arc<Box<[RawRwLock]>>,
+		buf: Arc<PageBuffer>,
+	) {
+		while timer.wait() {
+			Self::flush_ok(&physical_storage, &dirty_list, &indices, &locks, &buf).await;
+		}
+	}
 }
 
 #[cfg_attr(test, automock(
@@ -482,7 +547,7 @@ pub(crate) trait PageCacheApi {
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
 }
 
-impl PageCacheApi for PageCache {
+impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCacheApi for PageCache<PS> {
 	type ReadGuard<'a> = PageReadGuard<'a>;
 	type WriteGuard<'a> = PageWriteGuard<'a>;
 
@@ -505,7 +570,13 @@ impl PageCacheApi for PageCache {
 		let mut dirty_list = self.dirty_list.lock();
 		dirty_list.push(page_id);
 		if dirty_list.len() >= self.max_num_dirty {
-			self.should_flush.store(true, Ordering::Relaxed);
+			self.thread_pool.spawn_ok(Self::single_flush_task(
+				Arc::clone(&self.physical_storage),
+				Arc::clone(&self.dirty_list),
+				Arc::clone(&self.indices),
+				Arc::clone(&self.locks),
+				Arc::clone(&self.buf),
+			));
 		}
 		mem::drop(dirty_list);
 
@@ -548,7 +619,10 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 
 	use crate::{
-		storage::test_helpers::{page_id, wal_index},
+		storage::{
+			physical::MockPhysicalStorageApi,
+			test_helpers::{page_id, wal_index},
+		},
 		utils::units::MIB,
 	};
 
@@ -557,10 +631,14 @@ mod tests {
 	#[test]
 	fn load_and_store() {
 		// given
-		let cache = PageCache::new(&PageCacheConfig {
-			page_cache_size: 2 * MIB,
-			..Default::default()
-		});
+		let cache = PageCache::new(
+			&PageCacheConfig {
+				page_cache_size: 2 * MIB,
+				..Default::default()
+			},
+			Arc::new(MockPhysicalStorageApi::new()),
+			Arc::new(ThreadPool::new().unwrap()),
+		);
 
 		// when
 		let expected_page = [69; PAGE_BODY_SIZE];
@@ -581,10 +659,14 @@ mod tests {
 	#[test]
 	fn load_cache_miss() {
 		// given
-		let cache = PageCache::new(&PageCacheConfig {
-			page_cache_size: 2 * MIB,
-			..Default::default()
-		});
+		let cache = PageCache::new(
+			&PageCacheConfig {
+				page_cache_size: 2 * MIB,
+				..Default::default()
+			},
+			Arc::new(MockPhysicalStorageApi::new()),
+			Arc::new(ThreadPool::new().unwrap()),
+		);
 
 		// when
 		let guard = cache.load(page_id!(69, 420));
@@ -596,10 +678,14 @@ mod tests {
 	#[test]
 	fn evict_correct_page() {
 		// given
-		let cache = PageCache::new(&PageCacheConfig {
-			page_cache_size: 4 * BUFFERED_PAGE_SIZE,
-			..Default::default()
-		});
+		let cache = PageCache::new(
+			&PageCacheConfig {
+				page_cache_size: 4 * BUFFERED_PAGE_SIZE,
+				..Default::default()
+			},
+			Arc::new(MockPhysicalStorageApi::new()),
+			Arc::new(ThreadPool::new().unwrap()),
+		);
 
 		// when
 		cache.store(page_id!(1, 1)); // add 1, 1 to recent
@@ -625,10 +711,14 @@ mod tests {
 	#[test]
 	fn doesnt_evict_locked_page() {
 		// given
-		let cache = PageCache::new(&PageCacheConfig {
-			page_cache_size: 4 * BUFFERED_PAGE_SIZE,
-			..Default::default()
-		});
+		let cache = PageCache::new(
+			&PageCacheConfig {
+				page_cache_size: 4 * BUFFERED_PAGE_SIZE,
+				..Default::default()
+			},
+			Arc::new(MockPhysicalStorageApi::new()),
+			Arc::new(ThreadPool::new().unwrap()),
+		);
 
 		// when
 		cache.store(page_id!(1, 1)); // add 1, 1 to recent

@@ -215,7 +215,7 @@ where
 	PC: PageCacheApi,
 	W: WalApi,
 {
-	physical: PS,
+	physical: Arc<PS>,
 	cache: PC,
 	wal: W,
 	transaction_enumerator: TransactionEnumerator,
@@ -227,9 +227,17 @@ impl PageStorage {
 		thread_pool: Arc<ThreadPool>,
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
+		let physical_storage = Arc::new(PhysicalStorage::new(
+			Arc::clone(&folder),
+			&config.physical_storage,
+		));
 		Ok(Self::new(
-			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
-			PageCache::new(&config.page_cache),
+			Arc::clone(&physical_storage),
+			PageCache::new(
+				&config.page_cache,
+				Arc::clone(&physical_storage),
+				Arc::clone(&thread_pool),
+			),
 			Wal::create(Arc::clone(&folder), thread_pool, &config.wal)?,
 		))
 	}
@@ -239,9 +247,17 @@ impl PageStorage {
 		thread_pool: Arc<ThreadPool>,
 		config: &PageStorageConfig,
 	) -> Result<Self, StorageError> {
+		let physical_storage = Arc::new(PhysicalStorage::new(
+			Arc::clone(&folder),
+			&config.physical_storage,
+		));
 		Ok(Self::new(
-			PhysicalStorage::new(Arc::clone(&folder), &config.physical_storage),
-			PageCache::new(&config.page_cache),
+			Arc::clone(&physical_storage),
+			PageCache::new(
+				&config.page_cache,
+				Arc::clone(&physical_storage),
+				Arc::clone(&thread_pool),
+			),
 			Wal::open(Arc::clone(&folder), thread_pool, &config.wal)?,
 		))
 	}
@@ -253,7 +269,7 @@ where
 	PC: PageCacheApi,
 	W: WalApi,
 {
-	fn new(physical: PS, cache: PC, wal: W) -> Self {
+	fn new(physical: Arc<PS>, cache: PC, wal: W) -> Self {
 		Self {
 			physical,
 			cache,
@@ -459,7 +475,7 @@ mod tests {
 			})
 			.returning(|_| Ok(()));
 		// given
-		let page_storage = PageStorage::new(physical, cache, wal);
+		let page_storage = PageStorage::new(Arc::new(physical), cache, wal);
 
 		// when
 		page_storage.recover().unwrap();
@@ -519,7 +535,7 @@ mod tests {
 			});
 
 		// given
-		let storage = PageStorage::new(physical, cache, wal);
+		let storage = PageStorage::new(Arc::new(physical), cache, wal);
 
 		// when
 		let mut buf = [0; 5];
@@ -605,7 +621,7 @@ mod tests {
 			.returning(|_| Ok(wal_index!(24, 25)));
 
 		// given
-		let storage = PageStorage::new(physical, cache, wal);
+		let storage = PageStorage::new(Arc::new(physical), cache, wal);
 
 		// when
 		let mut t = storage.transaction().unwrap();
