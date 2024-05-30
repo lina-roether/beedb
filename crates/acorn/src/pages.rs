@@ -1,9 +1,12 @@
-use std::num::NonZeroU16;
+use std::{mem::size_of, num::NonZeroU16};
 
 use thiserror::Error;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-use crate::storage::{PageId, ReadPage, StorageError, WritePage};
+use crate::{
+	files::segment::PAGE_BODY_SIZE,
+	storage::{PageId, ReadPage, StorageError, WritePage},
+};
 
 #[derive(Debug, Error)]
 #[error("Page format error on page {page_id}: {message}")]
@@ -96,6 +99,10 @@ pub(crate) struct FreelistPage;
 
 impl FreelistPage {
 	const NEXT_PAGE_ID_OFFSET: usize = 0;
+	const LENGTH_OFFSET: usize = Self::NEXT_PAGE_ID_OFFSET + size_of::<PageIdRepr>();
+	const ITEMS_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<u16>();
+
+	pub const NUM_ITEMS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
 
 	pub fn read_next_page_id(
 		page_id: PageId,
@@ -113,6 +120,51 @@ impl FreelistPage {
 	) -> Result<(), PageError> {
 		let repr = PageIdRepr::from(value);
 		writer.write(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
+		Ok(())
+	}
+
+	pub fn read_length(page_id: PageId, reader: &impl ReadPage) -> Result<usize, PageError> {
+		let mut repr = [0; 2];
+		reader.read(page_id, Self::LENGTH_OFFSET, &mut repr)?;
+		Ok(u16::from_ne_bytes(repr).into())
+	}
+
+	pub fn write_length(
+		page_id: PageId,
+		writer: &mut impl WritePage,
+		value: usize,
+	) -> Result<(), PageError> {
+		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
+		writer.write(page_id, Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
+		Ok(())
+	}
+
+	pub fn read_item(
+		page_id: PageId,
+		reader: &impl ReadPage,
+		index: usize,
+	) -> Result<Option<PageId>, PageError> {
+		let mut repr = PageIdRepr::new_zeroed();
+		reader.read(
+			page_id,
+			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
+			repr.as_bytes_mut(),
+		)?;
+		Ok(repr.into())
+	}
+
+	pub fn write_item(
+		page_id: PageId,
+		writer: &mut impl WritePage,
+		index: usize,
+		value: Option<PageId>,
+	) -> Result<(), PageError> {
+		let repr = PageIdRepr::from(value);
+		writer.write(
+			page_id,
+			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
+			repr.as_bytes(),
+		)?;
 		Ok(())
 	}
 }
