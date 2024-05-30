@@ -14,8 +14,8 @@
 #![feature(os_str_display)]
 
 mod consts;
+mod database;
 mod files;
-mod pages;
 mod storage;
 mod tasks;
 mod utils;
