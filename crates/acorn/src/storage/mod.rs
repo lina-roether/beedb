@@ -59,9 +59,27 @@ pub(crate) trait ReadPage {
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 }
 
+impl<T: ReadPage> ReadPage for &T {
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		(**self).read(page_id, offset, buf)
+	}
+}
+
+impl<T: ReadPage> ReadPage for &mut T {
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		(**self).read(page_id, offset, buf)
+	}
+}
+
 #[cfg_attr(test, automock)]
 pub(crate) trait WritePage {
 	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
+}
+
+impl<T: WritePage> WritePage for &mut T {
+	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
+		(*self).write(page_id, offset, buf)
+	}
 }
 
 pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal>

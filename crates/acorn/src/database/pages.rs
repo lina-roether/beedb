@@ -54,120 +54,112 @@ impl From<Option<PageId>> for PageIdRepr {
 	}
 }
 
-pub(crate) struct MetaPage;
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MetaPage(pub PageId);
 
 impl MetaPage {
 	const FREELIST_HEAD_OFFSET: usize = 0;
 	const NEXT_PAGE_ID_OFFSET: usize = Self::FREELIST_HEAD_OFFSET + size_of::<PageIdRepr>();
 
-	pub fn read_freelist_head(
-		page_id: PageId,
+	pub fn get_freelist_head(
+		self,
 		reader: &impl ReadPage,
 	) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(page_id, Self::FREELIST_HEAD_OFFSET, repr.as_bytes_mut())?;
+		reader.read(self.0, Self::FREELIST_HEAD_OFFSET, repr.as_bytes_mut())?;
 		Ok(repr.into())
 	}
 
-	pub fn write_freelist_head(
-		page_id: PageId,
-		writer: &mut impl WritePage,
+	pub fn set_freelist_head(
+		self,
+		mut writer: impl WritePage,
 		value: Option<PageId>,
 	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		writer.write(page_id, Self::FREELIST_HEAD_OFFSET, repr.as_bytes())?;
+		writer.write(self.0, Self::FREELIST_HEAD_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 
-	pub fn read_next_page_id(
-		page_id: PageId,
-		reader: &impl ReadPage,
-	) -> Result<PageId, DatabaseError> {
+	pub fn get_next_page_id(self, reader: impl ReadPage) -> Result<PageId, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
+		reader.read(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
 
 		repr.try_into()
-			.map_err(|msg| DatabaseError::PageFormat(page_id, msg))
+			.map_err(|msg| DatabaseError::PageFormat(self.0, msg))
 	}
 
-	pub fn write_next_page_id(
-		page_id: PageId,
-		writer: &mut impl WritePage,
+	pub fn set_next_page_id(
+		self,
+		mut writer: impl WritePage,
 		value: PageId,
 	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		writer.write(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
+		writer.write(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 }
 
-pub(crate) struct FreelistPage;
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FreelistPage(pub PageId);
 
 impl FreelistPage {
 	const NEXT_PAGE_ID_OFFSET: usize = 0;
 	const LENGTH_OFFSET: usize = Self::NEXT_PAGE_ID_OFFSET + size_of::<PageIdRepr>();
 	const ITEMS_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<u16>();
 
-	pub const NUM_ITEMS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
+	pub const NUM_SLOTS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
 
-	pub fn read_next_page_id(
-		page_id: PageId,
-		reader: &impl ReadPage,
-	) -> Result<Option<PageId>, DatabaseError> {
+	pub fn get_next_page_id(self, reader: &impl ReadPage) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
+		reader.read(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
 		Ok(repr.into())
 	}
 
-	pub fn write_next_page_id(
-		page_id: PageId,
-		writer: &mut impl WritePage,
+	pub fn set_next_page_id(
+		self,
+		mut writer: impl WritePage,
 		value: Option<PageId>,
 	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		writer.write(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
+		writer.write(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 
-	pub fn read_length(page_id: PageId, reader: &impl ReadPage) -> Result<usize, DatabaseError> {
+	pub fn get_length(self, reader: impl ReadPage) -> Result<usize, DatabaseError> {
 		let mut repr = [0; 2];
-		reader.read(page_id, Self::LENGTH_OFFSET, &mut repr)?;
+		reader.read(self.0, Self::LENGTH_OFFSET, &mut repr)?;
 		Ok(u16::from_ne_bytes(repr).into())
 	}
 
-	pub fn write_length(
-		page_id: PageId,
-		writer: &mut impl WritePage,
-		value: usize,
-	) -> Result<(), DatabaseError> {
+	pub fn set_length(self, mut writer: impl WritePage, value: usize) -> Result<(), DatabaseError> {
 		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
-		writer.write(page_id, Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
+		writer.write(self.0, Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
 		Ok(())
 	}
 
-	pub fn read_item(
-		page_id: PageId,
-		reader: &impl ReadPage,
+	pub fn get_item(
+		self,
+		reader: impl ReadPage,
 		index: usize,
 	) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
 		reader.read(
-			page_id,
+			self.0,
 			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
 			repr.as_bytes_mut(),
 		)?;
 		Ok(repr.into())
 	}
 
-	pub fn write_item(
-		page_id: PageId,
-		writer: &mut impl WritePage,
+	pub fn set_item(
+		self,
+		mut writer: impl WritePage,
 		index: usize,
 		value: Option<PageId>,
 	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
 		writer.write(
-			page_id,
+			self.0,
 			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
 			repr.as_bytes(),
 		)?;
