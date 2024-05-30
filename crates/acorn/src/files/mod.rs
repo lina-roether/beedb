@@ -88,7 +88,7 @@ pub(crate) struct PageId {
 }
 
 impl PageId {
-	pub fn new(segment_num: u32, page_num: NonZeroU16) -> Self {
+	pub const fn new(segment_num: u32, page_num: NonZeroU16) -> Self {
 		Self {
 			segment_num,
 			page_num,

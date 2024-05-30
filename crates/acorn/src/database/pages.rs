@@ -1,28 +1,13 @@
 use std::{mem::size_of, num::NonZeroU16};
 
-use thiserror::Error;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
 	files::segment::PAGE_BODY_SIZE,
-	storage::{PageId, ReadPage, StorageError, WritePage},
+	storage::{PageId, ReadPage, WritePage},
 };
 
-#[derive(Debug, Error)]
-#[error("Page format error on page {page_id}: {message}")]
-pub(crate) struct PageFormatError {
-	page_id: PageId,
-	message: String,
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum PageError {
-	#[error(transparent)]
-	Storage(#[from] StorageError),
-
-	#[error(transparent)]
-	Format(#[from] PageFormatError),
-}
+use super::DatabaseError;
 
 #[derive(AsBytes, FromZeroes, FromBytes)]
 #[repr(C, packed)]
@@ -73,24 +58,45 @@ pub(crate) struct MetaPage;
 
 impl MetaPage {
 	const FREELIST_HEAD_OFFSET: usize = 0;
+	const NEXT_PAGE_ID_OFFSET: usize = Self::FREELIST_HEAD_OFFSET + size_of::<PageIdRepr>();
 
 	pub fn read_freelist_head(
 		page_id: PageId,
 		reader: &impl ReadPage,
-	) -> Result<PageId, PageError> {
+	) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
 		reader.read(page_id, Self::FREELIST_HEAD_OFFSET, repr.as_bytes_mut())?;
-
-		PageId::try_from(repr).map_err(|message| PageFormatError { page_id, message }.into())
+		Ok(repr.into())
 	}
 
 	pub fn write_freelist_head(
 		page_id: PageId,
 		writer: &mut impl WritePage,
-		value: PageId,
-	) -> Result<(), PageError> {
+		value: Option<PageId>,
+	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
 		writer.write(page_id, Self::FREELIST_HEAD_OFFSET, repr.as_bytes())?;
+		Ok(())
+	}
+
+	pub fn read_next_page_id(
+		page_id: PageId,
+		reader: &impl ReadPage,
+	) -> Result<PageId, DatabaseError> {
+		let mut repr = PageIdRepr::new_zeroed();
+		reader.read(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
+
+		repr.try_into()
+			.map_err(|msg| DatabaseError::PageFormat(page_id, msg))
+	}
+
+	pub fn write_next_page_id(
+		page_id: PageId,
+		writer: &mut impl WritePage,
+		value: PageId,
+	) -> Result<(), DatabaseError> {
+		let repr = PageIdRepr::from(value);
+		writer.write(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 }
@@ -107,7 +113,7 @@ impl FreelistPage {
 	pub fn read_next_page_id(
 		page_id: PageId,
 		reader: &impl ReadPage,
-	) -> Result<Option<PageId>, PageError> {
+	) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
 		reader.read(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
 		Ok(repr.into())
@@ -117,13 +123,13 @@ impl FreelistPage {
 		page_id: PageId,
 		writer: &mut impl WritePage,
 		value: Option<PageId>,
-	) -> Result<(), PageError> {
+	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
 		writer.write(page_id, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 
-	pub fn read_length(page_id: PageId, reader: &impl ReadPage) -> Result<usize, PageError> {
+	pub fn read_length(page_id: PageId, reader: &impl ReadPage) -> Result<usize, DatabaseError> {
 		let mut repr = [0; 2];
 		reader.read(page_id, Self::LENGTH_OFFSET, &mut repr)?;
 		Ok(u16::from_ne_bytes(repr).into())
@@ -133,7 +139,7 @@ impl FreelistPage {
 		page_id: PageId,
 		writer: &mut impl WritePage,
 		value: usize,
-	) -> Result<(), PageError> {
+	) -> Result<(), DatabaseError> {
 		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
 		writer.write(page_id, Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
 		Ok(())
@@ -143,7 +149,7 @@ impl FreelistPage {
 		page_id: PageId,
 		reader: &impl ReadPage,
 		index: usize,
-	) -> Result<Option<PageId>, PageError> {
+	) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
 		reader.read(
 			page_id,
@@ -158,7 +164,7 @@ impl FreelistPage {
 		writer: &mut impl WritePage,
 		index: usize,
 		value: Option<PageId>,
-	) -> Result<(), PageError> {
+	) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
 		writer.write(
 			page_id,
