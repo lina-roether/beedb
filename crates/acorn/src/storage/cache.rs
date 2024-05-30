@@ -467,6 +467,8 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 			let Some(index) = indices.get(&page_id).copied() else {
 				continue;
 			};
+			mem::drop(indices);
+
 			let guard = Self::load_direct(locks, buf, index);
 			if !guard.header().dirty() {
 				continue;
