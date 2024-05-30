@@ -9,7 +9,7 @@ use log::warn;
 use thiserror::Error;
 
 #[cfg(test)]
-use mockall::automock;
+use mockall::mock;
 
 #[cfg(test)]
 use crate::storage::cache::{MockPageReadGuardApi, MockPageWriteGuardApi};
@@ -52,6 +52,14 @@ pub(crate) struct PageStorageConfig {
 	pub physical_storage: PhysicalStorageConfig,
 	pub page_cache: PageCacheConfig,
 	pub wal: WalConfig,
+}
+
+pub(crate) trait ReadPage {
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+}
+
+pub(crate) trait WritePage {
+	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
 }
 
 pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal>
@@ -117,25 +125,18 @@ where
 	}
 }
 
-#[cfg_attr(test, automock)]
-pub(crate) trait TransactionApi {
+pub(crate) trait TransactionApi: ReadPage + WritePage {
 	fn id(&self) -> u64;
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
-	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
 	fn commit(self) -> Result<(), StorageError>;
 	fn undo(self) -> Result<(), StorageError>;
 }
 
-impl<'a, PS, PC, W> TransactionApi for Transaction<'a, PS, PC, W>
+impl<'a, PS, PC, W> ReadPage for Transaction<'a, PS, PC, W>
 where
 	PS: PhysicalStorageApi,
 	PC: PageCacheApi,
 	W: WalApi,
 {
-	fn id(&self) -> u64 {
-		self.id
-	}
-
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
 		if let Some(guard) = self.locks.get(&page_id) {
 			guard.read(offset, buf);
@@ -144,7 +145,14 @@ where
 		}
 		Ok(())
 	}
+}
 
+impl<'a, PS, PC, W> WritePage for Transaction<'a, PS, PC, W>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
 	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
 		self.acquire_lock(page_id)?;
 		let guard = self.locks.get_mut(&page_id).unwrap();
@@ -161,6 +169,17 @@ where
 		guard.write(offset, buf, wal_index);
 		Ok(())
 	}
+}
+
+impl<'a, PS, PC, W> TransactionApi for Transaction<'a, PS, PC, W>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
+	fn id(&self) -> u64 {
+		self.id
+	}
 
 	fn commit(mut self) -> Result<(), StorageError> {
 		self.storage.wal.log_commit(wal::CommitLog {
@@ -175,6 +194,23 @@ where
 		self.undo_impl()?;
 		self.completed = true;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mock! {
+	pub(crate) TransactionApi {}
+
+	impl ReadPage for TransactionApi {
+		fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	}
+	impl WritePage for TransactionApi {
+		fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
+	}
+	impl TransactionApi for TransactionApi {
+		fn id(&self) -> u64;
+		fn commit(self) -> Result<(), StorageError>;
+		fn undo(self) -> Result<(), StorageError>;
 	}
 }
 
@@ -306,26 +342,24 @@ where
 	}
 }
 
-#[cfg_attr(test, automock(
-    type ReadGuard<'a> = MockPageReadGuardApi;
-    type WriteGuard<'a> = MockPageWriteGuardApi;
-    type Transaction<'a> = MockTransactionApi;
-))]
-#[allow(clippy::needless_lifetimes)]
-pub(crate) trait PageStorageApi {
-	type ReadGuard<'a>: PageReadGuardApi + 'a
-	where
-		Self: 'a;
-	type WriteGuard<'a>: PageWriteGuardApi + 'a
-	where
-		Self: 'a;
+pub(crate) trait PageStorageApi: ReadPage {
 	type Transaction<'a>: TransactionApi + 'a
 	where
 		Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError>;
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 	fn transaction<'a>(&'a self) -> Result<Self::Transaction<'a>, StorageError>;
+}
+impl<PS, PC, W> ReadPage for PageStorage<PS, PC, W>
+where
+	PS: PhysicalStorageApi,
+	PC: PageCacheApi,
+	W: WalApi,
+{
+	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		self.read_guard(page_id)?.read(offset, buf);
+		Ok(())
+	}
 }
 
 impl<PS, PC, W> PageStorageApi for PageStorage<PS, PC, W>
@@ -334,8 +368,6 @@ where
 	PC: PageCacheApi,
 	W: WalApi,
 {
-	type ReadGuard<'a> = PC::ReadGuard<'a> where Self: 'a;
-	type WriteGuard<'a> = PC::WriteGuard<'a> where Self: 'a;
 	type Transaction<'a> = Transaction<'a, PS, PC, W> where Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError> {
@@ -351,16 +383,27 @@ where
 		})
 	}
 
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
-		self.read_guard(page_id)?.read(offset, buf);
-		Ok(())
-	}
-
 	fn transaction(&self) -> Result<Transaction<'_, PS, PC, W>, StorageError> {
 		let Some(transaction_id) = self.transaction_enumerator.begin() else {
 			return Err(StorageError::TransactionLimitReached);
 		};
 		Ok(Transaction::new(transaction_id, self))
+	}
+}
+
+#[cfg(test)]
+mock! {
+	pub(crate) PageStorageApi {}
+
+	impl ReadPage for PageStorageApi {
+		fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	}
+
+	impl PageStorageApi for PageStorageApi {
+		type Transaction<'a> = MockTransactionApi;
+
+		fn recover(&self) -> Result<(), StorageError>;
+		fn transaction<'a>(&'a self) -> Result<MockTransactionApi, StorageError>;
 	}
 }
 
