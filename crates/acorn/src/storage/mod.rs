@@ -9,7 +9,7 @@ use log::warn;
 use thiserror::Error;
 
 #[cfg(test)]
-use mockall::mock;
+use mockall::{automock, mock};
 
 #[cfg(test)]
 use crate::storage::cache::{MockPageReadGuardApi, MockPageWriteGuardApi};
@@ -54,10 +54,12 @@ pub(crate) struct PageStorageConfig {
 	pub wal: WalConfig,
 }
 
+#[cfg_attr(test, automock)]
 pub(crate) trait ReadPage {
 	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 }
 
+#[cfg_attr(test, automock)]
 pub(crate) trait WritePage {
 	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
 }

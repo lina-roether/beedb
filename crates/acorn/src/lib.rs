@@ -15,6 +15,7 @@
 
 mod consts;
 mod files;
+mod pages;
 mod storage;
 mod tasks;
 mod utils;

@@ -1,6 +1,7 @@
 use std::{
 	convert::Infallible,
 	ffi::OsString,
+	fmt,
 	fs::{self, ReadDir},
 	io,
 	num::{NonZeroU16, NonZeroU64},
@@ -92,6 +93,12 @@ impl PageId {
 			segment_num,
 			page_num,
 		}
+	}
+}
+
+impl fmt::Display for PageId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{:08x}:{:04x}", self.segment_num, self.page_num)
 	}
 }
 
