@@ -2,7 +2,6 @@ use std::{
 	collections::HashMap,
 	error::Error,
 	fmt::{self},
-	io::Write,
 };
 
 #[derive(Debug, Clone)]
@@ -163,7 +162,7 @@ pub(crate) enum Schema {
 impl fmt::Display for Schema {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Empty => write!(f, "()"),
+			Self::Empty => write!(f, "_"),
 			Self::Primitive(primitive) => write!(f, "{primitive}"),
 			Self::Option(inner) => write!(f, "?{inner}"),
 			Self::List(items) => write!(f, "[{items}]"),
@@ -182,7 +181,11 @@ impl fmt::Display for Schema {
 			}
 			Self::Enum(variants) => {
 				for (i, (name, schema)) in variants.iter().enumerate() {
-					write!(f, "{name}({schema})")?;
+					if **schema == Schema::Empty {
+						write!(f, "{name}")?;
+					} else {
+						write!(f, "{name}({schema})")?;
+					}
 					if i < variants.len() - 1 {
 						write!(f, " | ")?;
 					}
