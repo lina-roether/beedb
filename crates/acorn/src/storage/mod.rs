@@ -431,6 +431,8 @@ mock! {
 mod tests {
 	use mockall::{predicate::*, Sequence};
 	use pretty_assertions::assert_buf_eq;
+	use tempfile::tempdir;
+	use test::Bencher;
 	use tests::wal::{CommitLog, WriteLog};
 
 	use crate::files::segment::PAGE_BODY_SIZE;
@@ -499,7 +501,7 @@ mod tests {
 			.withf(|read_op| read_op.page_id == page_id!(1, 2))
 			.returning(|read_op| {
 				read_op.buf.fill(0);
-				Ok(wal_index!(69, 420))
+				Ok(Some(wal_index!(69, 420)))
 			});
 		physical
 			.expect_write()
@@ -580,7 +582,7 @@ mod tests {
 					.iter_mut()
 					.enumerate()
 					.for_each(|(i, b)| *b = i as u8);
-				Ok(wal_index!(1, 2))
+				Ok(Some(wal_index!(1, 2)))
 			});
 		cache
 			.expect_downgrade_guard()
@@ -661,7 +663,7 @@ mod tests {
 			.withf(|read_op| read_op.page_id == page_id!(1, 2))
 			.returning(|read_op| {
 				read_op.buf.fill(0);
-				Ok(wal_index!(69, 420))
+				Ok(Some(wal_index!(69, 420)))
 			});
 		wal.expect_log_write()
 			.once()
@@ -695,6 +697,41 @@ mod tests {
 
 		// then
 		assert_buf_eq!(received, [1, 2]);
+	}
+
+	#[test]
+	fn integration_transaction() {
+		let tempdir = tempdir().unwrap();
+
+		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
+		let thread_pool = Arc::new(ThreadPool::new().unwrap());
+		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
+
+		let mut t = page_storage.transaction().unwrap();
+
+		t.write(page_id!(69, 420), 25, &[1, 2, 3, 4]).unwrap();
+		let mut data = [0; 4];
+		t.read(page_id!(69, 420), 25, &mut data).unwrap();
+		t.commit().unwrap();
+
+		assert_buf_eq!(data, [1, 2, 3, 4]);
+	}
+
+	#[bench]
+	fn bench_transaction(b: &mut Bencher) {
+		let tempdir = tempdir().unwrap();
+
+		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
+		let thread_pool = Arc::new(ThreadPool::new().unwrap());
+		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
+
+		b.iter(|| {
+			let mut t = page_storage.transaction().unwrap();
+
+			t.write(page_id!(69, 420), 25, &[1, 2, 3, 4]).unwrap();
+			t.read(page_id!(69, 420), 25, &mut [0; 4]).unwrap();
+			t.commit().unwrap();
+		})
 	}
 }
 

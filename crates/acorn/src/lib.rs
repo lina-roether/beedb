@@ -12,6 +12,10 @@
 #![feature(buf_read_has_data_left)]
 #![feature(cfg_match)]
 #![feature(os_str_display)]
+#![cfg_attr(test, feature(test))]
+
+#[cfg(test)]
+extern crate test;
 
 mod consts;
 mod database;

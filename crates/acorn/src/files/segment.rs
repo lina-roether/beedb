@@ -20,23 +20,22 @@ use crate::{
 	files::{generic::FileType, utils::CRC16},
 };
 
+const FORMAT_VERSION_UNINIT: u8 = 0;
 const FORMAT_VERSION: u8 = 1;
 
-cfg_match! {
-	cfg(not(test)) => {
-		// 1 GiB for PAGE_SIZE = 16 KiB
-		const SEGMENT_SIZE: usize = PAGE_SIZE << 16;
-	}
-	cfg(test) => {
-		// Smaller segment size for testing
-		const SEGMENT_SIZE: usize = PAGE_SIZE * 8;
-	}
+// 1 GiB for PAGE_SIZE = 16 KiB
+const SEGMENT_SIZE: usize = PAGE_SIZE << 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InitPageHeader {
+	wal_index: WalIndex,
+	crc: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PageHeader {
-	wal_index: WalIndex,
-	crc: u16,
+enum PageHeader {
+	Uninit,
+	Init(InitPageHeader),
 }
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
@@ -53,11 +52,14 @@ const PAGE_FORMAT_VERSION: u8 = 1;
 
 impl From<PageHeader> for PageHeaderRepr {
 	fn from(value: PageHeader) -> Self {
-		Self {
-			wal_generation: value.wal_index.generation,
-			wal_offset: value.wal_index.offset.get(),
-			crc: value.crc,
-			format_version: PAGE_FORMAT_VERSION,
+		match value {
+			PageHeader::Uninit => Self::new_zeroed(),
+			PageHeader::Init(header) => Self {
+				wal_generation: header.wal_index.generation,
+				wal_offset: header.wal_index.offset.get(),
+				crc: header.crc,
+				format_version: PAGE_FORMAT_VERSION,
+			},
 		}
 	}
 }
@@ -66,6 +68,10 @@ impl TryFrom<PageHeaderRepr> for PageHeader {
 	type Error = FileError;
 
 	fn try_from(value: PageHeaderRepr) -> Result<Self, Self::Error> {
+		if value.format_version == FORMAT_VERSION_UNINIT {
+			return Ok(Self::Uninit);
+		}
+
 		if value.format_version != PAGE_FORMAT_VERSION {
 			return Err(FileError::IncompatiblePageVersion(value.format_version));
 		}
@@ -74,10 +80,10 @@ impl TryFrom<PageHeaderRepr> for PageHeader {
 				"Found invalid WAL offset '0'".to_string(),
 			));
 		};
-		Ok(Self {
+		Ok(Self::Init(InitPageHeader {
 			wal_index: WalIndex::new(value.wal_generation, wal_offset),
 			crc: value.crc,
-		})
+		}))
 	}
 }
 
@@ -163,18 +169,23 @@ impl SegmentFile {
 
 #[cfg_attr(test, automock)]
 pub(crate) trait SegmentFileApi {
-	fn read(&self, page_num: NonZeroU16, buf: &mut [u8]) -> Result<WalIndex, FileError>;
+	fn read(&self, page_num: NonZeroU16, buf: &mut [u8]) -> Result<Option<WalIndex>, FileError>;
 	fn write(&self, page_num: NonZeroU16, buf: &[u8], wal_index: WalIndex)
 		-> Result<(), FileError>;
 }
 
 impl SegmentFileApi for SegmentFile {
-	fn read(&self, page_num: NonZeroU16, buf: &mut [u8]) -> Result<WalIndex, FileError> {
+	fn read(&self, page_num: NonZeroU16, buf: &mut [u8]) -> Result<Option<WalIndex>, FileError> {
 		debug_assert_eq!(buf.len(), PAGE_BODY_SIZE);
 
 		let mut page_buf = [0; PAGE_SIZE];
 		self.read_exact_at(&mut page_buf, Self::get_page_offset(page_num))?;
 		let header = PageHeaderRepr::from_bytes(&page_buf[0..PageHeaderRepr::SIZE])?;
+		let PageHeader::Init(header) = header else {
+			buf.fill(0);
+			return Ok(None);
+		};
+
 		let body = &page_buf[PageHeaderRepr::SIZE..];
 
 		let crc = CRC16.checksum(body);
@@ -184,7 +195,7 @@ impl SegmentFileApi for SegmentFile {
 
 		buf.copy_from_slice(body);
 
-		Ok(header.wal_index)
+		Ok(Some(header.wal_index))
 	}
 
 	fn write(
@@ -196,7 +207,7 @@ impl SegmentFileApi for SegmentFile {
 		debug_assert_eq!(buf.len(), PAGE_BODY_SIZE);
 
 		let crc = CRC16.checksum(buf);
-		let header = PageHeader { wal_index, crc };
+		let header = PageHeader::Init(InitPageHeader { wal_index, crc });
 
 		let mut page_buf = [0; PAGE_SIZE];
 		page_buf[0..PageHeaderRepr::SIZE].copy_from_slice(PageHeaderRepr::from(header).as_bytes());
@@ -304,7 +315,7 @@ mod tests {
 		let wal_index = segment.read(non_zero!(5), &mut data).unwrap();
 
 		// then
-		assert_eq!(wal_index, wal_index!(69, 420));
+		assert_eq!(wal_index, Some(wal_index!(69, 420)));
 		assert_eq!(data, [25; PAGE_BODY_SIZE]);
 	}
 }

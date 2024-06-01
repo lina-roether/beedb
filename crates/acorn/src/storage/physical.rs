@@ -83,13 +83,13 @@ pub(crate) struct WriteOp<'a> {
 #[cfg_attr(test, automock)]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait PhysicalStorageApi {
-	fn read<'a>(&self, op: ReadOp<'a>) -> Result<WalIndex, StorageError>;
+	fn read<'a>(&self, op: ReadOp<'a>) -> Result<Option<WalIndex>, StorageError>;
 
 	fn write<'a>(&self, op: WriteOp<'a>) -> Result<(), StorageError>;
 }
 
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
-	fn read(&self, op: ReadOp) -> Result<WalIndex, StorageError> {
+	fn read(&self, op: ReadOp) -> Result<Option<WalIndex>, StorageError> {
 		self.use_segment(op.page_id.segment_num, |segment| {
 			let wal_index = segment.read(op.page_id.page_num, op.buf)?;
 			Ok(wal_index)
@@ -210,7 +210,7 @@ mod tests {
 					.with(eq(non_zero!(420)), always())
 					.returning(|_, buf| {
 						buf[0..3].copy_from_slice(&[1, 2, 3]);
-						Ok(wal_index!(69, 420))
+						Ok(Some(wal_index!(69, 420)))
 					});
 				Ok(segment)
 			});
@@ -228,7 +228,7 @@ mod tests {
 			.unwrap();
 
 		// then
-		assert_eq!(wal_index, wal_index!(69, 420));
+		assert_eq!(wal_index, Some(wal_index!(69, 420)));
 		assert_eq!(buf[0..3], [1, 2, 3]);
 	}
 }
