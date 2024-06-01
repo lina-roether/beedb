@@ -294,16 +294,17 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 		gens: &mut GenerationQueue<DF>,
 		mut handle: impl FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
-		if transaction_ids.is_empty() {
+		let state = self.state.lock();
+		let last_indices: Vec<WalIndex> = transaction_ids
+			.iter()
+			.filter_map(|tid| state.transactions.get(tid).map(|ts| ts.last_index))
+			.collect();
+
+		if last_indices.is_empty() {
 			return Ok(());
 		}
 
-		let state = self.state.lock();
-		let lowest_index: WalIndex = transaction_ids
-			.iter()
-			.filter_map(|tid| state.transactions.get(tid).map(|ts| ts.last_index))
-			.min()
-			.unwrap();
+		let lowest_index: WalIndex = *last_indices.iter().min().unwrap();
 		mem::drop(state);
 
 		let mut compensation_items: Vec<UndoLog> = Vec::new();
