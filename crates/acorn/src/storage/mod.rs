@@ -733,6 +733,21 @@ mod tests {
 			t.commit().unwrap();
 		})
 	}
+
+	#[bench]
+	fn bench_op_in_transaction(b: &mut Bencher) {
+		let tempdir = tempdir().unwrap();
+
+		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
+		let thread_pool = Arc::new(ThreadPool::new().unwrap());
+		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
+
+		let mut t = page_storage.transaction().unwrap();
+		b.iter(|| {
+			t.write(page_id!(69, 420), 25, &[1, 2, 3, 4]).unwrap();
+		});
+		t.commit().unwrap();
+	}
 }
 
 #[cfg(test)]
