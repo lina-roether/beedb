@@ -369,6 +369,8 @@ pub(crate) trait PageStorageApi: ReadPage {
 
 	fn recover(&self) -> Result<(), StorageError>;
 	fn transaction<'a>(&'a self) -> Result<Self::Transaction<'a>, StorageError>;
+	fn flush(&self);
+	fn flush_sync(&self) -> Result<(), StorageError>;
 }
 impl<PS, PC, W> ReadPage for PageStorage<PS, PC, W>
 where
@@ -409,6 +411,14 @@ where
 		};
 		Ok(Transaction::new(transaction_id, self))
 	}
+
+	fn flush(&self) {
+		self.cache.flush();
+	}
+
+	fn flush_sync(&self) -> Result<(), StorageError> {
+		self.cache.flush_sync()
+	}
 }
 
 #[cfg(test)]
@@ -424,11 +434,18 @@ mock! {
 
 		fn recover(&self) -> Result<(), StorageError>;
 		fn transaction<'a>(&'a self) -> Result<MockTransactionApi, StorageError>;
+		fn flush(&self);
+		fn flush_sync(&self) -> Result<(), StorageError>;
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		fs::File,
+		io::{Read, Seek, SeekFrom},
+	};
+
 	use mockall::{predicate::*, Sequence};
 	use pretty_assertions::assert_buf_eq;
 	use tempfile::tempdir;
@@ -715,6 +732,17 @@ mod tests {
 		t.commit().unwrap();
 
 		assert_buf_eq!(data, [1, 2, 3, 4]);
+
+		page_storage.flush_sync().unwrap();
+
+		let mut segment_file = File::open(tempdir.path().join("segments/69")).unwrap();
+		segment_file.seek(SeekFrom::Start(1130515)).unwrap();
+		let mut buf = [0; PAGE_BODY_SIZE];
+		segment_file.read_exact(&mut buf).unwrap();
+
+		let mut expected = [0; PAGE_BODY_SIZE];
+		expected[25..29].copy_from_slice(&[1, 2, 3, 4]);
+		assert_buf_eq!(buf, expected);
 	}
 
 	#[bench]

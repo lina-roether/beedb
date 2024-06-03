@@ -331,7 +331,7 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 			dirty_list,
 			locks,
 			#[allow(clippy::cast_possible_truncation)]
-			max_num_dirty: (num_pages as f32 * config.max_dirty_pages) as usize,
+			max_num_dirty: usize::max((num_pages as f32 * config.max_dirty_pages) as usize, 1),
 			flush_timer_handle,
 		}
 	}
@@ -449,7 +449,7 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 		}
 	}
 
-	async fn flush(
+	fn flush(
 		physical_storage: &PS,
 		dirty_list: &Mutex<Vec<PageId>>,
 		indices: &RwLock<HashMap<PageId, usize>>,
@@ -499,7 +499,7 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 		locks: &[RawRwLock],
 		buf: &PageBuffer,
 	) {
-		if let Err(err) = Self::flush(physical_storage, dirty_list, indices, locks, buf).await {
+		if let Err(err) = Self::flush(physical_storage, dirty_list, indices, locks, buf) {
 			error!("Page cache flush failed: {err}");
 		}
 	}
@@ -545,6 +545,8 @@ pub(crate) trait PageCacheApi {
 	fn load<'a>(&'a self, page_id: PageId) -> Option<Self::ReadGuard<'a>>;
 	fn load_mut<'a>(&'a self, page_id: PageId) -> Option<Self::WriteGuard<'a>>;
 	fn store<'a>(&'a self, page_id: PageId) -> Self::WriteGuard<'a>;
+	fn flush(&self);
+	fn flush_sync(&self) -> Result<(), StorageError>;
 	fn scrap(&self, page_id: PageId);
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
 }
@@ -584,6 +586,31 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCacheApi for PageCache<
 
 		let index = self.get_store_index(page_id);
 		Self::load_mut_direct(&self.locks, &self.buf, index)
+	}
+
+	fn flush(&self) {
+		let physical_storage = Arc::clone(&self.physical_storage);
+		let dirty_list = Arc::clone(&self.dirty_list);
+		let indices = Arc::clone(&self.indices);
+		let locks = Arc::clone(&self.locks);
+		let buf = Arc::clone(&self.buf);
+		self.thread_pool.spawn_ok(Self::single_flush_task(
+			physical_storage,
+			dirty_list,
+			indices,
+			locks,
+			buf,
+		))
+	}
+
+	fn flush_sync(&self) -> Result<(), StorageError> {
+		Self::flush(
+			&self.physical_storage,
+			&self.dirty_list,
+			&self.indices,
+			&self.locks,
+			&self.buf,
+		)
 	}
 
 	fn scrap(&self, page_id: PageId) {
