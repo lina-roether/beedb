@@ -257,7 +257,9 @@ impl<'a> PageWriteGuardApi for PageWriteGuard<'a> {
 	}
 
 	fn write(&mut self, offset: usize, buf: &[u8], wal_index: WalIndex) {
-		self.header_mut().set_wal_index(wal_index);
+		let header = self.header_mut();
+		header.set_wal_index(wal_index);
+		header.set_dirty(true);
 		self.body_mut()[offset..offset + buf.len()].copy_from_slice(buf);
 	}
 }
@@ -476,11 +478,15 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 			if let Err(err) = physical_storage.write(WriteOp {
 				wal_index: guard.header().wal_index(),
 				page_id,
-				buf: guard.page,
+				buf: guard.body(),
 			}) {
 				error = Some(err);
 				break;
 			};
+			mem::drop(guard);
+
+			let mut guard_mut = Self::load_mut_direct(locks, buf, index);
+			guard_mut.header_mut().set_dirty(false);
 		}
 
 		if let Some(err) = error {

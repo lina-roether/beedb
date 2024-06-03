@@ -736,7 +736,7 @@ mod tests {
 		page_storage.flush_sync().unwrap();
 
 		let mut segment_file = File::open(tempdir.path().join("segments/69")).unwrap();
-		segment_file.seek(SeekFrom::Start(1130515)).unwrap();
+		segment_file.seek(SeekFrom::Start(6881299)).unwrap();
 		let mut buf = [0; PAGE_BODY_SIZE];
 		segment_file.read_exact(&mut buf).unwrap();
 
