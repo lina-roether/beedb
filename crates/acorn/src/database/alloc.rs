@@ -10,11 +10,11 @@ use super::{pages::MetaPage, DatabaseError};
 struct PageAllocator;
 
 impl PageAllocator {
-	const META_PAGE: MetaPage = MetaPage(PageId::new(0, unsafe { NonZero::new_unchecked(1) }));
+	const META_PAGE: MetaPage = MetaPage::new(PageId::new(0, unsafe { NonZero::new_unchecked(1) }));
 
 	pub fn init(mut t: impl WritePage) -> Result<(), DatabaseError> {
 		Self::META_PAGE.set_freelist_head(&mut t, None)?;
-		Self::META_PAGE.set_next_page_id(&mut t, Self::page_id_after(Self::META_PAGE.0))?;
+		Self::META_PAGE.set_next_page_id(&mut t, Self::page_id_after(Self::META_PAGE.page_id()))?;
 		Ok(())
 	}
 
@@ -27,12 +27,12 @@ impl PageAllocator {
 
 	pub fn free(mut t: impl ReadPage + WritePage, page_id: PageId) -> Result<(), DatabaseError> {
 		if let Some(freelist_head_id) = Self::META_PAGE.get_freelist_head(&t)? {
-			let freelist_head = FreelistPage(freelist_head_id);
+			let freelist_head = FreelistPage::new(freelist_head_id);
 			let length = freelist_head.get_length(&t)?;
 			if length < FreelistPage::NUM_SLOTS {
 				freelist_head.set_item(&mut t, length, Some(page_id))?;
 			} else {
-				Self::init_freelist_page(&mut t, page_id, Some(freelist_head.0))?;
+				Self::init_freelist_page(&mut t, page_id, Some(freelist_head.page_id()))?;
 				Self::META_PAGE.set_freelist_head(&mut t, Some(page_id))?;
 			}
 			return Ok(());
@@ -48,7 +48,7 @@ impl PageAllocator {
 		page_id: PageId,
 		next_page: Option<PageId>,
 	) -> Result<(), DatabaseError> {
-		let freelist_page = FreelistPage(page_id);
+		let freelist_page = FreelistPage::new(page_id);
 		freelist_page.set_length(&mut t, 0)?;
 		freelist_page.set_length(&mut t, 0)?;
 		freelist_page.set_next_page_id(&mut t, next_page)?;
@@ -59,7 +59,7 @@ impl PageAllocator {
 		let Some(freelist_head_id) = Self::META_PAGE.get_freelist_head(&t)? else {
 			return Ok(None);
 		};
-		let freelist_page = FreelistPage(freelist_head_id);
+		let freelist_page = FreelistPage::new(freelist_head_id);
 		let mut length = freelist_page.get_length(&t)?;
 
 		while length != 0 {
@@ -72,7 +72,7 @@ impl PageAllocator {
 
 		let new_head = freelist_page.get_next_page_id(&t)?;
 		Self::META_PAGE.set_freelist_head(&mut t, new_head)?;
-		Ok(Some(freelist_page.0))
+		Ok(Some(freelist_page.page_id()))
 	}
 
 	fn next_uninit_page(mut t: impl ReadPage + WritePage) -> Result<PageId, DatabaseError> {

@@ -55,11 +55,20 @@ impl From<Option<PageId>> for PageIdRepr {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct MetaPage(pub PageId);
+pub(crate) struct MetaPage(PageId);
 
 impl MetaPage {
 	const FREELIST_HEAD_OFFSET: usize = 0;
 	const NEXT_PAGE_ID_OFFSET: usize = Self::FREELIST_HEAD_OFFSET + size_of::<PageIdRepr>();
+
+	pub const fn new(page_id: PageId) -> Self {
+		Self(page_id)
+	}
+
+	#[inline]
+	pub const fn page_id(self) -> PageId {
+		self.0
+	}
 
 	pub fn get_freelist_head(
 		self,
@@ -100,7 +109,7 @@ impl MetaPage {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FreelistPage(pub PageId);
+pub(crate) struct FreelistPage(PageId);
 
 impl FreelistPage {
 	const NEXT_PAGE_ID_OFFSET: usize = 0;
@@ -108,6 +117,15 @@ impl FreelistPage {
 	const ITEMS_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<u16>();
 
 	pub const NUM_SLOTS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
+
+	pub const fn new(page_id: PageId) -> Self {
+		Self(page_id)
+	}
+
+	#[inline]
+	pub const fn page_id(self) -> PageId {
+		self.0
+	}
 
 	pub fn get_next_page_id(self, reader: &impl ReadPage) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
