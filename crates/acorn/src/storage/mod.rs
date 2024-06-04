@@ -452,7 +452,7 @@ mod tests {
 	use test::Bencher;
 	use tests::wal::{CommitLog, WriteLog};
 
-	use crate::files::segment::PAGE_BODY_SIZE;
+	use crate::{consts::PAGE_SIZE, files::segment::PAGE_BODY_SIZE};
 
 	use self::{
 		cache::MockPageCacheApi,
@@ -736,7 +736,10 @@ mod tests {
 		page_storage.flush_sync().unwrap();
 
 		let mut segment_file = File::open(tempdir.path().join("segments/69")).unwrap();
-		segment_file.seek(SeekFrom::Start(6881299)).unwrap();
+		const OFFSET: usize = 420 * PAGE_SIZE + 19;
+		segment_file
+			.seek(SeekFrom::Start(OFFSET.try_into().unwrap()))
+			.unwrap();
 		let mut buf = [0; PAGE_BODY_SIZE];
 		segment_file.read_exact(&mut buf).unwrap();
 

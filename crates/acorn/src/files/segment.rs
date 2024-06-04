@@ -23,7 +23,7 @@ use crate::{
 const FORMAT_VERSION_UNINIT: u8 = 0;
 const FORMAT_VERSION: u8 = 1;
 
-// 1 GiB for PAGE_SIZE = 16 KiB
+// 2 GiB when PAGE_SIZE = 32 KiB
 const SEGMENT_SIZE: usize = PAGE_SIZE << 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,7 +291,7 @@ mod tests {
 				PageHeaderRepr {
 					wal_generation: 69,
 					wal_offset: 420,
-					crc: 0x9c41,
+					crc: 0x0c78,
 					format_version: 1
 				}
 				.as_bytes(),
