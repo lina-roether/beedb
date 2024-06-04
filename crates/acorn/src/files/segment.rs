@@ -12,12 +12,12 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use super::{
 	generic::{GenericHeader, GenericHeaderRepr},
-	utils::Repr,
 	FileError, WalIndex,
 };
 use crate::{
 	consts::PAGE_SIZE,
 	files::{generic::FileType, utils::CRC16},
+	repr::Repr,
 };
 
 const FORMAT_VERSION_UNINIT: u8 = 0;
@@ -46,7 +46,7 @@ struct PageHeaderRepr {
 	crc: u16,
 	format_version: u8,
 }
-impl Repr<PageHeader> for PageHeaderRepr {}
+impl Repr<PageHeader, FileError> for PageHeaderRepr {}
 
 const PAGE_FORMAT_VERSION: u8 = 1;
 

@@ -1,6 +1,8 @@
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-use super::{utils::Repr, FileError};
+use crate::repr::Repr;
+
+use super::FileError;
 
 #[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
 #[repr(C, packed)]
@@ -76,7 +78,7 @@ impl TryFrom<GenericHeaderRepr> for GenericHeader {
 	}
 }
 
-impl Repr<GenericHeader> for GenericHeaderRepr {}
+impl Repr<GenericHeader, FileError> for GenericHeaderRepr {}
 
 #[cfg(test)]
 mod tests {

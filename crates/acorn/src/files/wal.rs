@@ -15,9 +15,11 @@ const FORMAT_VERSION: u8 = 1;
 #[cfg(test)]
 use mockall::automock;
 
+use crate::repr::Repr;
+
 use super::{
 	generic::{FileType, GenericHeader, GenericHeaderRepr},
-	utils::{Repr, CRC32},
+	utils::CRC32,
 	FileError, PageId, TransactionState, WalIndex,
 };
 
@@ -143,7 +145,7 @@ impl TryFrom<ItemHeaderRepr> for ItemHeader {
 	}
 }
 
-impl Repr<ItemHeader> for ItemHeaderRepr {}
+impl Repr<ItemHeader, FileError> for ItemHeaderRepr {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemFooter {
@@ -171,7 +173,7 @@ impl TryFrom<ItemFooterRepr> for ItemFooter {
 	}
 }
 
-impl Repr<ItemFooter> for ItemFooterRepr {}
+impl Repr<ItemFooter, FileError> for ItemFooterRepr {}
 
 struct TransactionBlock {
 	transaction_id: u64,
@@ -202,7 +204,7 @@ impl From<TransactionBlockRepr> for TransactionBlock {
 	}
 }
 
-impl Repr<TransactionBlock> for TransactionBlockRepr {}
+impl Repr<TransactionBlock, FileError> for TransactionBlockRepr {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WriteBlock {
@@ -239,11 +241,11 @@ impl TryFrom<WriteBlockRepr> for WriteBlock {
 	}
 }
 
-impl Repr<WriteBlock> for WriteBlockRepr {}
+impl Repr<WriteBlock, FileError> for WriteBlockRepr {}
 
 type CheckpointBlock = CheckpointBlockRepr;
 
-impl Repr<CheckpointBlock> for CheckpointBlockRepr {}
+impl Repr<CheckpointBlock, FileError> for CheckpointBlockRepr {}
 
 impl From<PageId> for PageIdRepr {
 	fn from(value: PageId) -> Self {
@@ -267,7 +269,7 @@ impl TryFrom<PageIdRepr> for PageId {
 	}
 }
 
-impl Repr<PageId> for PageIdRepr {}
+impl Repr<PageId, FileError> for PageIdRepr {}
 
 impl From<WalIndex> for WalIndexRepr {
 	fn from(value: WalIndex) -> Self {
@@ -294,7 +296,7 @@ impl TryFrom<WalIndexRepr> for WalIndex {
 	}
 }
 
-impl Repr<WalIndex> for WalIndexRepr {}
+impl Repr<WalIndex, FileError> for WalIndexRepr {}
 
 impl From<TransactionState> for TransactionStateRepr {
 	fn from(value: TransactionState) -> Self {
@@ -306,7 +308,7 @@ impl From<TransactionState> for TransactionStateRepr {
 	}
 }
 
-impl Repr<TransactionState> for TransactionStateRepr {}
+impl Repr<TransactionState, FileError> for TransactionStateRepr {}
 
 impl TryFrom<TransactionStateRepr> for TransactionState {
 	type Error = FileError;

@@ -20,6 +20,7 @@ extern crate test;
 mod consts;
 mod database;
 mod files;
+mod repr;
 mod storage;
 mod tasks;
 mod utils;
