@@ -46,7 +46,9 @@ struct PageHeaderRepr {
 	crc: u16,
 	format_version: u8,
 }
-impl Repr<PageHeader, FileError> for PageHeaderRepr {}
+impl Repr<PageHeader> for PageHeaderRepr {
+	type Error = FileError;
+}
 
 const PAGE_FORMAT_VERSION: u8 = 1;
 

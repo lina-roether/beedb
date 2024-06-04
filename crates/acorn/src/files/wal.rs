@@ -145,7 +145,9 @@ impl TryFrom<ItemHeaderRepr> for ItemHeader {
 	}
 }
 
-impl Repr<ItemHeader, FileError> for ItemHeaderRepr {}
+impl Repr<ItemHeader> for ItemHeaderRepr {
+	type Error = FileError;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemFooter {
@@ -173,7 +175,9 @@ impl TryFrom<ItemFooterRepr> for ItemFooter {
 	}
 }
 
-impl Repr<ItemFooter, FileError> for ItemFooterRepr {}
+impl Repr<ItemFooter> for ItemFooterRepr {
+	type Error = FileError;
+}
 
 struct TransactionBlock {
 	transaction_id: u64,
@@ -204,7 +208,9 @@ impl From<TransactionBlockRepr> for TransactionBlock {
 	}
 }
 
-impl Repr<TransactionBlock, FileError> for TransactionBlockRepr {}
+impl Repr<TransactionBlock> for TransactionBlockRepr {
+	type Error = FileError;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WriteBlock {
@@ -241,11 +247,15 @@ impl TryFrom<WriteBlockRepr> for WriteBlock {
 	}
 }
 
-impl Repr<WriteBlock, FileError> for WriteBlockRepr {}
+impl Repr<WriteBlock> for WriteBlockRepr {
+	type Error = FileError;
+}
 
 type CheckpointBlock = CheckpointBlockRepr;
 
-impl Repr<CheckpointBlock, FileError> for CheckpointBlockRepr {}
+impl Repr<CheckpointBlock> for CheckpointBlockRepr {
+	type Error = FileError;
+}
 
 impl From<PageId> for PageIdRepr {
 	fn from(value: PageId) -> Self {
@@ -269,7 +279,9 @@ impl TryFrom<PageIdRepr> for PageId {
 	}
 }
 
-impl Repr<PageId, FileError> for PageIdRepr {}
+impl Repr<PageId> for PageIdRepr {
+	type Error = FileError;
+}
 
 impl From<WalIndex> for WalIndexRepr {
 	fn from(value: WalIndex) -> Self {
@@ -296,7 +308,9 @@ impl TryFrom<WalIndexRepr> for WalIndex {
 	}
 }
 
-impl Repr<WalIndex, FileError> for WalIndexRepr {}
+impl Repr<WalIndex> for WalIndexRepr {
+	type Error = FileError;
+}
 
 impl From<TransactionState> for TransactionStateRepr {
 	fn from(value: TransactionState) -> Self {
@@ -308,7 +322,9 @@ impl From<TransactionState> for TransactionStateRepr {
 	}
 }
 
-impl Repr<TransactionState, FileError> for TransactionStateRepr {}
+impl Repr<TransactionState> for TransactionStateRepr {
+	type Error = FileError;
+}
 
 impl TryFrom<TransactionStateRepr> for TransactionState {
 	type Error = FileError;

@@ -78,7 +78,9 @@ impl TryFrom<GenericHeaderRepr> for GenericHeader {
 	}
 }
 
-impl Repr<GenericHeader, FileError> for GenericHeaderRepr {}
+impl Repr<GenericHeader> for GenericHeaderRepr {
+	type Error = FileError;
+}
 
 #[cfg(test)]
 mod tests {
