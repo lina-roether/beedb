@@ -56,18 +56,18 @@ pub(crate) struct PageStorageConfig {
 
 #[cfg_attr(test, automock)]
 pub(crate) trait ReadPage {
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 }
 
 impl<T: ReadPage> ReadPage for &T {
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
-		(**self).read(page_id, offset, buf)
+	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		(**self).read(offset, buf)
 	}
 }
 
 impl<T: ReadPage> ReadPage for &mut T {
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
-		(**self).read(page_id, offset, buf)
+	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		(**self).read(offset, buf)
 	}
 }
 
@@ -79,6 +79,53 @@ pub(crate) trait WritePage {
 impl<T: WritePage> WritePage for &mut T {
 	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
 		(*self).write(page_id, offset, buf)
+	}
+}
+
+enum WriteablePageGuard<'a, PC>
+where
+	PC: PageCacheApi + 'a,
+{
+	Shared(PC::ReadGuard<'a>),
+	Exclusive(&'a mut PC::WriteGuard<'a>),
+}
+
+pub(crate) struct Page<'a, PC>
+where
+	PC: PageCacheApi + 'a,
+{
+	guard: WriteablePageGuard<'a, PC>,
+}
+
+impl<'a, PC> ReadPage for Page<'a, PC>
+where
+	PC: PageCacheApi + 'a,
+{
+	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		match &self.guard {
+			WriteablePageGuard::Shared(guard) => guard.read(offset, buf),
+			WriteablePageGuard::Exclusive(guard) => guard.read(offset, buf),
+		}
+		Ok(())
+	}
+}
+
+pub(crate) struct PageMut<'a, PC>
+where
+	PC: PageCacheApi + 'a,
+{
+	page_id: PageId,
+	transaction_id: u64,
+	guard: &'a mut PC::WriteGuard<'a>,
+}
+
+impl<'a, PC> ReadPage for PageMut<'a, PC>
+where
+	PC: PageCacheApi + 'a,
+{
+	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+		self.guard.read(offset, buf);
+		Ok(())
 	}
 }
 
