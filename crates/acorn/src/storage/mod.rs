@@ -111,7 +111,6 @@ where
 pub(crate) struct PageMut<'t, 'a, PC, W>
 where
 	PC: PageCacheApi + 't,
-	W: WalApi,
 {
 	page_id: PageId,
 	transaction_id: u64,
@@ -122,7 +121,6 @@ where
 impl<'t, 'a, PC, W> ReadPage for PageMut<'t, 'a, PC, W>
 where
 	PC: PageCacheApi + 'a,
-	W: WalApi,
 {
 	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
 		self.guard.read(offset, buf);
@@ -338,12 +336,7 @@ impl TransactionEnumerator {
 	}
 }
 
-pub(crate) struct PageStorage<PS = PhysicalStorage, PC = PageCache, W = Wal>
-where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
-	W: WalApi,
-{
+pub(crate) struct PageStorage<PS = PhysicalStorage, PC = PageCache, W = Wal> {
 	physical: Arc<PS>,
 	cache: PC,
 	wal: W,
@@ -396,7 +389,6 @@ impl<PS, PC, W> PageStorage<PS, PC, W>
 where
 	PS: PhysicalStorageApi,
 	PC: PageCacheApi,
-	W: WalApi,
 {
 	fn new(physical: Arc<PS>, cache: PC, wal: W) -> Self {
 		Self {
