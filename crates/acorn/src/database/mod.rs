@@ -3,7 +3,7 @@ use std::string::FromUtf8Error;
 use document::SchemaError;
 use thiserror::Error;
 
-use crate::storage::{PageId, StorageError};
+use crate::storage::StorageError;
 
 mod alloc;
 mod document;
@@ -12,8 +12,8 @@ mod pages;
 
 #[derive(Debug, Error)]
 pub(crate) enum DatabaseError {
-	#[error("Page format error on page {0}: {1}")]
-	PageFormat(PageId, String),
+	#[error("Page format error: {0}")]
+	PageFormat(String),
 
 	#[error(transparent)]
 	StringEncoding(#[from] FromUtf8Error),

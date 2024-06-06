@@ -17,11 +17,13 @@ struct PageIdRepr {
 }
 
 impl TryFrom<PageIdRepr> for PageId {
-	type Error = String;
+	type Error = DatabaseError;
 
-	fn try_from(value: PageIdRepr) -> Result<Self, String> {
+	fn try_from(value: PageIdRepr) -> Result<Self, DatabaseError> {
 		let Some(page_num) = NonZeroU16::new(value.page_num) else {
-			return Err(String::from("Found invalid page number '0'!"));
+			return Err(DatabaseError::PageFormat(
+				"Found invalid page number '0'!".to_string(),
+			));
 		};
 		Ok(PageId::new(value.segment_num, page_num))
 	}
@@ -54,130 +56,105 @@ impl From<Option<PageId>> for PageIdRepr {
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct MetaPage(PageId);
+pub(crate) struct MetaPage<P>(P);
 
-impl MetaPage {
+impl<P> MetaPage<P> {
 	const FREELIST_HEAD_OFFSET: usize = 0;
 	const NEXT_PAGE_ID_OFFSET: usize = Self::FREELIST_HEAD_OFFSET + size_of::<PageIdRepr>();
+}
 
-	pub const fn new(page_id: PageId) -> Self {
-		Self(page_id)
+impl<P: ReadPage> MetaPage<P> {
+	pub fn new(page: P) -> Self {
+		Self(page)
 	}
 
-	#[inline]
-	pub const fn page_id(self) -> PageId {
-		self.0
-	}
-
-	pub fn get_freelist_head(
-		self,
-		reader: &impl ReadPage,
-	) -> Result<Option<PageId>, DatabaseError> {
+	pub fn get_freelist_head(&self) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(self.0, Self::FREELIST_HEAD_OFFSET, repr.as_bytes_mut())?;
+		self.0
+			.read(Self::FREELIST_HEAD_OFFSET, repr.as_bytes_mut())?;
 		Ok(repr.into())
 	}
 
-	pub fn set_freelist_head(
-		self,
-		mut writer: impl WritePage,
-		value: Option<PageId>,
-	) -> Result<(), DatabaseError> {
+	pub fn get_next_page_id(&self) -> Result<PageId, DatabaseError> {
+		let mut repr = PageIdRepr::new_zeroed();
+		self.0
+			.read(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
+		repr.try_into()
+	}
+}
+
+impl<P: WritePage> MetaPage<P> {
+	pub fn new_mut(page: P) -> Self {
+		Self(page)
+	}
+
+	pub fn set_freelist_head(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		writer.write(self.0, Self::FREELIST_HEAD_OFFSET, repr.as_bytes())?;
+		self.0.write(Self::FREELIST_HEAD_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 
-	pub fn get_next_page_id(self, reader: impl ReadPage) -> Result<PageId, DatabaseError> {
-		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
-
-		repr.try_into()
-			.map_err(|msg| DatabaseError::PageFormat(self.0, msg))
-	}
-
-	pub fn set_next_page_id(
-		self,
-		mut writer: impl WritePage,
-		value: PageId,
-	) -> Result<(), DatabaseError> {
+	pub fn set_next_page_id(&mut self, value: PageId) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		writer.write(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
+		self.0.write(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
 		Ok(())
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FreelistPage(PageId);
+pub(crate) struct FreelistPage<P>(P);
 
-impl FreelistPage {
+impl<P> FreelistPage<P> {
 	const NEXT_PAGE_ID_OFFSET: usize = 0;
 	const LENGTH_OFFSET: usize = Self::NEXT_PAGE_ID_OFFSET + size_of::<PageIdRepr>();
 	const ITEMS_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<u16>();
 
 	pub const NUM_SLOTS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
+}
 
-	pub const fn new(page_id: PageId) -> Self {
-		Self(page_id)
+impl<P: ReadPage> FreelistPage<P> {
+	pub fn new(page: P) -> Self {
+		Self(page)
 	}
 
-	#[inline]
-	pub const fn page_id(self) -> PageId {
-		self.0
-	}
-
-	pub fn get_next_page_id(self, reader: &impl ReadPage) -> Result<Option<PageId>, DatabaseError> {
+	pub fn get_next_page_id(&self) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
+		self.0
+			.read(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
 		Ok(repr.into())
 	}
 
-	pub fn set_next_page_id(
-		self,
-		mut writer: impl WritePage,
-		value: Option<PageId>,
-	) -> Result<(), DatabaseError> {
-		let repr = PageIdRepr::from(value);
-		writer.write(self.0, Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
-		Ok(())
-	}
-
-	pub fn get_length(self, reader: impl ReadPage) -> Result<usize, DatabaseError> {
+	pub fn get_length(&self) -> Result<usize, DatabaseError> {
 		let mut repr = [0; 2];
-		reader.read(self.0, Self::LENGTH_OFFSET, &mut repr)?;
+		self.0.read(Self::LENGTH_OFFSET, &mut repr)?;
 		Ok(u16::from_ne_bytes(repr).into())
 	}
 
-	pub fn set_length(self, mut writer: impl WritePage, value: usize) -> Result<(), DatabaseError> {
-		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
-		writer.write(self.0, Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
-		Ok(())
-	}
-
-	pub fn get_item(
-		self,
-		reader: impl ReadPage,
-		index: usize,
-	) -> Result<Option<PageId>, DatabaseError> {
+	pub fn get_item(&self, index: usize) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		reader.read(
-			self.0,
+		self.0.read(
 			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
 			repr.as_bytes_mut(),
 		)?;
 		Ok(repr.into())
 	}
+}
 
-	pub fn set_item(
-		self,
-		mut writer: impl WritePage,
-		index: usize,
-		value: Option<PageId>,
-	) -> Result<(), DatabaseError> {
+impl<P: WritePage> FreelistPage<P> {
+	pub fn set_next_page_id(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		writer.write(
-			self.0,
+		self.0.write(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
+		Ok(())
+	}
+
+	pub fn set_length(&mut self, value: usize) -> Result<(), DatabaseError> {
+		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
+		self.0.write(Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
+		Ok(())
+	}
+
+	pub fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
+		let repr = PageIdRepr::from(value);
+		self.0.write(
 			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
 			repr.as_bytes(),
 		)?;

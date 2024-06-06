@@ -54,7 +54,6 @@ pub(crate) struct PageStorageConfig {
 	pub wal: WalConfig,
 }
 
-#[cfg_attr(test, automock)]
 pub(crate) trait ReadPage {
 	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
 }
@@ -71,35 +70,34 @@ impl<T: ReadPage> ReadPage for &mut T {
 	}
 }
 
-#[cfg_attr(test, automock)]
 pub(crate) trait WritePage {
-	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
+	fn write(&mut self, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
 }
 
 impl<T: WritePage> WritePage for &mut T {
-	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
-		(*self).write(page_id, offset, buf)
+	fn write(&mut self, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
+		(*self).write(offset, buf)
 	}
 }
 
-enum WriteablePageGuard<'a, PC>
+enum WriteablePageGuard<'t, 'a, PC>
 where
-	PC: PageCacheApi + 'a,
+	PC: PageCacheApi + 't,
 {
-	Shared(PC::ReadGuard<'a>),
-	Exclusive(&'a mut PC::WriteGuard<'a>),
+	Shared(PC::ReadGuard<'t>),
+	Exclusive(&'a PC::WriteGuard<'t>),
 }
 
-pub(crate) struct Page<'a, PC>
+pub(crate) struct Page<'t, 'a, PC>
 where
-	PC: PageCacheApi + 'a,
+	PC: PageCacheApi + 't,
 {
-	guard: WriteablePageGuard<'a, PC>,
+	guard: WriteablePageGuard<'t, 'a, PC>,
 }
 
-impl<'a, PC> ReadPage for Page<'a, PC>
+impl<'t, 'a, PC> ReadPage for Page<'t, 'a, PC>
 where
-	PC: PageCacheApi + 'a,
+	PC: PageCacheApi + 't,
 {
 	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
 		match &self.guard {
@@ -110,18 +108,21 @@ where
 	}
 }
 
-pub(crate) struct PageMut<'a, PC>
+pub(crate) struct PageMut<'t, 'a, PC, W>
 where
-	PC: PageCacheApi + 'a,
+	PC: PageCacheApi + 't,
+	W: WalApi,
 {
 	page_id: PageId,
 	transaction_id: u64,
-	guard: &'a mut PC::WriteGuard<'a>,
+	guard: &'a mut PC::WriteGuard<'t>,
+	wal: &'a W,
 }
 
-impl<'a, PC> ReadPage for PageMut<'a, PC>
+impl<'t, 'a, PC, W> ReadPage for PageMut<'t, 'a, PC, W>
 where
 	PC: PageCacheApi + 'a,
+	W: WalApi,
 {
 	fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
 		self.guard.read(offset, buf);
@@ -129,25 +130,68 @@ where
 	}
 }
 
-pub(crate) struct Transaction<'a, PS = PhysicalStorage, PC = PageCache, W = Wal>
+impl<'t, 'a, PC, W> WritePage for PageMut<'t, 'a, PC, W>
+where
+	PC: PageCacheApi + 'a,
+	W: WalApi,
+{
+	fn write(&mut self, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
+		let mut from: Box<[u8]> = vec![0; buf.len()].into();
+		self.guard.read(offset, &mut from);
+
+		let wal_index = self.wal.log_write(wal::WriteLog {
+			transaction_id: self.transaction_id,
+			page_id: self.page_id,
+			offset: u16::try_from(offset).expect("Write offset must be 16-bit!"),
+			from: &from,
+			to: buf,
+		})?;
+		self.guard.write(offset, buf, wal_index);
+		Ok(())
+	}
+}
+
+#[cfg(test)]
+mock! {
+	pub(crate) Page {}
+
+	impl ReadPage for Page {
+		fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	}
+}
+
+#[cfg(test)]
+mock! {
+	pub(crate) PageMut {}
+
+	impl ReadPage for PageMut {
+		fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
+	}
+
+	impl WritePage for PageMut {
+		fn write(&mut self, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
+	}
+}
+
+pub(crate) struct Transaction<'t, PS = PhysicalStorage, PC = PageCache, W = Wal>
 where
 	PS: PhysicalStorageApi,
 	PC: PageCacheApi,
 	W: WalApi,
 {
 	id: u64,
-	locks: HashMap<PageId, PC::WriteGuard<'a>>,
-	storage: &'a PageStorage<PS, PC, W>,
+	locks: HashMap<PageId, PC::WriteGuard<'t>>,
+	storage: &'t PageStorage<PS, PC, W>,
 	completed: bool,
 }
 
-impl<'a, PS, PC, W> Transaction<'a, PS, PC, W>
+impl<'t, PS, PC, W> Transaction<'t, PS, PC, W>
 where
 	PS: PhysicalStorageApi,
 	PC: PageCacheApi,
 	W: WalApi,
 {
-	fn new(id: u64, storage: &'a PageStorage<PS, PC, W>) -> Self {
+	fn new(id: u64, storage: &'t PageStorage<PS, PC, W>) -> Self {
 		Self {
 			id,
 			storage,
@@ -177,7 +221,7 @@ where
 	}
 }
 
-impl<'a, PS, PC, W> Drop for Transaction<'a, PS, PC, W>
+impl<'t, PS, PC, W> Drop for Transaction<'t, PS, PC, W>
 where
 	PS: PhysicalStorageApi,
 	PC: PageCacheApi,
@@ -192,60 +236,59 @@ where
 	}
 }
 
-pub(crate) trait TransactionApi: ReadPage + WritePage {
+#[cfg_attr(test, automock(
+    type Page = MockPage;
+    type PageMut = MockPageMut;
+))]
+pub(crate) trait TransactionApi {
+	type Page<'a>: ReadPage + 'a
+	where
+		Self: 'a;
+	type PageMut<'a>: ReadPage + WritePage + 'a
+	where
+		Self: 'a;
+
 	fn id(&self) -> u64;
+	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError>;
+	fn get_page_mut(&mut self, page_id: PageId) -> Result<Self::PageMut<'_>, StorageError>;
 	fn commit(self) -> Result<(), StorageError>;
 	fn undo(self) -> Result<(), StorageError>;
 }
 
-impl<'a, PS, PC, W> ReadPage for Transaction<'a, PS, PC, W>
+impl<'t, PS, PC, W> TransactionApi for Transaction<'t, PS, PC, W>
 where
 	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
-	W: WalApi,
+	PC: PageCacheApi + 't,
+	W: WalApi + 't,
 {
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
-		if let Some(guard) = self.locks.get(&page_id) {
-			guard.read(offset, buf);
-		} else {
-			self.storage.read_guard(page_id)?.read(offset, buf);
-		}
-		Ok(())
-	}
-}
+	type Page<'a> = Page<'t, 'a, PC> where Self: 'a;
+	type PageMut<'a> = PageMut<'t, 'a, PC, W> where Self: 'a;
 
-impl<'a, PS, PC, W> WritePage for Transaction<'a, PS, PC, W>
-where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
-	W: WalApi,
-{
-	fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError> {
-		self.acquire_lock(page_id)?;
-		let guard = self.locks.get_mut(&page_id).unwrap();
-		let mut from: Box<[u8]> = vec![0; buf.len()].into();
-		guard.read(offset, &mut from);
-
-		let wal_index = self.storage.wal.log_write(wal::WriteLog {
-			transaction_id: self.id,
-			page_id,
-			offset: u16::try_from(offset).expect("Write offset must be 16-bit!"),
-			from: &from,
-			to: buf,
-		})?;
-		guard.write(offset, buf, wal_index);
-		Ok(())
-	}
-}
-
-impl<'a, PS, PC, W> TransactionApi for Transaction<'a, PS, PC, W>
-where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
-	W: WalApi,
-{
 	fn id(&self) -> u64 {
 		self.id
+	}
+
+	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError> {
+		if let Some(guard) = self.locks.get(&page_id) {
+			Ok(Page {
+				guard: WriteablePageGuard::Exclusive(guard),
+			})
+		} else {
+			Ok(Page {
+				guard: WriteablePageGuard::Shared(self.storage.read_guard(page_id)?),
+			})
+		}
+	}
+
+	fn get_page_mut<'a>(&'a mut self, page_id: PageId) -> Result<Self::PageMut<'a>, StorageError> {
+		self.acquire_lock(page_id)?;
+		let guard: &'a mut PC::WriteGuard<'t> = self.locks.get_mut(&page_id).unwrap();
+		Ok(PageMut {
+			page_id,
+			transaction_id: self.id,
+			guard,
+			wal: &self.storage.wal,
+		})
 	}
 
 	fn commit(mut self) -> Result<(), StorageError> {
@@ -261,23 +304,6 @@ where
 		self.undo_impl()?;
 		self.completed = true;
 		Ok(())
-	}
-}
-
-#[cfg(test)]
-mock! {
-	pub(crate) TransactionApi {}
-
-	impl ReadPage for TransactionApi {
-		fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
-	}
-	impl WritePage for TransactionApi {
-		fn write(&mut self, page_id: PageId, offset: usize, buf: &[u8]) -> Result<(), StorageError>;
-	}
-	impl TransactionApi for TransactionApi {
-		fn id(&self) -> u64;
-		fn commit(self) -> Result<(), StorageError>;
-		fn undo(self) -> Result<(), StorageError>;
 	}
 }
 
@@ -409,26 +435,23 @@ where
 	}
 }
 
-pub(crate) trait PageStorageApi: ReadPage {
-	type Transaction<'a>: TransactionApi + 'a
+#[cfg_attr(test, automock(
+    type Page<'a> = MockPage;
+    type Transaction<'a> = MockTransactionApi;
+))]
+pub(crate) trait PageStorageApi {
+	type Page<'a>: ReadPage + 'a
+	where
+		Self: 'a;
+	type Transaction<'a>: TransactionApi
 	where
 		Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError>;
-	fn transaction<'a>(&'a self) -> Result<Self::Transaction<'a>, StorageError>;
+	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError>;
+	fn transaction(&self) -> Result<Self::Transaction<'_>, StorageError>;
 	fn flush(&self);
 	fn flush_sync(&self) -> Result<(), StorageError>;
-}
-impl<PS, PC, W> ReadPage for PageStorage<PS, PC, W>
-where
-	PS: PhysicalStorageApi,
-	PC: PageCacheApi,
-	W: WalApi,
-{
-	fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError> {
-		self.read_guard(page_id)?.read(offset, buf);
-		Ok(())
-	}
 }
 
 impl<PS, PC, W> PageStorageApi for PageStorage<PS, PC, W>
@@ -437,6 +460,7 @@ where
 	PC: PageCacheApi,
 	W: WalApi,
 {
+	type Page<'a> = Page<'a, 'a, PC> where Self: 'a;
 	type Transaction<'a> = Transaction<'a, PS, PC, W> where Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError> {
@@ -449,6 +473,12 @@ where
 				buf: guard.body(),
 			})?;
 			Ok(())
+		})
+	}
+
+	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError> {
+		Ok(Page {
+			guard: WriteablePageGuard::Shared(self.read_guard(page_id)?),
 		})
 	}
 
@@ -465,24 +495,6 @@ where
 
 	fn flush_sync(&self) -> Result<(), StorageError> {
 		self.cache.flush_sync()
-	}
-}
-
-#[cfg(test)]
-mock! {
-	pub(crate) PageStorageApi {}
-
-	impl ReadPage for PageStorageApi {
-		fn read(&self, page_id: PageId, offset: usize, buf: &mut [u8]) -> Result<(), StorageError>;
-	}
-
-	impl PageStorageApi for PageStorageApi {
-		type Transaction<'a> = MockTransactionApi;
-
-		fn recover(&self) -> Result<(), StorageError>;
-		fn transaction<'a>(&'a self) -> Result<MockTransactionApi, StorageError>;
-		fn flush(&self);
-		fn flush_sync(&self) -> Result<(), StorageError>;
 	}
 }
 
@@ -668,7 +680,11 @@ mod tests {
 
 		// when
 		let mut buf = [0; 5];
-		storage.read(page_id!(69, 420), 10, &mut buf).unwrap();
+		storage
+			.get_page(page_id!(69, 420))
+			.unwrap()
+			.read(10, &mut buf)
+			.unwrap();
 
 		// then
 		assert_buf_eq!(buf, [10, 11, 12, 13, 14]);
@@ -754,9 +770,15 @@ mod tests {
 
 		// when
 		let mut t = storage.transaction().unwrap();
-		t.write(page_id!(1, 2), 10, &[1, 2]).unwrap();
+		t.get_page_mut(page_id!(1, 2))
+			.unwrap()
+			.write(10, &[1, 2])
+			.unwrap();
 		let mut received = [0; 2];
-		t.read(page_id!(1, 2), 10, &mut received).unwrap();
+		t.get_page(page_id!(1, 2))
+			.unwrap()
+			.read(10, &mut received)
+			.unwrap();
 		t.commit().unwrap();
 
 		// then
@@ -773,9 +795,15 @@ mod tests {
 
 		let mut t = page_storage.transaction().unwrap();
 
-		t.write(page_id!(69, 420), 25, &[1, 2, 3, 4]).unwrap();
+		t.get_page_mut(page_id!(69, 420))
+			.unwrap()
+			.write(25, &[1, 2, 3, 4])
+			.unwrap();
 		let mut data = [0; 4];
-		t.read(page_id!(69, 420), 25, &mut data).unwrap();
+		t.get_page(page_id!(69, 420))
+			.unwrap()
+			.read(25, &mut data)
+			.unwrap();
 		t.commit().unwrap();
 
 		assert_buf_eq!(data, [1, 2, 3, 4]);
@@ -806,8 +834,11 @@ mod tests {
 		b.iter(|| {
 			let mut t = page_storage.transaction().unwrap();
 
-			t.write(page_id!(69, 420), 25, &[1, 2, 3, 4]).unwrap();
-			t.read(page_id!(69, 420), 25, &mut [0; 4]).unwrap();
+			let mut page = t.get_page_mut(page_id!(69, 420)).unwrap();
+
+			page.write(25, &[1, 2, 3, 4]).unwrap();
+			page.read(25, &mut [0; 4]).unwrap();
+
 			t.commit().unwrap();
 		})
 	}
@@ -822,7 +853,10 @@ mod tests {
 
 		let mut t = page_storage.transaction().unwrap();
 		b.iter(|| {
-			t.write(page_id!(69, 420), 25, &[1, 2, 3, 4]).unwrap();
+			t.get_page_mut(page_id!(69, 420))
+				.unwrap()
+				.write(25, &[1, 2, 3, 4])
+				.unwrap();
 		});
 		t.commit().unwrap();
 	}

@@ -4,7 +4,7 @@ use std::{
 	fmt,
 	fs::{self, ReadDir},
 	io,
-	num::{NonZeroU16, NonZeroU64},
+	num::{NonZero, NonZeroU16, NonZeroU64},
 	path::PathBuf,
 };
 
@@ -93,6 +93,15 @@ impl PageId {
 			segment_num,
 			page_num,
 		}
+	}
+
+	pub const fn new_unwrap(segment_num: u32, page_num: u16) -> Self {
+		if page_num == 0 {
+			panic!("Called PageId::new_unchecked with a page_num of 0");
+		}
+		// Safety: page_num is guaranteed not to be zero.
+		let page_num = unsafe { NonZero::new_unchecked(page_num) };
+		Self::new(segment_num, page_num)
 	}
 }
 
