@@ -503,7 +503,7 @@ mod tests {
 	use test::Bencher;
 	use tests::wal::{CommitLog, WriteLog};
 
-	use crate::{consts::PAGE_SIZE, files::segment::PAGE_BODY_SIZE};
+	use crate::{consts::PAGE_SIZE, files::segment::PAGE_BODY_SIZE, utils::units::KIB};
 
 	use self::{
 		cache::MockPageCacheApi,
@@ -816,38 +816,40 @@ mod tests {
 	}
 
 	#[bench]
-	fn bench_transaction(b: &mut Bencher) {
+	fn bench_write_and_commit(b: &mut Bencher) {
 		let tempdir = tempdir().unwrap();
 
 		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
 		let thread_pool = Arc::new(ThreadPool::new().unwrap());
 		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
 
+		const DATA: &[u8] = &[69; 16 * KIB];
+
 		b.iter(|| {
 			let mut t = page_storage.transaction().unwrap();
 
 			let mut page = t.get_page_mut(page_id!(69, 420)).unwrap();
-
-			page.write(25, &[1, 2, 3, 4]).unwrap();
-			page.read(25, &mut [0; 4]).unwrap();
+			page.write(25, &DATA).unwrap();
 
 			t.commit().unwrap();
 		})
 	}
 
 	#[bench]
-	fn bench_op_in_transaction(b: &mut Bencher) {
+	fn bench_write(b: &mut Bencher) {
 		let tempdir = tempdir().unwrap();
 
 		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
 		let thread_pool = Arc::new(ThreadPool::new().unwrap());
 		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
 
+		const DATA: &[u8] = &[69; 16 * KIB];
+
 		let mut t = page_storage.transaction().unwrap();
 		b.iter(|| {
 			t.get_page_mut(page_id!(69, 420))
 				.unwrap()
-				.write(25, &[1, 2, 3, 4])
+				.write(25, &DATA)
 				.unwrap();
 		});
 		t.commit().unwrap();
