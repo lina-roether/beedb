@@ -222,7 +222,7 @@ impl SegmentFileApi for SegmentFile {
 
 #[cfg(test)]
 mod tests {
-	use std::fs;
+	use std::io::{Read, Write};
 
 	use pretty_assertions::assert_buf_eq;
 	use zerocopy::AsBytes;
@@ -243,32 +243,35 @@ mod tests {
 		SegmentFile::create_file(tempdir.path().join("0")).unwrap();
 
 		// then
-		let mut expected: Vec<u8> = vec![0; SEGMENT_SIZE];
-		expected[0..GenericHeaderRepr::SIZE].copy_from_slice(
-			GenericHeaderRepr::from(GenericHeader {
-				file_type: FileType::Segment,
-				content_offset: PAGE_SIZE as u16,
-				version: FORMAT_VERSION,
-			})
-			.as_bytes(),
-		);
-		assert_eq!(fs::read(tempdir.path().join("0")).unwrap(), expected);
+		let expected: Vec<u8> = GenericHeaderRepr::from(GenericHeader {
+			file_type: FileType::Segment,
+			content_offset: PAGE_SIZE as u16,
+			version: FORMAT_VERSION,
+		})
+		.as_bytes()
+		.to_vec();
+
+		let mut file = File::open(tempdir.path().join("0")).unwrap();
+		let received: &mut [u8] = &mut [0; GenericHeaderRepr::SIZE];
+		file.read_exact(received).unwrap();
+
+		assert_buf_eq!(received, expected);
 	}
 
 	#[test]
 	fn open_segment_file() {
 		// given
 		let tempdir = tempfile::tempdir().unwrap();
-		let mut file: Vec<u8> = vec![0; SEGMENT_SIZE];
-		file[0..GenericHeaderRepr::SIZE].copy_from_slice(
-			GenericHeaderRepr::from(GenericHeader {
-				file_type: FileType::Segment,
-				content_offset: PAGE_SIZE as u16,
-				version: FORMAT_VERSION,
-			})
-			.as_bytes(),
-		);
-		fs::write(tempdir.path().join("0"), &file).unwrap();
+		let file_start: Vec<u8> = GenericHeaderRepr::from(GenericHeader {
+			file_type: FileType::Segment,
+			content_offset: PAGE_SIZE as u16,
+			version: FORMAT_VERSION,
+		})
+		.as_bytes()
+		.to_vec();
+		let mut file = File::create(tempdir.path().join("0")).unwrap();
+		file.set_len(SEGMENT_SIZE as u64).unwrap();
+		file.write(&file_start).unwrap();
 
 		// then
 		SegmentFile::open_file(tempdir.path().join("0")).unwrap();
@@ -286,9 +289,13 @@ mod tests {
 			.unwrap();
 
 		// then
-		let file = fs::read(tempdir.path().join("0")).unwrap();
+		let mut file = File::open(tempdir.path().join("0")).unwrap();
+		file.seek(SeekFrom::Start((3 * PAGE_SIZE) as u64)).unwrap();
+		let received: &mut [u8] = &mut [0; PAGE_SIZE];
+		file.read_exact(received).unwrap();
+
 		assert_buf_eq!(
-			&file[3 * PAGE_SIZE..4 * PAGE_SIZE],
+			received,
 			[
 				PageHeaderRepr {
 					wal_generation: 69,
