@@ -15,7 +15,7 @@ const FORMAT_VERSION: u8 = 1;
 #[cfg(test)]
 use mockall::automock;
 
-use crate::repr::Repr;
+use crate::{repr::Repr, utils::units::MIB};
 
 use super::{
 	generic::{FileType, GenericHeader, GenericHeaderRepr},
@@ -342,6 +342,8 @@ impl TryFrom<TransactionStateRepr> for TransactionState {
 	}
 }
 
+const WRITE_BUF_LIMIT: usize = 1 * MIB;
+
 pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,
 	prev_item: Option<NonZeroU64>,
@@ -571,6 +573,11 @@ impl<F: Seek + Read + Write> WalFileApi for WalFile<F> {
 		self.next_offset =
 			NonZeroU64::new(self.file.seek(SeekFrom::End(0))? + self.write_buf.len() as u64)
 				.expect("WAL file unexpectedly at position 0");
+
+		if self.write_buf.len() < WRITE_BUF_LIMIT {
+			self.flush()?;
+		}
+
 		Ok(current_pos)
 	}
 
