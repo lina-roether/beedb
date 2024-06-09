@@ -426,6 +426,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 		folder: &DF,
 	) -> Result<(), StorageError> {
 		let mut gens_mut = generations.write();
+		Self::flush_impl(&gens_mut)?;
 		let gen_num = gens_mut.current_gen_num + 1;
 		let file = folder.open_wal_file(gen_num)?;
 		gens_mut.push_generation(gen_num, file);
