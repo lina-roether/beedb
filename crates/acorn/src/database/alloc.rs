@@ -35,6 +35,7 @@ impl PageAllocator {
 			let length = freelist_head.get_length()?;
 			if length < FreelistPage::<()>::NUM_SLOTS {
 				freelist_head.set_item(length, Some(page_id))?;
+				freelist_head.set_length(length + 1)?;
 			} else {
 				mem::drop(freelist_head);
 
@@ -58,7 +59,6 @@ impl PageAllocator {
 		next_page: Option<PageId>,
 	) -> Result<(), DatabaseError> {
 		let mut freelist_page = FreelistPage::new(t.get_page_mut(page_id)?);
-		freelist_page.set_length(0)?;
 		freelist_page.set_length(0)?;
 		freelist_page.set_next_page_id(next_page)?;
 		Ok(())
@@ -465,5 +465,249 @@ mod tests {
 
 		// then
 		assert_eq!(page_id, page_id!(0x2000, 0xffff));
+	}
+
+	#[test]
+	fn free() {
+		// expect
+		let mut t = MockTransactionApi::new();
+		let mut seq = Sequence::new();
+
+		// - access the alloc meta page
+		t.expect_get_page()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0, 1)))
+			.returning(|_| {
+				let mut page = MockPage::new();
+				// - read the freelist head page ID (2000:1)
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(
+							&[
+								0x2000_u32.to_ne_bytes().as_slice(),
+								0x1_u16.to_ne_bytes().as_slice(),
+							]
+							.concat(),
+						);
+						Ok(())
+					});
+				Ok(page)
+			});
+
+		// - access the freelist head page (2000:1)
+		t.expect_get_page_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0x2000, 0x1)))
+			.returning(|_| {
+				let mut page = MockPageMut::new();
+				// - read the page length (2)
+				page.expect_read()
+					.once()
+					.with(eq(6), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&2_u16.to_ne_bytes());
+						Ok(())
+					});
+
+				// - write the new free page id
+				page.expect_write()
+					.once()
+					.with(
+						eq(20),
+						eq([
+							0x69_u32.to_ne_bytes().as_slice(),
+							0x420_u16.to_ne_bytes().as_slice(),
+						]
+						.concat()),
+					)
+					.returning(|_, _| Ok(()));
+
+				// - increment the page length
+				page.expect_write()
+					.once()
+					.with(eq(6), eq(3_u16.to_ne_bytes()))
+					.returning(|_, _| Ok(()));
+				Ok(page)
+			});
+
+		// when
+		PageAllocator::free(&mut t, page_id!(0x69, 0x420)).unwrap();
+	}
+
+	#[test]
+	fn free_with_no_head() {
+		// expect
+		let mut t = MockTransactionApi::new();
+		let mut seq = Sequence::new();
+
+		// - access the alloc meta page
+		t.expect_get_page()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0, 1)))
+			.returning(|_| {
+				let mut page = MockPage::new();
+				// - read the freelist head page ID (None)
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.fill(0);
+						Ok(())
+					});
+				Ok(page)
+			});
+
+		// - access the new freelist head page (69:420)
+		t.expect_get_page_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0x69, 0x420)))
+			.returning(|_| {
+				let mut page = MockPageMut::new();
+				// - set the next freelist page id to None
+				page.expect_write()
+					.once()
+					.with(eq(0), eq([0; 6]))
+					.returning(|_, _| Ok(()));
+
+				// - set the page length to 0
+				page.expect_write()
+					.once()
+					.with(eq(6), eq([0; 2]))
+					.returning(|_, _| Ok(()));
+				Ok(page)
+			});
+
+		// - access the alloc meta page mutably
+		t.expect_get_page_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0, 1)))
+			.returning(|_| {
+				let mut page = MockPageMut::new();
+				// - set the freelist head page ID to 69:420
+				page.expect_write()
+					.once()
+					.with(
+						eq(0),
+						eq([
+							0x69_u32.to_ne_bytes().as_slice(),
+							0x420_u16.to_ne_bytes().as_slice(),
+						]
+						.concat()),
+					)
+					.returning(|_, _| Ok(()));
+				Ok(page)
+			});
+
+		// when
+		PageAllocator::free(&mut t, page_id!(0x69, 0x420)).unwrap();
+	}
+
+	#[test]
+	fn free_with_full_head() {
+		// expect
+		let mut t = MockTransactionApi::new();
+		let mut seq = Sequence::new();
+
+		// - access the alloc meta page
+		t.expect_get_page()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0, 1)))
+			.returning(|_| {
+				let mut page = MockPage::new();
+				// - read the freelist head page ID (2000:1)
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(
+							&[
+								0x2000_u32.to_ne_bytes().as_slice(),
+								0x1_u16.to_ne_bytes().as_slice(),
+							]
+							.concat(),
+						);
+						Ok(())
+					});
+				Ok(page)
+			});
+
+		// - access the freelist head page (2000:1)
+		t.expect_get_page_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0x2000, 0x1)))
+			.returning(|_| {
+				let mut page = MockPageMut::new();
+				// - read the page length (2)
+				page.expect_read()
+					.once()
+					.with(eq(6), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&(FreelistPage::<()>::NUM_SLOTS as u16).to_ne_bytes());
+						Ok(())
+					});
+				Ok(page)
+			});
+
+		// - access the new freelist head page (69:420)
+		t.expect_get_page_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0x69, 0x420)))
+			.returning(|_| {
+				let mut page = MockPageMut::new();
+				// - set the next freelist page id to 2000:1
+				page.expect_write()
+					.once()
+					.with(
+						eq(0),
+						eq([
+							0x2000_u32.to_ne_bytes().as_slice(),
+							0x1_u16.to_ne_bytes().as_slice(),
+						]
+						.concat()),
+					)
+					.returning(|_, _| Ok(()));
+
+				// - set the page length to 0
+				page.expect_write()
+					.once()
+					.with(eq(6), eq([0; 2]))
+					.returning(|_, _| Ok(()));
+				Ok(page)
+			});
+
+		// - access the alloc meta page mutably
+		t.expect_get_page_mut()
+			.once()
+			.in_sequence(&mut seq)
+			.with(eq(page_id!(0, 1)))
+			.returning(|_| {
+				let mut page = MockPageMut::new();
+				// - set the freelist head page ID to 69:420
+				page.expect_write()
+					.once()
+					.with(
+						eq(0),
+						eq([
+							0x69_u32.to_ne_bytes().as_slice(),
+							0x420_u16.to_ne_bytes().as_slice(),
+						]
+						.concat()),
+					)
+					.returning(|_, _| Ok(()));
+				Ok(page)
+			});
+
+		// when
+		PageAllocator::free(&mut t, page_id!(0x69, 0x420)).unwrap();
 	}
 }
