@@ -15,7 +15,10 @@ const FORMAT_VERSION: u8 = 1;
 #[cfg(test)]
 use mockall::automock;
 
-use crate::{repr::Repr, utils::units::MIB};
+use crate::{
+	repr::{IoRepr, Repr},
+	utils::units::MIB,
+};
 
 use super::{
 	generic::{FileType, GenericHeader, GenericHeaderRepr},
@@ -342,7 +345,7 @@ impl TryFrom<TransactionStateRepr> for TransactionState {
 	}
 }
 
-const WRITE_BUF_LIMIT: usize = 1 * MIB;
+const WRITE_BUF_LIMIT: usize = 2 * MIB;
 
 pub(crate) struct WalFile<F: Seek + Read + Write = File> {
 	body_start: u64,

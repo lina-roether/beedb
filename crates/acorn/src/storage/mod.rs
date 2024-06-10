@@ -829,7 +829,7 @@ mod tests {
 			let mut t = page_storage.transaction().unwrap();
 
 			let mut page = t.get_page_mut(page_id!(69, 420)).unwrap();
-			page.write(25, &DATA).unwrap();
+			page.write(25, DATA).unwrap();
 
 			t.commit().unwrap();
 		})

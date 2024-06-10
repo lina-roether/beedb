@@ -17,7 +17,7 @@ use super::{
 use crate::{
 	consts::PAGE_SIZE,
 	files::{generic::FileType, utils::CRC16},
-	repr::Repr,
+	repr::{IoRepr, Repr},
 };
 
 const FORMAT_VERSION_UNINIT: u8 = 0;
@@ -271,7 +271,7 @@ mod tests {
 		.to_vec();
 		let mut file = File::create(tempdir.path().join("0")).unwrap();
 		file.set_len(SEGMENT_SIZE as u64).unwrap();
-		file.write(&file_start).unwrap();
+		file.write_all(&file_start).unwrap();
 
 		// then
 		SegmentFile::open_file(tempdir.path().join("0")).unwrap();
