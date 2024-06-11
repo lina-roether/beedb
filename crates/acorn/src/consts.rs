@@ -10,4 +10,3 @@ pub(crate) const DEFAULT_MAX_DIRTY_PAGES: f32 = 0.2;
 pub(crate) const DEFAULT_NUM_WORKERS: usize = 2;
 pub(crate) const DEFAULT_CHECKPOINT_PERIOD: Duration = Duration::from_mins(1);
 pub(crate) const DEFAULT_FLUSH_PERIOD: Duration = Duration::from_mins(3);
-pub(crate) const SMALL_STRING_SIZE: usize = 16;
