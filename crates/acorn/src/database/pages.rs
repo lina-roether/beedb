@@ -17,8 +17,7 @@ use super::DatabaseError;
 pub(crate) enum PageKind {
 	FreelistMeta = 0,
 	FreelistBlock = 1,
-	SizedList = 2,
-	UnsizedList = 3,
+	Records = 2,
 }
 
 impl PageKind {
@@ -26,8 +25,7 @@ impl PageKind {
 		match value {
 			0 => Some(PageKind::FreelistMeta),
 			1 => Some(PageKind::FreelistBlock),
-			2 => Some(PageKind::SizedList),
-			3 => Some(PageKind::UnsizedList),
+			2 => Some(PageKind::Records),
 			_ => None,
 		}
 	}
@@ -108,9 +106,7 @@ pub(crate) struct MetaPage<P>(P);
 impl<P> MetaPage<P> {
 	const FREELIST_HEAD_OFFSET: usize = PAGE_HEADER_SIZE;
 	const NEXT_PAGE_ID_OFFSET: usize = Self::FREELIST_HEAD_OFFSET + size_of::<PageIdRepr>();
-}
 
-impl<P> MetaPage<P> {
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
 	}
@@ -166,9 +162,7 @@ impl<P> FreelistPage<P> {
 	const ITEMS_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<u16>();
 
 	pub const NUM_SLOTS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
-}
 
-impl<P> FreelistPage<P> {
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
 	}
@@ -231,6 +225,73 @@ impl<P: WritePage> FreelistPage<P> {
 		)?;
 		Ok(())
 	}
+
+	pub fn push_item(&mut self, value: PageId) -> Result<(), DatabaseError> {
+		todo!()
+	}
 }
 
-pub(crate) struct BlockListPage<P>(P);
+pub(crate) struct RecordsPage<P>(P);
+
+#[derive(Debug, AsBytes, FromBytes, FromZeroes)]
+#[repr(C)]
+struct BlockPosition {
+	offset: u16,
+	length: u16,
+}
+
+impl<P> RecordsPage<P> {
+	const LENGTH_OFFSET: usize = PAGE_HEADER_SIZE;
+	const RECORDS_END_OFFSET: usize = Self::LENGTH_OFFSET + mem::size_of::<u16>();
+	const RECORDS_OFFSET: usize = Self::RECORDS_END_OFFSET + mem::size_of::<u16>();
+
+	pub fn new_unchecked(page: P) -> Self {
+		Self(page)
+	}
+
+	fn get_block_position_offset(index: usize) -> usize {
+		PAGE_BODY_SIZE
+			.checked_sub(index)
+			.expect("Block index out of range!")
+	}
+}
+
+impl<P: ReadPage> RecordsPage<P> {
+	pub fn new(page: P) -> Result<Self, DatabaseError> {
+		assert_page_kind(&page, PageKind::Records)?;
+		Ok(Self(page))
+	}
+
+	pub fn get_length(&self) -> Result<usize, DatabaseError> {
+		let mut repr = [0; 2];
+		self.0.read(Self::LENGTH_OFFSET, &mut repr)?;
+		Ok(u16::from_ne_bytes(repr).into())
+	}
+
+	pub fn read_block(&self, index: usize) -> Result<Option<Box<[u8]>>, DatabaseError> {
+		let Some(block_pos) = self.get_block_position(index)? else {
+			return Ok(None);
+		};
+		let mut buf: Box<[u8]> = vec![0; block_pos.length.into()].into();
+		self.0.read(block_pos.offset.into(), &mut buf)?;
+		Ok(Some(buf))
+	}
+
+	fn get_block_position(&self, index: usize) -> Result<Option<BlockPosition>, DatabaseError> {
+		if index >= self.get_length()? {
+			return Ok(None);
+		}
+
+		let offset = Self::get_block_position_offset(index);
+		let mut block_pos = BlockPosition::new_zeroed();
+		self.0.read(offset, block_pos.as_bytes_mut())?;
+
+		Ok(Some(block_pos))
+	}
+
+	fn get_records_end(&self) -> Result<usize, DatabaseError> {
+		let mut repr = [0; 2];
+		self.0.read(Self::RECORDS_END_OFFSET, &mut repr)?;
+		Ok(u16::from_ne_bytes(repr).into())
+	}
+}
