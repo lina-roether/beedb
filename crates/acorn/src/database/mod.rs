@@ -1,6 +1,7 @@
 use std::{num::NonZero, string::FromUtf8Error};
 
 use document::SchemaError;
+use pages::PageKind;
 use thiserror::Error;
 
 use crate::storage::{PageId, StorageError};
@@ -14,6 +15,15 @@ mod pages;
 pub(crate) enum DatabaseError {
 	#[error("Page format error: {0}")]
 	PageFormat(String),
+
+	#[error("Expected a page of kind {expected:?}, but received {received:?}. This usually indicates database corruption.")]
+	UnexpectedPageKind {
+		expected: PageKind,
+		received: PageKind,
+	},
+
+	#[error("Received unknown page kind {0}. This may mean acorn is out of date.")]
+	UnknownPageKind(u8),
 
 	#[error(transparent)]
 	StringEncoding(#[from] FromUtf8Error),

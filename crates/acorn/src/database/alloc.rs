@@ -13,9 +13,8 @@ impl PageAllocator {
 	const META_PAGE_ID: PageId = PageId::new_unwrap(0, 1);
 
 	pub fn init(t: &mut impl TransactionApi) -> Result<(), DatabaseError> {
-		let mut meta_page = Self::meta_page_mut(t)?;
-		meta_page.set_freelist_head(None)?;
-		meta_page.set_next_page_id(Self::page_id_after(Self::META_PAGE_ID))?;
+		let mut meta_page = MetaPage::new_unchecked(t.get_page_mut(Self::META_PAGE_ID)?);
+		meta_page.init(Self::page_id_after(Self::META_PAGE_ID))?;
 		Ok(())
 	}
 
@@ -31,7 +30,7 @@ impl PageAllocator {
 		if let Some(freelist_head_id) = meta_page.get_freelist_head()? {
 			mem::drop(meta_page);
 
-			let mut freelist_head = FreelistPage::new(t.get_page_mut(freelist_head_id)?);
+			let mut freelist_head = FreelistPage::new(t.get_page_mut(freelist_head_id)?)?;
 			let length = freelist_head.get_length()?;
 			if length < FreelistPage::<()>::NUM_SLOTS {
 				freelist_head.set_item(length, Some(page_id))?;
@@ -39,28 +38,24 @@ impl PageAllocator {
 			} else {
 				mem::drop(freelist_head);
 
-				Self::init_freelist_page(t, page_id, Some(freelist_head_id))?;
+				let mut new_freelist_head = FreelistPage::new_unchecked(t.get_page_mut(page_id)?);
+				new_freelist_head.init()?;
+				new_freelist_head.set_next_page_id(Some(freelist_head_id))?;
+				mem::drop(new_freelist_head);
+
 				let mut meta_page = Self::meta_page_mut(t)?;
 				meta_page.set_freelist_head(Some(page_id))?;
 			}
 			return Ok(());
 		}
-
 		mem::drop(meta_page);
-		Self::init_freelist_page(t, page_id, None)?;
+
+		let mut freelist_head = FreelistPage::new_unchecked(t.get_page_mut(page_id)?);
+		freelist_head.init()?;
+		mem::drop(freelist_head);
+
 		let mut meta_page = Self::meta_page_mut(t)?;
 		meta_page.set_freelist_head(Some(page_id))?;
-		Ok(())
-	}
-
-	fn init_freelist_page(
-		t: &mut impl TransactionApi,
-		page_id: PageId,
-		next_page: Option<PageId>,
-	) -> Result<(), DatabaseError> {
-		let mut freelist_page = FreelistPage::new(t.get_page_mut(page_id)?);
-		freelist_page.set_length(0)?;
-		freelist_page.set_next_page_id(next_page)?;
 		Ok(())
 	}
 
@@ -68,7 +63,7 @@ impl PageAllocator {
 		let Some(freelist_head_id) = Self::meta_page(t)?.get_freelist_head()? else {
 			return Ok(None);
 		};
-		let mut freelist_page = FreelistPage::new(t.get_page_mut(freelist_head_id)?);
+		let mut freelist_page = FreelistPage::new(t.get_page_mut(freelist_head_id)?)?;
 		let mut length = freelist_page.get_length()?;
 
 		while length != 0 {
@@ -111,19 +106,22 @@ impl PageAllocator {
 	}
 
 	fn meta_page<T: TransactionApi>(t: &mut T) -> Result<MetaPage<T::Page<'_>>, DatabaseError> {
-		Ok(MetaPage::new(t.get_page(Self::META_PAGE_ID)?))
+		MetaPage::new(t.get_page(Self::META_PAGE_ID)?)
 	}
 
 	fn meta_page_mut<T: TransactionApi>(
 		t: &mut T,
 	) -> Result<MetaPage<T::PageMut<'_>>, DatabaseError> {
-		Ok(MetaPage::new(t.get_page_mut(Self::META_PAGE_ID)?))
+		MetaPage::new(t.get_page_mut(Self::META_PAGE_ID)?)
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use crate::storage::{test_helpers::page_id, MockPage, MockPageMut, MockTransactionApi};
+	use crate::{
+		database::pages::PageKind,
+		storage::{test_helpers::page_id, MockPage, MockPageMut, MockTransactionApi},
+	};
 	use mockall::{predicate::*, Sequence};
 
 	use super::*;
@@ -138,13 +136,17 @@ mod tests {
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				page.expect_write()
-					.with(eq(0), eq([0; 6]))
+					.with(eq(0), eq([PageKind::FreelistMeta as u8]))
+					.once()
+					.returning(|_, _| Ok(()));
+				page.expect_write()
+					.with(eq(1), eq([0; 6]))
 					.once()
 					.returning(|_, _| Ok(()));
 				page.expect_write()
 					.once()
 					.with(
-						eq(6),
+						eq(7),
 						eq([
 							0_u32.to_ne_bytes().as_slice(),
 							2_u16.to_ne_bytes().as_slice(),
@@ -172,10 +174,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (24:25)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (24:25)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -196,10 +206,18 @@ mod tests {
 			.with(eq(page_id!(0x24, 0x25)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistBlock as u8]);
+						Ok(())
+					});
 				// - read the length of the freelist head page (60)
 				page.expect_read()
 					.once()
-					.with(eq(6), always())
+					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(&60_u16.to_ne_bytes());
 						Ok(())
@@ -207,7 +225,7 @@ mod tests {
 				// - read the last item of the freelist head page (None)
 				page.expect_read()
 					.once()
-					.with(eq(362), always())
+					.with(eq(363), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(&[0; 6]);
 						Ok(())
@@ -215,7 +233,7 @@ mod tests {
 				// - read the second to last item of the freelist head page (Some(69:420))
 				page.expect_read()
 					.once()
-					.with(eq(356), always())
+					.with(eq(357), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -230,7 +248,7 @@ mod tests {
 				//   skipped)
 				page.expect_write()
 					.once()
-					.with(eq(6), eq(58_u16.to_ne_bytes()))
+					.with(eq(7), eq(58_u16.to_ne_bytes()))
 					.returning(|_, _| Ok(()));
 				Ok(page)
 			});
@@ -255,10 +273,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (24:25)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (24:25)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -279,10 +305,18 @@ mod tests {
 			.with(eq(page_id!(0x24, 0x25)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistBlock as u8]);
+						Ok(())
+					});
 				// - read the length of the freelist head page (0)
 				page.expect_read()
 					.once()
-					.with(eq(6), always())
+					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(&0_u16.to_ne_bytes());
 						Ok(())
@@ -290,7 +324,7 @@ mod tests {
 				// - read the next page ID in the freelist (60:70)
 				page.expect_read()
 					.once()
-					.with(eq(0), always())
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -311,11 +345,19 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
 				// - make the next page the new head page
 				page.expect_write()
 					.once()
 					.with(
-						eq(0),
+						eq(1),
 						eq([
 							0x60_u32.to_ne_bytes().as_slice(),
 							0x70_u16.to_ne_bytes().as_slice(),
@@ -346,10 +388,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (None)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (None)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.fill(0);
 						Ok(())
@@ -364,10 +414,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
 				// - read the next uninitialized page ID (2000:3)
 				page.expect_read()
 					.once()
-					.with(eq(6), always())
+					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -382,7 +440,7 @@ mod tests {
 				page.expect_write()
 					.once()
 					.with(
-						eq(6),
+						eq(7),
 						eq([
 							0x2000_u32.to_ne_bytes().as_slice(),
 							0x4_u16.to_ne_bytes().as_slice(),
@@ -413,10 +471,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (None)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (None)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.fill(0);
 						Ok(())
@@ -431,10 +497,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
 				// - read the next uninitialized page ID (2000:ffff)
 				page.expect_read()
 					.once()
-					.with(eq(6), always())
+					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -449,7 +523,7 @@ mod tests {
 				page.expect_write()
 					.once()
 					.with(
-						eq(6),
+						eq(7),
 						eq([
 							0x2001_u32.to_ne_bytes().as_slice(),
 							0x1_u16.to_ne_bytes().as_slice(),
@@ -480,10 +554,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (2000:1)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (2000:1)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -504,10 +586,18 @@ mod tests {
 			.with(eq(page_id!(0x2000, 0x1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistBlock as u8]);
+						Ok(())
+					});
 				// - read the page length (2)
 				page.expect_read()
 					.once()
-					.with(eq(6), always())
+					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(&2_u16.to_ne_bytes());
 						Ok(())
@@ -517,7 +607,7 @@ mod tests {
 				page.expect_write()
 					.once()
 					.with(
-						eq(20),
+						eq(21),
 						eq([
 							0x69_u32.to_ne_bytes().as_slice(),
 							0x420_u16.to_ne_bytes().as_slice(),
@@ -529,7 +619,7 @@ mod tests {
 				// - increment the page length
 				page.expect_write()
 					.once()
-					.with(eq(6), eq(3_u16.to_ne_bytes()))
+					.with(eq(7), eq(3_u16.to_ne_bytes()))
 					.returning(|_, _| Ok(()));
 				Ok(page)
 			});
@@ -551,10 +641,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (None)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (None)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.fill(0);
 						Ok(())
@@ -569,16 +667,21 @@ mod tests {
 			.with(eq(page_id!(0x69, 0x420)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - set the page type
+				page.expect_write()
+					.once()
+					.with(eq(0), eq([PageKind::FreelistBlock as u8]))
+					.returning(|_, _| Ok(()));
 				// - set the next freelist page id to None
 				page.expect_write()
 					.once()
-					.with(eq(0), eq([0; 6]))
+					.with(eq(1), eq([0; 6]))
 					.returning(|_, _| Ok(()));
 
 				// - set the page length to 0
 				page.expect_write()
 					.once()
-					.with(eq(6), eq([0; 2]))
+					.with(eq(7), eq([0; 2]))
 					.returning(|_, _| Ok(()));
 				Ok(page)
 			});
@@ -590,11 +693,19 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
 				// - set the freelist head page ID to 69:420
 				page.expect_write()
 					.once()
 					.with(
-						eq(0),
+						eq(1),
 						eq([
 							0x69_u32.to_ne_bytes().as_slice(),
 							0x420_u16.to_ne_bytes().as_slice(),
@@ -622,10 +733,18 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
-				// - read the freelist head page ID (2000:1)
+				// - check the page type
 				page.expect_read()
 					.once()
 					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
+				// - read the freelist head page ID (2000:1)
+				page.expect_read()
+					.once()
+					.with(eq(1), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(
 							&[
@@ -646,10 +765,18 @@ mod tests {
 			.with(eq(page_id!(0x2000, 0x1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - set the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistBlock as u8]);
+						Ok(())
+					});
 				// - read the page length (2)
 				page.expect_read()
 					.once()
-					.with(eq(6), always())
+					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(&(FreelistPage::<()>::NUM_SLOTS as u16).to_ne_bytes());
 						Ok(())
@@ -664,11 +791,21 @@ mod tests {
 			.with(eq(page_id!(0x69, 0x420)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - set the page type
+				page.expect_write()
+					.once()
+					.with(eq(0), eq([PageKind::FreelistBlock as u8]))
+					.returning(|_, _| Ok(()));
+				// - reset the next freelist page id
+				page.expect_write()
+					.once()
+					.with(eq(1), eq([0; 6]))
+					.returning(|_, _| Ok(()));
 				// - set the next freelist page id to 2000:1
 				page.expect_write()
 					.once()
 					.with(
-						eq(0),
+						eq(1),
 						eq([
 							0x2000_u32.to_ne_bytes().as_slice(),
 							0x1_u16.to_ne_bytes().as_slice(),
@@ -680,7 +817,7 @@ mod tests {
 				// - set the page length to 0
 				page.expect_write()
 					.once()
-					.with(eq(6), eq([0; 2]))
+					.with(eq(7), eq([0; 2]))
 					.returning(|_, _| Ok(()));
 				Ok(page)
 			});
@@ -692,11 +829,19 @@ mod tests {
 			.with(eq(page_id!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
+				// - check the page type
+				page.expect_read()
+					.once()
+					.with(eq(0), always())
+					.returning(|_, buf| {
+						buf.copy_from_slice(&[PageKind::FreelistMeta as u8]);
+						Ok(())
+					});
 				// - set the freelist head page ID to 69:420
 				page.expect_write()
 					.once()
 					.with(
-						eq(0),
+						eq(1),
 						eq([
 							0x69_u32.to_ne_bytes().as_slice(),
 							0x420_u16.to_ne_bytes().as_slice(),
