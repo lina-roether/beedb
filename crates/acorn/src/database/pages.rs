@@ -166,6 +166,14 @@ impl<P> FreelistPage<P> {
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
 	}
+
+	fn offset_for_index(index: usize) -> Result<usize, DatabaseError> {
+		let offset = Self::ITEMS_OFFSET + index * mem::size_of::<PageIdRepr>();
+		if offset >= PAGE_BODY_SIZE {
+			return Err(DatabaseError::PageIndexOutOfBounds);
+		}
+		Ok(offset)
+	}
 }
 
 impl<P: ReadPage> FreelistPage<P> {
@@ -187,12 +195,14 @@ impl<P: ReadPage> FreelistPage<P> {
 		Ok(u16::from_ne_bytes(repr).into())
 	}
 
+	pub fn is_full(&self) -> Result<bool, DatabaseError> {
+		Ok(self.get_length()? >= Self::NUM_SLOTS)
+	}
+
 	pub fn get_item(&self, index: usize) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		self.0.read(
-			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
-			repr.as_bytes_mut(),
-		)?;
+		self.0
+			.read(Self::offset_for_index(index)?, repr.as_bytes_mut())?;
 		Ok(repr.into())
 	}
 }
@@ -219,15 +229,32 @@ impl<P: WritePage> FreelistPage<P> {
 
 	pub fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		self.0.write(
-			Self::ITEMS_OFFSET + index * size_of::<PageIdRepr>(),
-			repr.as_bytes(),
-		)?;
+		self.0
+			.write(Self::offset_for_index(index)?, repr.as_bytes())?;
+		Ok(())
+	}
+}
+
+impl<P: ReadPage + WritePage> FreelistPage<P> {
+	pub fn push_item(&mut self, value: PageId) -> Result<(), DatabaseError> {
+		let index = self.get_length()?;
+		self.set_item(index, Some(value))?;
+		self.set_length(index + 1)?;
 		Ok(())
 	}
 
-	pub fn push_item(&mut self, value: PageId) -> Result<(), DatabaseError> {
-		todo!()
+	pub fn pop_item(&mut self) -> Result<Option<PageId>, DatabaseError> {
+		let mut index = self.get_length()?;
+		loop {
+			if index == 0 {
+				return Ok(None);
+			}
+			index -= 1;
+			if let Some(item) = self.get_item(index)? {
+				self.set_length(index)?;
+				return Ok(Some(item));
+			}
+		}
 	}
 }
 
@@ -251,7 +278,7 @@ impl<P> RecordsPage<P> {
 
 	fn get_block_position_offset(index: usize) -> usize {
 		PAGE_BODY_SIZE
-			.checked_sub(index)
+			.checked_sub((index + 1) * mem::size_of::<BlockPosition>())
 			.expect("Block index out of range!")
 	}
 }

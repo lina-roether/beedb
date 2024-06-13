@@ -25,6 +25,9 @@ pub(crate) enum DatabaseError {
 	#[error("Received unknown page kind {0}. This may mean acorn is out of date.")]
 	UnknownPageKind(u8),
 
+	#[error("Tried to insert data to a page out of bounds")]
+	PageIndexOutOfBounds,
+
 	#[error(transparent)]
 	StringEncoding(#[from] FromUtf8Error),
 

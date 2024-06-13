@@ -31,10 +31,8 @@ impl PageAllocator {
 			mem::drop(meta_page);
 
 			let mut freelist_head = FreelistPage::new(t.get_page_mut(freelist_head_id)?)?;
-			let length = freelist_head.get_length()?;
-			if length < FreelistPage::<()>::NUM_SLOTS {
-				freelist_head.set_item(length, Some(page_id))?;
-				freelist_head.set_length(length + 1)?;
+			if !freelist_head.is_full()? {
+				freelist_head.push_item(page_id)?;
 			} else {
 				mem::drop(freelist_head);
 
@@ -64,14 +62,8 @@ impl PageAllocator {
 			return Ok(None);
 		};
 		let mut freelist_page = FreelistPage::new(t.get_page_mut(freelist_head_id)?)?;
-		let mut length = freelist_page.get_length()?;
-
-		while length != 0 {
-			length -= 1;
-			if let Some(id) = freelist_page.get_item(length)? {
-				freelist_page.set_length(length)?;
-				return Ok(Some(id));
-			}
+		if let Some(id) = freelist_page.pop_item()? {
+			return Ok(Some(id));
 		}
 
 		let new_head = freelist_page.get_next_page_id()?;
@@ -596,7 +588,6 @@ mod tests {
 					});
 				// - read the page length (2)
 				page.expect_read()
-					.once()
 					.with(eq(7), always())
 					.returning(|_, buf| {
 						buf.copy_from_slice(&2_u16.to_ne_bytes());
