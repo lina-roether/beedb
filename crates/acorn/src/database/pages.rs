@@ -167,12 +167,12 @@ impl<P> FreelistPage<P> {
 		Self(page)
 	}
 
-	fn offset_for_index(index: usize) -> Result<usize, DatabaseError> {
+	fn offset_for_index(index: usize) -> Option<usize> {
 		let offset = Self::ITEMS_OFFSET + index * mem::size_of::<PageIdRepr>();
 		if offset >= PAGE_BODY_SIZE {
-			return Err(DatabaseError::PageIndexOutOfBounds);
+			return None;
 		}
-		Ok(offset)
+		Some(offset)
 	}
 }
 
@@ -201,8 +201,10 @@ impl<P: ReadPage> FreelistPage<P> {
 
 	pub fn get_item(&self, index: usize) -> Result<Option<PageId>, DatabaseError> {
 		let mut repr = PageIdRepr::new_zeroed();
-		self.0
-			.read(Self::offset_for_index(index)?, repr.as_bytes_mut())?;
+		let Some(offset) = Self::offset_for_index(index) else {
+			return Ok(None);
+		};
+		self.0.read(offset, repr.as_bytes_mut())?;
 		Ok(repr.into())
 	}
 }
@@ -227,20 +229,35 @@ impl<P: WritePage> FreelistPage<P> {
 		Ok(())
 	}
 
-	pub fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
+	pub fn try_set_item(
+		&mut self,
+		index: usize,
+		value: Option<PageId>,
+	) -> Result<bool, DatabaseError> {
 		let repr = PageIdRepr::from(value);
-		self.0
-			.write(Self::offset_for_index(index)?, repr.as_bytes())?;
+		let Some(offset) = Self::offset_for_index(index) else {
+			return Ok(false);
+		};
+		self.0.write(offset, repr.as_bytes())?;
+		Ok(true)
+	}
+
+	pub fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
+		if !self.try_set_item(index, value)? {
+			return Err(DatabaseError::PageIndexOutOfBounds);
+		}
 		Ok(())
 	}
 }
 
 impl<P: ReadPage + WritePage> FreelistPage<P> {
-	pub fn push_item(&mut self, value: PageId) -> Result<(), DatabaseError> {
+	pub fn try_push_item(&mut self, value: PageId) -> Result<bool, DatabaseError> {
 		let index = self.get_length()?;
-		self.set_item(index, Some(value))?;
+		if !self.try_set_item(index, Some(value))? {
+			return Ok(false);
+		}
 		self.set_length(index + 1)?;
-		Ok(())
+		Ok(true)
 	}
 
 	pub fn pop_item(&mut self) -> Result<Option<PageId>, DatabaseError> {
@@ -295,6 +312,11 @@ impl<P: ReadPage> RecordsPage<P> {
 		Ok(u16::from_ne_bytes(repr).into())
 	}
 
+	pub fn cap(&self) -> Result<usize, DatabaseError> {
+		let space_left = self.get_indices_start()? - self.get_records_end()?;
+		Ok(space_left - mem::size_of::<u16>())
+	}
+
 	pub fn read_block(&self, index: usize) -> Result<Option<Box<[u8]>>, DatabaseError> {
 		let Some(block_pos) = self.get_block_position(index)? else {
 			return Ok(None);
@@ -320,5 +342,9 @@ impl<P: ReadPage> RecordsPage<P> {
 		let mut repr = [0; 2];
 		self.0.read(Self::RECORDS_END_OFFSET, &mut repr)?;
 		Ok(u16::from_ne_bytes(repr).into())
+	}
+
+	fn get_indices_start(&self) -> Result<usize, DatabaseError> {
+		Ok(Self::get_block_position_offset(self.get_length()? - 1))
 	}
 }
