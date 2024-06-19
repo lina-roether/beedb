@@ -12,11 +12,11 @@ use thiserror::Error;
 use mockall::{automock, mock};
 
 #[cfg(test)]
-use crate::storage::cache::{MockPageReadGuardApi, MockPageWriteGuardApi};
+use crate::page_store::cache::{MockPageReadGuardApi, MockPageWriteGuardApi};
 
 use crate::files::DatabaseFolder;
 use crate::files::FileError;
-use crate::storage::cache::PageWriteGuardApi;
+use crate::page_store::cache::PageWriteGuardApi;
 
 pub(crate) use crate::files::PageId;
 use crate::files::TransactionState;

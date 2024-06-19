@@ -650,7 +650,7 @@ mod tests {
 
 	use crate::{
 		files::MockDatabaseFolderApi,
-		storage::{
+		page_store::{
 			test_helpers::{page_id, wal_index},
 			wal::tests::wal::test_helpers::mock_wal_file,
 		},

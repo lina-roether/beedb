@@ -7,7 +7,7 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
 	files::segment::PAGE_BODY_SIZE,
-	storage::{PageId, ReadPage, WritePage},
+	page_store::{PageId, ReadPage, WritePage},
 };
 
 use super::DatabaseError;

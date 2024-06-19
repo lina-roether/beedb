@@ -1,11 +1,11 @@
 use std::{mem, num::NonZero};
 
-use crate::{
-	database::pages::FreelistPage,
-	storage::{PageId, TransactionApi},
-};
+use crate::page_store::{PageId, TransactionApi};
 
-use super::{pages::MetaPage, DatabaseError};
+use super::{
+	pages::{FreelistPage, MetaPage},
+	DatabaseError,
+};
 
 struct PageAllocator;
 
@@ -112,7 +112,7 @@ impl PageAllocator {
 mod tests {
 	use crate::{
 		database::pages::PageKind,
-		storage::{test_helpers::page_id, MockPage, MockPageMut, MockTransactionApi},
+		page_store::{test_helpers::page_id, MockPage, MockPageMut, MockTransactionApi},
 	};
 	use mockall::{predicate::*, Sequence};
 

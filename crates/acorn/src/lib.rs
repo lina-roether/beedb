@@ -18,9 +18,9 @@
 extern crate test;
 
 mod consts;
-mod database;
+mod doc_store;
 mod files;
+mod page_store;
 mod repr;
-mod storage;
 mod tasks;
 mod utils;

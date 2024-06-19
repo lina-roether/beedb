@@ -2,7 +2,7 @@ use std::{convert::Infallible, mem, num::NonZero};
 
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-use crate::{repr::Repr, storage::PageId};
+use crate::{page_store::PageId, repr::Repr};
 
 use super::{DatabaseError, DbPointer};
 

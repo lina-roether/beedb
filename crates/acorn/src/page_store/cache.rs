@@ -654,7 +654,7 @@ mod tests {
 	use pretty_assertions::assert_buf_eq;
 
 	use crate::{
-		storage::{
+		page_store::{
 			physical::MockPhysicalStorageApi,
 			test_helpers::{page_id, wal_index},
 		},

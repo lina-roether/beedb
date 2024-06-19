@@ -4,7 +4,7 @@ use document::SchemaError;
 use pages::PageKind;
 use thiserror::Error;
 
-use crate::storage::{PageId, StorageError};
+use crate::page_store::{PageId, StorageError};
 
 mod alloc;
 mod document;
