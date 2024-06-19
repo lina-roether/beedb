@@ -6,9 +6,9 @@ use thiserror::Error;
 
 use crate::page_store::{PageId, StorageError};
 
-mod alloc;
 mod document;
 mod document_repr;
+mod page_alloc;
 mod pages;
 
 #[derive(Debug, Error)]
