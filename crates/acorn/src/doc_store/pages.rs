@@ -101,7 +101,7 @@ impl From<Option<PageId>> for PageIdRepr {
 	}
 }
 
-pub(crate) struct MetaPage<P>(P);
+pub(super) struct MetaPage<P>(P);
 
 impl<P> MetaPage<P> {
 	const FREELIST_HEAD_OFFSET: usize = PAGE_HEADER_SIZE;
@@ -115,7 +115,7 @@ impl<P> MetaPage<P> {
 impl<P: ReadPage> MetaPage<P> {
 	pub fn new(page: P) -> Result<Self, DatabaseError> {
 		assert_page_kind(&page, PageKind::FreelistMeta)?;
-		Ok(Self(page))
+		Ok(Self::new_unchecked(page))
 	}
 
 	pub fn get_freelist_head(&self) -> Result<Option<PageId>, DatabaseError> {
@@ -154,7 +154,7 @@ impl<P: WritePage> MetaPage<P> {
 	}
 }
 
-pub(crate) struct FreelistPage<P>(P);
+pub(super) struct FreelistPage<P>(P);
 
 impl<P> FreelistPage<P> {
 	const NEXT_PAGE_ID_OFFSET: usize = PAGE_HEADER_SIZE;
@@ -179,7 +179,7 @@ impl<P> FreelistPage<P> {
 impl<P: ReadPage> FreelistPage<P> {
 	pub fn new(page: P) -> Result<Self, DatabaseError> {
 		assert_page_kind(&page, PageKind::FreelistBlock)?;
-		Ok(Self(page))
+		Ok(Self::new_unchecked(page))
 	}
 
 	pub fn get_next_page_id(&self) -> Result<Option<PageId>, DatabaseError> {
@@ -262,150 +262,19 @@ impl<P: ReadPage + WritePage> FreelistPage<P> {
 	}
 }
 
-pub(crate) struct RecordsPage<P>(P);
+pub(super) struct BlockPage<P>(P);
 
-#[derive(Debug, AsBytes, FromBytes, FromZeroes)]
-#[repr(C)]
-struct BlockPosition {
-	offset: u16,
-	length: u16,
-}
+impl<P> BlockPage<P> {
+	const LEAF_BLOCK_SIZE: usize = 8;
+	const ALLOC_TREE_SIZE: usize = 0;
 
-impl<P> RecordsPage<P> {
-	const LENGTH_OFFSET: usize = PAGE_HEADER_SIZE;
-	const RECORDS_END_OFFSET: usize = Self::LENGTH_OFFSET + mem::size_of::<u16>();
-	const RECORDS_OFFSET: usize = Self::RECORDS_END_OFFSET + mem::size_of::<u16>();
+	const ALLOC_TREE_OFFSET: usize = PAGE_HEADER_SIZE;
+	const BODY_OFFSET: usize = Self::ALLOC_TREE_OFFSET + Self::ALLOC_TREE_SIZE;
+
+	const BODY_SIZE: usize = PAGE_BODY_SIZE - Self::BODY_OFFSET;
+	const NUM_LEAF_NODES: usize = Self::BODY_SIZE / Self::LEAF_BLOCK_SIZE;
 
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
-	}
-
-	fn get_block_position_offset(index: usize) -> usize {
-		PAGE_BODY_SIZE
-			.checked_sub((index + 1) * mem::size_of::<BlockPosition>())
-			.expect("Block index out of range!")
-	}
-}
-
-impl<P: ReadPage> RecordsPage<P> {
-	pub fn new(page: P) -> Result<Self, DatabaseError> {
-		assert_page_kind(&page, PageKind::Records)?;
-		Ok(Self(page))
-	}
-
-	pub fn get_length(&self) -> Result<usize, DatabaseError> {
-		let mut repr = [0; 2];
-		self.0.read(Self::LENGTH_OFFSET, &mut repr)?;
-		Ok(u16::from_ne_bytes(repr).into())
-	}
-
-	pub fn capacity(&self) -> Result<usize, DatabaseError> {
-		let space_left = self.get_indices_start()? - self.get_records_end()?;
-		Ok(space_left - mem::size_of::<u16>())
-	}
-
-	fn read_record(&self, index: usize) -> Result<Option<Box<[u8]>>, DatabaseError> {
-		let Some(block_pos) = self.get_block_position(index)? else {
-			return Ok(None);
-		};
-		let mut buf: Box<[u8]> = vec![0; block_pos.length.into()].into();
-		self.0.read(block_pos.offset.into(), &mut buf)?;
-		Ok(Some(buf))
-	}
-
-	fn get_block_position(&self, index: usize) -> Result<Option<BlockPosition>, DatabaseError> {
-		if index >= self.get_length()? {
-			return Ok(None);
-		}
-
-		let offset = Self::get_block_position_offset(index);
-		let mut block_pos = BlockPosition::new_zeroed();
-		self.0.read(offset, block_pos.as_bytes_mut())?;
-
-		Ok(Some(block_pos))
-	}
-
-	fn get_records_end(&self) -> Result<usize, DatabaseError> {
-		let mut repr = [0; 2];
-		self.0.read(Self::RECORDS_END_OFFSET, &mut repr)?;
-		Ok(u16::from_ne_bytes(repr).into())
-	}
-
-	fn get_indices_start(&self) -> Result<usize, DatabaseError> {
-		Ok(Self::get_block_position_offset(self.get_length()? - 1))
-	}
-}
-
-impl<P: WritePage> RecordsPage<P> {
-	fn set_length(&mut self, length: usize) -> Result<(), DatabaseError> {
-		self.0.write(
-			Self::LENGTH_OFFSET,
-			&u16::try_from(length)
-				.expect("Records page length must be 16-bit!")
-				.to_ne_bytes(),
-		)?;
-		Ok(())
-	}
-
-	fn set_records_end(&mut self, records_end: usize) -> Result<(), DatabaseError> {
-		self.0.write(
-			Self::RECORDS_END_OFFSET,
-			&u16::try_from(records_end)
-				.expect("Records page length must be 16-bit!")
-				.to_ne_bytes(),
-		)?;
-		Ok(())
-	}
-
-	fn set_block_position(
-		&mut self,
-		index: usize,
-		offset: usize,
-		length: usize,
-	) -> Result<(), DatabaseError> {
-		let block_pos_start = Self::get_block_position_offset(index);
-		self.0.write(
-			block_pos_start,
-			BlockPosition {
-				offset: u16::try_from(offset).expect("Record position in page is out of bounds"),
-				length: u16::try_from(length).expect("Record length must be 16-bit!"),
-			}
-			.as_bytes(),
-		)?;
-		Ok(())
-	}
-}
-
-impl<P: ReadPage + WritePage> RecordsPage<P> {
-	pub fn push_record(&mut self, record: &[u8]) -> Result<usize, DatabaseError> {
-		if self.capacity()? < record.len() {
-			return Err(DatabaseError::PageIndexOutOfBounds);
-		}
-		let index = self.get_length()?;
-		self.write_record(index, record)?;
-		self.set_length(index + 1)?;
-		Ok(index)
-	}
-
-	pub fn pop_record(&mut self) -> Result<Option<Box<[u8]>>, DatabaseError> {
-		let length = self.get_length()?;
-		if length == 0 {
-			return Ok(None);
-		};
-		let index = length - 1;
-		let Some(record) = self.read_record(index)? else {
-			return Ok(None);
-		};
-		self.set_length(index)?;
-		Ok(Some(record))
-	}
-
-	fn write_record(&mut self, index: usize, record: &[u8]) -> Result<(), DatabaseError> {
-		let record_start = self.get_records_end()?;
-		let record_end = record_start + record.len();
-		self.0.write(record_start, record)?;
-		self.set_block_position(index, record_start, record.len())?;
-		self.set_records_end(record_end)?;
-		Ok(())
 	}
 }

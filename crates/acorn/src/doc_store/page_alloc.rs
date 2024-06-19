@@ -111,7 +111,7 @@ impl PageAllocator {
 #[cfg(test)]
 mod tests {
 	use crate::{
-		database::pages::PageKind,
+		doc_store::pages::PageKind,
 		page_store::{test_helpers::page_id, MockPage, MockPageMut, MockTransactionApi},
 	};
 	use mockall::{predicate::*, Sequence};
