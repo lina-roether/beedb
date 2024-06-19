@@ -3,11 +3,13 @@ use std::{
 	num::NonZeroU16,
 };
 
+use static_assertions::const_assert_eq;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
 	files::segment::PAGE_BODY_SIZE,
 	page_store::{PageId, ReadPage, WritePage},
+	utils::units::B,
 };
 
 use super::DatabaseError;
@@ -265,8 +267,10 @@ impl<P: ReadPage + WritePage> FreelistPage<P> {
 pub(super) struct BlockPage<P>(P);
 
 impl<P> BlockPage<P> {
-	const LEAF_BLOCK_SIZE: usize = 8;
-	const ALLOC_TREE_SIZE: usize = 0;
+	const LEAF_BLOCK_SIZE: usize = 32 * B;
+	const DEGREE_MASK: usize = (Self::LEAF_BLOCK_SIZE + 1).next_power_of_two() - 1;
+	const ALLOC_TREE_SIZE: usize =
+		Self::get_alloc_tree_size(PAGE_BODY_SIZE - PAGE_HEADER_SIZE, Self::LEAF_BLOCK_SIZE);
 
 	const ALLOC_TREE_OFFSET: usize = PAGE_HEADER_SIZE;
 	const BODY_OFFSET: usize = Self::ALLOC_TREE_OFFSET + Self::ALLOC_TREE_SIZE;
@@ -274,7 +278,21 @@ impl<P> BlockPage<P> {
 	const BODY_SIZE: usize = PAGE_BODY_SIZE - Self::BODY_OFFSET;
 	const NUM_LEAF_NODES: usize = Self::BODY_SIZE / Self::LEAF_BLOCK_SIZE;
 
+	const fn get_alloc_tree_size(body_size: usize, leaf_block_size: usize) -> usize {
+		let preemptive_num_leaves = body_size / leaf_block_size;
+		let preemptive_num_nodes =
+			preemptive_num_leaves.next_power_of_two() + preemptive_num_leaves - 1;
+
+		(preemptive_num_nodes + 7) / 8
+	}
+
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
+	}
+
+	fn get_block_pos(index: u16) -> (usize, usize) {
+		let degree = usize::from(index) & Self::DEGREE_MASK;
+		let block_pos = usize::from(index) / (Self::LEAF_BLOCK_SIZE << degree);
+		(block_pos, degree)
 	}
 }
