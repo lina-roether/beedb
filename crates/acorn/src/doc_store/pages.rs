@@ -277,6 +277,8 @@ impl<P> BlockPage<P> {
 
 	const BODY_SIZE: usize = PAGE_BODY_SIZE - Self::BODY_OFFSET;
 	const NUM_LEAF_NODES: usize = Self::BODY_SIZE / Self::LEAF_BLOCK_SIZE;
+	const ROOT_BLOCK_SIZE: usize = Self::NUM_LEAF_NODES * Self::LEAF_BLOCK_SIZE;
+	const MAX_DEGREE: usize = Self::NUM_LEAF_NODES.next_power_of_two().ilog2() as usize;
 
 	const fn get_alloc_tree_size(body_size: usize, leaf_block_size: usize) -> usize {
 		let preemptive_num_leaves = body_size / leaf_block_size;
@@ -291,8 +293,18 @@ impl<P> BlockPage<P> {
 	}
 
 	fn get_block_pos(index: u16) -> (usize, usize) {
-		let degree = usize::from(index) & Self::DEGREE_MASK;
-		let block_pos = usize::from(index) / (Self::LEAF_BLOCK_SIZE << degree);
-		(block_pos, degree)
+		let block_degree = usize::from(index) & Self::DEGREE_MASK;
+		let block_pos = usize::from(index) / (Self::LEAF_BLOCK_SIZE << block_degree);
+		(block_pos, block_degree)
+	}
+}
+
+impl<P: ReadPage> BlockPage<P> {
+	fn get_alloc_tree_value(degree: usize, pos: usize) {
+		todo!()
+	}
+
+	fn find_free_block(size: usize) {
+		todo!()
 	}
 }
