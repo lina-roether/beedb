@@ -3,12 +3,12 @@ use std::{
 	num::NonZeroU16,
 };
 
-use static_assertions::const_assert_eq;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::{
 	files::segment::PAGE_BODY_SIZE,
 	page_store::{PageId, ReadPage, WritePage},
+	repr::Repr,
 	utils::units::B,
 };
 
@@ -33,27 +33,37 @@ impl PageKind {
 	}
 }
 
-const PAGE_HEADER_SIZE: usize = mem::size_of::<PageKind>();
-
-fn set_page_kind(page: &mut impl WritePage, kind: PageKind) -> Result<(), DatabaseError> {
-	page.write(0, &[kind as u8])?;
-	Ok(())
+struct PageHeader {
+	kind: PageKind,
 }
 
-fn assert_page_kind(page: &impl ReadPage, kind: PageKind) -> Result<(), DatabaseError> {
-	let mut byte: [u8; 1] = [0];
-	page.read(0, &mut byte)?;
-	let received = u8::from_ne_bytes(byte);
-	if received != kind as u8 {
-		let Some(received) = PageKind::from(received) else {
-			return Err(DatabaseError::UnknownPageKind(received));
+#[derive(AsBytes, FromZeroes, FromBytes)]
+#[repr(C)]
+struct PageHeaderRepr {
+	kind: u8,
+}
+
+impl TryFrom<PageHeaderRepr> for PageHeader {
+	type Error = DatabaseError;
+
+	fn try_from(value: PageHeaderRepr) -> Result<Self, Self::Error> {
+		let Some(kind) = PageKind::from(value.kind) else {
+			return Err(DatabaseError::UnknownPageKind(value.kind));
 		};
-		return Err(DatabaseError::UnexpectedPageKind {
-			expected: kind,
-			received,
-		});
+		Ok(Self { kind })
 	}
-	Ok(())
+}
+
+impl From<PageHeader> for PageHeaderRepr {
+	fn from(value: PageHeader) -> Self {
+		Self {
+			kind: value.kind as u8,
+		}
+	}
+}
+
+impl Repr<PageHeader> for PageHeaderRepr {
+	type Error = DatabaseError;
 }
 
 #[derive(AsBytes, FromZeroes, FromBytes)]
@@ -103,12 +113,78 @@ impl From<Option<PageId>> for PageIdRepr {
 	}
 }
 
+macro_rules! read_section {
+	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident) => {{
+		let mut repr = <$field_repr as FromZeroes>::new_zeroed();
+		ReadPage::read(
+			&$page,
+			mem::offset_of!($page_repr, $field),
+			repr.as_bytes_mut(),
+		)
+		.map_err(DatabaseError::from)
+		.and_then(|_| repr.try_into().map_err(DatabaseError::from))
+	}};
+}
+
+macro_rules! write_section {
+	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident, $value:expr) => {{
+		let repr: $field_repr = $value.into();
+		WritePage::write(
+			&mut $page,
+			mem::offset_of!($page_repr, $field),
+			repr.as_bytes(),
+		)
+		.map_err(DatabaseError::from)
+	}};
+}
+
+macro_rules! read_array_section {
+	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident, $index:expr) => {{
+		let mut repr = <$field_repr as FromZeroes>::new_zeroed();
+		let index = mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr>() * $index;
+		if index + mem::size_of::<$field_repr>() > PAGE_BODY_SIZE {
+			None
+		} else {
+			ReadPage::read(&$page, repr.as_bytes_mut())
+				.map_err(DatabaseError::from)
+				.and_then(|_| repr.try_into().map(Some).map_err(DatabaseError::from))
+		}
+	}};
+}
+
+macro_rules! write_array_section {
+	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident, $index:expr, $value:expr) => {{
+		let repr: $field_repr = $value.into();
+		let index = mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr>() * $index;
+		if index + mem::size_of::<$field_repr>() > PAGE_BODY_SIZE {
+			Ok(())
+		} else {
+            WritePage::write(
+                &mut $page,
+                mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr() * $index,
+                repr.as_bytes(),
+            )
+            .map_err(DatabaseError::from)
+        }
+	}};
+}
+
+macro_rules! array_section_size {
+	($page_repr:ident.$field:ident, $field_repr:ident) => {
+		(PAGE_BODY_SIZE - mem::offset_of!($page_repr, $field)) / mem::size_of::<$field_repr>()
+	};
+}
+
+#[repr(C, packed)]
+struct MetaPageFormat {
+	header: PageHeaderRepr,
+	freelist_head: PageIdRepr,
+	next_page_id: PageIdRepr,
+}
+
 pub(super) struct MetaPage<P>(P);
 
 impl<P> MetaPage<P> {
-	const FREELIST_HEAD_OFFSET: usize = PAGE_HEADER_SIZE;
-	const NEXT_PAGE_ID_OFFSET: usize = Self::FREELIST_HEAD_OFFSET + size_of::<PageIdRepr>();
-
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
 	}
@@ -116,79 +192,79 @@ impl<P> MetaPage<P> {
 
 impl<P: ReadPage> MetaPage<P> {
 	pub fn new(page: P) -> Result<Self, DatabaseError> {
-		assert_page_kind(&page, PageKind::FreelistMeta)?;
+		let header: PageHeader = read_section!(page, MetaPageFormat.header, PageHeaderRepr)?;
+		if header.kind != PageKind::FreelistMeta {
+			return Err(DatabaseError::UnexpectedPageKind {
+				expected: PageKind::FreelistMeta,
+				received: header.kind,
+			});
+		}
 		Ok(Self::new_unchecked(page))
 	}
 
 	pub fn get_freelist_head(&self) -> Result<Option<PageId>, DatabaseError> {
-		let mut repr = PageIdRepr::new_zeroed();
-		self.0
-			.read(Self::FREELIST_HEAD_OFFSET, repr.as_bytes_mut())?;
-		Ok(repr.into())
+		read_section!(self.0, MetaPageFormat.freelist_head, PageIdRepr)
 	}
 
 	pub fn get_next_page_id(&self) -> Result<PageId, DatabaseError> {
-		let mut repr = PageIdRepr::new_zeroed();
-		self.0
-			.read(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
-		repr.try_into()
+		read_section!(self.0, MetaPageFormat.next_page_id, PageIdRepr)
 	}
 }
 
 impl<P: WritePage> MetaPage<P> {
 	pub fn init(&mut self, next_page_id: PageId) -> Result<(), DatabaseError> {
-		set_page_kind(&mut self.0, PageKind::FreelistMeta)?;
+		write_section!(
+			self.0,
+			MetaPageFormat.header,
+			PageHeaderRepr,
+			PageHeader {
+				kind: PageKind::FreelistMeta
+			}
+		)?;
 		self.set_freelist_head(None)?;
 		self.set_next_page_id(next_page_id)?;
 		Ok(())
 	}
 
 	pub fn set_freelist_head(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
-		let repr = PageIdRepr::from(value);
-		self.0.write(Self::FREELIST_HEAD_OFFSET, repr.as_bytes())?;
-		Ok(())
+		write_section!(self.0, MetaPageFormat.freelist_head, PageIdRepr, value)
 	}
 
 	pub fn set_next_page_id(&mut self, value: PageId) -> Result<(), DatabaseError> {
-		let repr = PageIdRepr::from(value);
-		self.0.write(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
-		Ok(())
+		write_section!(self.0, MetaPageFormat.next_page_id, PageIdRepr, value)
 	}
+}
+
+#[repr(C, packed)]
+struct FreelistPageFormat {
+	header: PageHeaderRepr,
+	next_page_id: PageIdRepr,
+	length: u16,
+	items: [PageIdRepr],
 }
 
 pub(super) struct FreelistPage<P>(P);
 
 impl<P> FreelistPage<P> {
-	const NEXT_PAGE_ID_OFFSET: usize = PAGE_HEADER_SIZE;
-	const LENGTH_OFFSET: usize = Self::NEXT_PAGE_ID_OFFSET + size_of::<PageIdRepr>();
-	const ITEMS_OFFSET: usize = Self::LENGTH_OFFSET + size_of::<u16>();
-
-	pub const NUM_SLOTS: usize = (PAGE_BODY_SIZE - Self::ITEMS_OFFSET) / size_of::<PageIdRepr>();
-
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
-	}
-
-	fn offset_for_index(index: usize) -> Option<usize> {
-		let offset = Self::ITEMS_OFFSET + index * mem::size_of::<PageIdRepr>();
-		if offset >= PAGE_BODY_SIZE {
-			return None;
-		}
-		Some(offset)
 	}
 }
 
 impl<P: ReadPage> FreelistPage<P> {
 	pub fn new(page: P) -> Result<Self, DatabaseError> {
-		assert_page_kind(&page, PageKind::FreelistBlock)?;
+		let header: PageHeader = read_section!(page, FreelistPageFormat.header, PageHeaderRepr)?;
+		if header.kind != PageKind::FreelistBlock {
+			return Err(DatabaseError::UnexpectedPageKind {
+				expected: PageKind::FreelistBlock,
+				received: header.kind,
+			});
+		}
 		Ok(Self::new_unchecked(page))
 	}
 
 	pub fn get_next_page_id(&self) -> Result<Option<PageId>, DatabaseError> {
-		let mut repr = PageIdRepr::new_zeroed();
-		self.0
-			.read(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes_mut())?;
-		Ok(repr.into())
+		read_section!(self.0, FreelistPageFormat.next_page_id, PageIdRepr)
 	}
 
 	pub fn get_length(&self) -> Result<usize, DatabaseError> {

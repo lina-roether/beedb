@@ -1,4 +1,4 @@
-use std::{num::NonZero, string::FromUtf8Error};
+use std::{convert::Infallible, num::NonZero, string::FromUtf8Error};
 
 use document::SchemaError;
 use pages::PageKind;
@@ -36,6 +36,12 @@ pub(crate) enum DatabaseError {
 
 	#[error(transparent)]
 	Storage(#[from] StorageError),
+}
+
+impl From<Infallible> for DatabaseError {
+	fn from(value: Infallible) -> Self {
+		match value {}
+	}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
