@@ -1,5 +1,9 @@
-use std::{mem, num::NonZeroU16};
+use std::{
+	mem::{self, offset_of},
+	num::NonZeroU16,
+};
 
+use static_assertions::const_assert;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::{
@@ -111,7 +115,7 @@ impl From<Option<PageId>> for PageIdRepr {
 }
 
 macro_rules! read_section {
-	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident) => {{
+	($page:expr, $page_repr:ident.$field:ident, $field_repr:ty) => {{
 		let mut repr = <$field_repr as FromZeros>::new_zeroed();
 		ReadPage::read(
 			&$page,
@@ -137,14 +141,18 @@ macro_rules! write_section {
 
 macro_rules! read_array_section {
 	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident, $index:expr) => {{
-		let mut repr = <$field_repr as FromZeroes>::new_zeroed();
+		let mut repr = <$field_repr as FromZeros>::new_zeroed();
 		let index = mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr>() * $index;
 		if index + mem::size_of::<$field_repr>() > PAGE_BODY_SIZE {
-			None
+			Err(DatabaseError::PageIndexOutOfBounds)
 		} else {
-			ReadPage::read(&$page, repr.as_bytes_mut())
-				.map_err(DatabaseError::from)
-				.and_then(|_| repr.try_into().map(Some).map_err(DatabaseError::from))
+			ReadPage::read(
+				&$page,
+				mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr>() * $index,
+				repr.as_mut_bytes(),
+			)
+			.map_err(DatabaseError::from)
+			.and_then(|_| repr.try_into().map_err(DatabaseError::from))
 		}
 	}};
 }
@@ -156,20 +164,14 @@ macro_rules! write_array_section {
 		if index + mem::size_of::<$field_repr>() > PAGE_BODY_SIZE {
 			Ok(())
 		} else {
-            WritePage::write(
-                &mut $page,
-                mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr() * $index,
-                repr.as_bytes(),
-            )
-            .map_err(DatabaseError::from)
-        }
+			WritePage::write(
+				&mut $page,
+				mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr>() * $index,
+				repr.as_bytes(),
+			)
+			.map_err(DatabaseError::from)
+		}
 	}};
-}
-
-macro_rules! array_section_size {
-	($page_repr:ident.$field:ident, $field_repr:ident) => {
-		(PAGE_BODY_SIZE - mem::offset_of!($page_repr, $field)) / mem::size_of::<$field_repr>()
-	};
 }
 
 #[repr(C, packed)]
@@ -237,12 +239,19 @@ struct FreelistPageFormat {
 	header: PageHeaderRepr,
 	next_page_id: PageIdRepr,
 	length: u16,
-	items: [PageIdRepr],
+	items: [PageIdRepr; Self::NUM_SLOTS],
+}
+const_assert!(PAGE_BODY_SIZE - size_of::<FreelistPageFormat>() < size_of::<PageIdRepr>());
+
+impl FreelistPageFormat {
+	const NUM_SLOTS: usize = 5456;
 }
 
 pub(super) struct FreelistPage<P>(P);
 
 impl<P> FreelistPage<P> {
+	pub const NUM_SLOTS: usize = FreelistPageFormat::NUM_SLOTS;
+
 	pub fn new_unchecked(page: P) -> Self {
 		Self(page)
 	}
@@ -265,59 +274,44 @@ impl<P: ReadPage> FreelistPage<P> {
 	}
 
 	pub fn get_length(&self) -> Result<usize, DatabaseError> {
-		todo!()
-		//let mut repr = [0; 2];
-		//self.0.read(Self::LENGTH_OFFSET, &mut repr)?;
-		//Ok(u16::from_ne_bytes(repr).into())
+		read_section!(self.0, FreelistPageFormat.length, u16)
 	}
 
 	pub fn is_full(&self) -> Result<bool, DatabaseError> {
-		todo!()
-		//Ok(self.get_length()? >= Self::NUM_SLOTS)
+		Ok(self.get_length()? >= FreelistPageFormat::NUM_SLOTS)
 	}
 
 	pub fn get_item(&self, index: usize) -> Result<Option<PageId>, DatabaseError> {
-		todo!()
-		//let mut repr = PageIdRepr::new_zeroed();
-		//let Some(offset) = Self::offset_for_index(index) else {
-		//	return Ok(None);
-		//};
-		//self.0.read(offset, repr.as_bytes_mut())?;
-		//Ok(repr.into())
+		read_array_section!(self.0, FreelistPageFormat.items, PageIdRepr, index)
 	}
 }
 
 impl<P: WritePage> FreelistPage<P> {
 	pub fn init(&mut self) -> Result<(), DatabaseError> {
-		todo!()
-		//set_page_kind(&mut self.0, PageKind::FreelistBlock)?;
-		//self.set_next_page_id(None)?;
-		//self.set_length(0)?;
-		//Ok(())
+		write_section!(
+			self.0,
+			FreelistPageFormat.header,
+			PageHeaderRepr,
+			PageHeader {
+				kind: PageKind::FreelistBlock
+			}
+		)?;
+		self.set_next_page_id(None)?;
+		self.set_length(0)?;
+		Ok(())
 	}
 
 	pub fn set_next_page_id(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
-		todo!()
-		//let repr = PageIdRepr::from(value);
-		//self.0.write(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
-		//Ok(())
+		write_section!(self.0, FreelistPageFormat.next_page_id, PageIdRepr, value)
 	}
 
 	fn set_length(&mut self, value: usize) -> Result<(), DatabaseError> {
-		todo!()
-		//let repr = u16::try_from(value).expect("Freelist page length must be
-		// 16-bit!"); self.0.write(Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
-		//Ok(())
+		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
+		write_section!(self.0, FreelistPageFormat.length, u16, repr)
 	}
 
 	fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
-		todo!()
-		//let repr = PageIdRepr::from(value);
-		//let Some(offset) = Self::offset_for_index(index) else {
-		//	return Err(DatabaseError::PageIndexOutOfBounds);
-		//};
-		//self.0.write(offset, repr.as_bytes())?;
-		//Ok(())
+		write_array_section!(self.0, FreelistPageFormat.items, PageIdRepr, index, value)
 	}
 }
 
