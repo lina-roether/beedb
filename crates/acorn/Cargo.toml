@@ -7,14 +7,14 @@ edition = "2021"
 
 [dependencies]
 crc = "3.2.1"
-zerocopy = { version = "0.7.32", features = ["derive"] }
-thiserror = "1.0.58"
+zerocopy = { version = "0.8.14", features = ["derive"] }
+thiserror = "2.0.11"
 static_assertions = { version = "1.1.0", features = ["nightly"] }
-parking_lot = { version = "0.12.2", features = ["nightly"] }
-log = "0.4.21"
-futures = { version = "0.3.30", features = ["thread-pool"] }
+parking_lot = { version = "0.12.3", features = ["nightly"] }
+log = "0.4.25"
+futures = { version = "0.3.31", features = ["thread-pool"] }
 
 [dev-dependencies]
-mockall = { version = "0.12.1", features = ["nightly"] }
-tempfile = { version = "3.10.1", features = ["nightly"] }
+mockall = { version = "0.13.1", features = ["nightly"] }
+tempfile = { version = "3.15.0", features = ["nightly"] }
 pretty_assertions = { path = "../pretty_assertions" }

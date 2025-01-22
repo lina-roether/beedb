@@ -23,7 +23,7 @@ use static_assertions::assert_impl_all;
 #[cfg(test)]
 use mockall::automock;
 
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
 	consts::{DEFAULT_FLUSH_PERIOD, DEFAULT_MAX_DIRTY_PAGES, DEFAULT_PAGE_CACHE_SIZE},
@@ -54,7 +54,7 @@ impl Default for PageCacheConfig {
 	}
 }
 
-#[derive(Debug, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Immutable, KnownLayout, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 pub(crate) struct BufferedPageHeader {
 	wal_generation: u64,
@@ -198,7 +198,7 @@ pub(crate) trait PageReadGuardApi {
 
 impl<'a> PageReadGuardApi for PageReadGuard<'a> {
 	fn header(&self) -> &BufferedPageHeader {
-		BufferedPageHeader::ref_from(&self.page[0..HEADER_SIZE]).unwrap()
+		BufferedPageHeader::ref_from_bytes(&self.page[0..HEADER_SIZE]).unwrap()
 	}
 
 	fn body(&self) -> &[u8] {
@@ -237,11 +237,11 @@ pub(crate) trait PageWriteGuardApi {
 
 impl<'a> PageWriteGuardApi for PageWriteGuard<'a> {
 	fn header(&self) -> &BufferedPageHeader {
-		BufferedPageHeader::ref_from(&self.page[0..HEADER_SIZE]).unwrap()
+		BufferedPageHeader::ref_from_bytes(&self.page[0..HEADER_SIZE]).unwrap()
 	}
 
 	fn header_mut(&mut self) -> &mut BufferedPageHeader {
-		BufferedPageHeader::mut_from(&mut self.page[0..HEADER_SIZE]).unwrap()
+		BufferedPageHeader::mut_from_bytes(&mut self.page[0..HEADER_SIZE]).unwrap()
 	}
 
 	fn body(&self) -> &[u8] {

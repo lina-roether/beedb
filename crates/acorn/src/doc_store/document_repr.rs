@@ -1,12 +1,12 @@
 use std::{convert::Infallible, mem, num::NonZero};
 
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::{page_store::PageId, repr::Repr};
 
 use super::{DatabaseError, DbPointer};
 
-#[derive(Debug, AsBytes, FromZeroes, FromBytes)]
+#[derive(Debug, Immutable, IntoBytes, FromBytes)]
 #[repr(C)]
 struct DbPointerRepr {
 	segment_num: u32,

@@ -3,9 +3,9 @@ use std::{
 	mem,
 };
 
-use zerocopy::{AsBytes, FromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-pub(crate) trait Repr<T>: Sized + FromBytes + AsBytes
+pub(crate) trait Repr<T>: Sized + FromBytes + IntoBytes
 where
 	T: TryFrom<Self> + Into<Self>,
 {
@@ -15,7 +15,7 @@ where
 
 	fn from_bytes(bytes: &[u8]) -> Result<T, Self::Error> {
 		let mut repr = Self::new_zeroed();
-		repr.as_bytes_mut().copy_from_slice(bytes);
+		repr.as_mut_bytes().copy_from_slice(bytes);
 		Ok(T::try_from(repr)?)
 	}
 }
@@ -23,6 +23,7 @@ where
 pub(crate) trait IoRepr<T>: Repr<T>
 where
 	T: TryFrom<Self> + Into<Self>,
+	Self: Immutable,
 	Self::Error: From<io::Error>,
 {
 	fn serialize(value: T, mut writer: impl Write) -> Result<(), Self::Error> {
@@ -33,7 +34,7 @@ where
 
 	fn deserialize(mut reader: impl Read) -> Result<T, Self::Error> {
 		let mut repr = Self::new_zeroed();
-		reader.read_exact(repr.as_bytes_mut())?;
+		reader.read_exact(repr.as_mut_bytes())?;
 		Ok(T::try_from(repr)?)
 	}
 }
@@ -42,6 +43,7 @@ impl<T, R> IoRepr<T> for R
 where
 	R: Repr<T>,
 	T: TryFrom<R> + Into<R>,
+	Self: Immutable,
 	Self::Error: From<io::Error>,
 {
 }

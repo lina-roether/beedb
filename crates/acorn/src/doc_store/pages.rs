@@ -1,9 +1,6 @@
-use std::{
-	mem::{self, size_of},
-	num::NonZeroU16,
-};
+use std::{mem, num::NonZeroU16};
 
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::{
 	files::segment::PAGE_BODY_SIZE,
@@ -37,7 +34,7 @@ struct PageHeader {
 	kind: PageKind,
 }
 
-#[derive(AsBytes, FromZeroes, FromBytes)]
+#[derive(Debug, Immutable, IntoBytes, FromBytes)]
 #[repr(C)]
 struct PageHeaderRepr {
 	kind: u8,
@@ -66,7 +63,7 @@ impl Repr<PageHeader> for PageHeaderRepr {
 	type Error = DatabaseError;
 }
 
-#[derive(AsBytes, FromZeroes, FromBytes)]
+#[derive(Debug, Immutable, IntoBytes, FromBytes)]
 #[repr(C, packed)]
 struct PageIdRepr {
 	segment_num: u32,
@@ -115,11 +112,11 @@ impl From<Option<PageId>> for PageIdRepr {
 
 macro_rules! read_section {
 	($page:expr, $page_repr:ident.$field:ident, $field_repr:ident) => {{
-		let mut repr = <$field_repr as FromZeroes>::new_zeroed();
+		let mut repr = <$field_repr as FromZeros>::new_zeroed();
 		ReadPage::read(
 			&$page,
 			mem::offset_of!($page_repr, $field),
-			repr.as_bytes_mut(),
+			repr.as_mut_bytes(),
 		)
 		.map_err(DatabaseError::from)
 		.and_then(|_| repr.try_into().map_err(DatabaseError::from))
@@ -268,52 +265,59 @@ impl<P: ReadPage> FreelistPage<P> {
 	}
 
 	pub fn get_length(&self) -> Result<usize, DatabaseError> {
-		let mut repr = [0; 2];
-		self.0.read(Self::LENGTH_OFFSET, &mut repr)?;
-		Ok(u16::from_ne_bytes(repr).into())
+		todo!()
+		//let mut repr = [0; 2];
+		//self.0.read(Self::LENGTH_OFFSET, &mut repr)?;
+		//Ok(u16::from_ne_bytes(repr).into())
 	}
 
 	pub fn is_full(&self) -> Result<bool, DatabaseError> {
-		Ok(self.get_length()? >= Self::NUM_SLOTS)
+		todo!()
+		//Ok(self.get_length()? >= Self::NUM_SLOTS)
 	}
 
 	pub fn get_item(&self, index: usize) -> Result<Option<PageId>, DatabaseError> {
-		let mut repr = PageIdRepr::new_zeroed();
-		let Some(offset) = Self::offset_for_index(index) else {
-			return Ok(None);
-		};
-		self.0.read(offset, repr.as_bytes_mut())?;
-		Ok(repr.into())
+		todo!()
+		//let mut repr = PageIdRepr::new_zeroed();
+		//let Some(offset) = Self::offset_for_index(index) else {
+		//	return Ok(None);
+		//};
+		//self.0.read(offset, repr.as_bytes_mut())?;
+		//Ok(repr.into())
 	}
 }
 
 impl<P: WritePage> FreelistPage<P> {
 	pub fn init(&mut self) -> Result<(), DatabaseError> {
-		set_page_kind(&mut self.0, PageKind::FreelistBlock)?;
-		self.set_next_page_id(None)?;
-		self.set_length(0)?;
-		Ok(())
+		todo!()
+		//set_page_kind(&mut self.0, PageKind::FreelistBlock)?;
+		//self.set_next_page_id(None)?;
+		//self.set_length(0)?;
+		//Ok(())
 	}
 
 	pub fn set_next_page_id(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
-		let repr = PageIdRepr::from(value);
-		self.0.write(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
-		Ok(())
+		todo!()
+		//let repr = PageIdRepr::from(value);
+		//self.0.write(Self::NEXT_PAGE_ID_OFFSET, repr.as_bytes())?;
+		//Ok(())
 	}
 
 	fn set_length(&mut self, value: usize) -> Result<(), DatabaseError> {
-		let repr = u16::try_from(value).expect("Freelist page length must be 16-bit!");
-		self.0.write(Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
-		Ok(())
+		todo!()
+		//let repr = u16::try_from(value).expect("Freelist page length must be
+		// 16-bit!"); self.0.write(Self::LENGTH_OFFSET, &repr.to_ne_bytes())?;
+		//Ok(())
 	}
 
 	fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
-		let repr = PageIdRepr::from(value);
-		let Some(offset) = Self::offset_for_index(index) else {
-			return Err(DatabaseError::PageIndexOutOfBounds);
-		};
-		self.0.write(offset, repr.as_bytes())?;
-		Ok(())
+		todo!()
+		//let repr = PageIdRepr::from(value);
+		//let Some(offset) = Self::offset_for_index(index) else {
+		//	return Err(DatabaseError::PageIndexOutOfBounds);
+		//};
+		//self.0.write(offset, repr.as_bytes())?;
+		//Ok(())
 	}
 }
 
@@ -346,9 +350,9 @@ impl<P> BlockPage<P> {
 	const LEAF_BLOCK_SIZE: usize = 32 * B;
 	const DEGREE_MASK: usize = (Self::LEAF_BLOCK_SIZE + 1).next_power_of_two() - 1;
 	const ALLOC_TREE_SIZE: usize =
-		Self::get_alloc_tree_size(PAGE_BODY_SIZE - PAGE_HEADER_SIZE, Self::LEAF_BLOCK_SIZE);
+		Self::get_alloc_tree_size(PAGE_BODY_SIZE - PageHeaderRepr::SIZE, Self::LEAF_BLOCK_SIZE);
 
-	const ALLOC_TREE_OFFSET: usize = PAGE_HEADER_SIZE;
+	const ALLOC_TREE_OFFSET: usize = PageHeaderRepr::SIZE;
 	const BODY_OFFSET: usize = Self::ALLOC_TREE_OFFSET + Self::ALLOC_TREE_SIZE;
 
 	const BODY_SIZE: usize = PAGE_BODY_SIZE - Self::BODY_OFFSET;

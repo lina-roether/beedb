@@ -8,7 +8,7 @@ use std::{
 
 #[cfg(test)]
 use mockall::automock;
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use super::{
 	generic::{GenericHeader, GenericHeaderRepr},
@@ -38,7 +38,7 @@ enum PageHeader {
 	Init(InitPageHeader),
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 struct PageHeaderRepr {
 	wal_generation: u64,
@@ -225,7 +225,6 @@ mod tests {
 	use std::io::{Read, Write};
 
 	use pretty_assertions::assert_buf_eq;
-	use zerocopy::AsBytes;
 
 	use crate::{
 		files::{generic::GenericHeaderRepr, test_helpers::wal_index},

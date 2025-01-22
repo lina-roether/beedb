@@ -8,7 +8,7 @@ use std::{
 };
 
 use static_assertions::assert_impl_all;
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 const FORMAT_VERSION: u8 = 1;
 
@@ -28,7 +28,7 @@ use super::{
 
 const FLAG_UNDO: u8 = 0b00000001;
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C)]
 struct ItemHeaderRepr {
 	kind: u8,
@@ -38,13 +38,13 @@ struct ItemHeaderRepr {
 	prev_item: Option<NonZeroU64>,
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C)]
 struct ItemFooterRepr {
 	item_start: u64,
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C)]
 struct TransactionBlockRepr {
 	transaction_id: u64,
@@ -52,7 +52,7 @@ struct TransactionBlockRepr {
 	prev_transaction_offset: Option<NonZeroU64>,
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 struct WriteBlockRepr {
 	segment_num: u32,
@@ -61,28 +61,28 @@ struct WriteBlockRepr {
 	write_length: u16,
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C)]
 struct CheckpointBlockRepr {
 	num_dirty_pages: u64,
 	num_transactions: u64,
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 struct PageIdRepr {
 	segment_num: u32,
 	page_num: u16,
 }
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C)]
 struct WalIndexRepr {
 	generation: u64,
 	offset: u64,
 }
 
-#[derive(Debug, Clone, FromBytes, FromZeroes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C)]
 struct TransactionStateRepr {
 	first_generation: u64,

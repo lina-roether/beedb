@@ -1,10 +1,10 @@
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::repr::Repr;
 
 use super::FileError;
 
-#[derive(Debug, Clone, FromZeroes, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 pub(super) struct GenericHeaderRepr {
 	magic: [u8; 4],

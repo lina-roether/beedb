@@ -769,7 +769,10 @@ mod tests {
 					.once()
 					.with(eq(7), always())
 					.returning(|_, buf| {
-						buf.copy_from_slice(&(FreelistPage::<()>::NUM_SLOTS as u16).to_ne_bytes());
+						buf.copy_from_slice(
+							/* &(FreelistPage::<()>::NUM_SLOTS as u16).to_ne_bytes() */
+							todo!(),
+						);
 						Ok(())
 					});
 				Ok(page)
