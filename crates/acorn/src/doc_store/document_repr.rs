@@ -88,5 +88,5 @@ pub(crate) enum StoredDocument {
 	Value(StoredValue),
 	Option(Option<Box<StoredDocument>>),
 	List(DbPointer),
-	StuctFields(Vec<StoredDocument>),
+	StructFields(Vec<StoredDocument>),
 }
