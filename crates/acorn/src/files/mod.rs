@@ -53,7 +53,7 @@ pub(crate) enum FileError {
 	#[error("The file is corrupted; a checksum mismatch occurred")]
 	ChecksumMismatch,
 
-	#[error("Unexpected file in database folder: {}", _0.display())]
+	#[error("Unexpected file in database folder: {}", _0.to_string_lossy())]
 	UnexpectedFile(OsString),
 
 	#[error(transparent)]

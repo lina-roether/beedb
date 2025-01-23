@@ -146,22 +146,20 @@ impl SegmentFile {
 		Ok(Self { file })
 	}
 
-	cfg_match! {
-		cfg(unix) => {
-			fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), FileError> {
-				os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)?;
-				Ok(())
-			}
-
-			fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), FileError> {
-				os::unix::fs::FileExt::write_all_at(&self.file, buf, offset)?;
-				Ok(())
-			}
-		}
-		_ => {
-			compile_error!("Functionality not implemented on this platform!");
-		}
+	#[cfg(unix)]
+	fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), FileError> {
+		os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)?;
+		Ok(())
 	}
+
+	#[cfg(unix)]
+	fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), FileError> {
+		os::unix::fs::FileExt::write_all_at(&self.file, buf, offset)?;
+		Ok(())
+	}
+
+	#[cfg(not(unix))]
+	compile_error!("Functionality not implemented on this platform!");
 
 	#[inline]
 	fn get_page_offset(page_num: NonZeroU16) -> u64 {
