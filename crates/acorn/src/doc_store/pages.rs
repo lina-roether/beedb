@@ -1,6 +1,8 @@
-use std::{mem, num::NonZeroU16};
+use std::{
+	mem::{self, offset_of},
+	num::NonZeroU16,
+};
 
-use static_assertions::const_assert;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::{
@@ -236,12 +238,12 @@ struct FreelistPageFormat {
 	header: PageHeaderRepr,
 	next_page_id: PageIdRepr,
 	length: u16,
-	items: [PageIdRepr; Self::NUM_SLOTS],
+	items: [PageIdRepr; 0],
 }
-const_assert!(PAGE_BODY_SIZE - size_of::<FreelistPageFormat>() < size_of::<PageIdRepr>());
 
 impl FreelistPageFormat {
-	const NUM_SLOTS: usize = 5456;
+	const NUM_SLOTS: usize =
+		(PAGE_BODY_SIZE - offset_of!(FreelistPageFormat, items)) / size_of::<PageIdRepr>();
 }
 
 pub(super) struct FreelistPage<P>(P);
@@ -332,50 +334,5 @@ impl<P: ReadPage + WritePage> FreelistPage<P> {
 				return Ok(Some(item));
 			}
 		}
-	}
-}
-
-pub(super) struct BlockPage<P>(P);
-
-impl<P> BlockPage<P> {
-	const LEAF_BLOCK_SIZE: usize = 32 * B;
-	const DEGREE_MASK: usize = (Self::LEAF_BLOCK_SIZE + 1).next_power_of_two() - 1;
-	const ALLOC_TREE_SIZE: usize =
-		Self::get_alloc_tree_size(PAGE_BODY_SIZE - PageHeaderRepr::SIZE, Self::LEAF_BLOCK_SIZE);
-
-	const ALLOC_TREE_OFFSET: usize = PageHeaderRepr::SIZE;
-	const BODY_OFFSET: usize = Self::ALLOC_TREE_OFFSET + Self::ALLOC_TREE_SIZE;
-
-	const BODY_SIZE: usize = PAGE_BODY_SIZE - Self::BODY_OFFSET;
-	const NUM_LEAF_NODES: usize = Self::BODY_SIZE / Self::LEAF_BLOCK_SIZE;
-	const ROOT_BLOCK_SIZE: usize = Self::NUM_LEAF_NODES * Self::LEAF_BLOCK_SIZE;
-	const MAX_DEGREE: usize = Self::NUM_LEAF_NODES.next_power_of_two().ilog2() as usize;
-
-	const fn get_alloc_tree_size(body_size: usize, leaf_block_size: usize) -> usize {
-		let preemptive_num_leaves = body_size / leaf_block_size;
-		let preemptive_num_nodes =
-			preemptive_num_leaves.next_power_of_two() + preemptive_num_leaves - 1;
-
-		(preemptive_num_nodes + 7) / 8
-	}
-
-	pub fn new_unchecked(page: P) -> Self {
-		Self(page)
-	}
-
-	fn get_block_pos(index: u16) -> (usize, usize) {
-		let block_degree = usize::from(index) & Self::DEGREE_MASK;
-		let block_pos = usize::from(index) / (Self::LEAF_BLOCK_SIZE << block_degree);
-		(block_pos, block_degree)
-	}
-}
-
-impl<P: ReadPage> BlockPage<P> {
-	fn get_alloc_tree_value(degree: usize, pos: usize) {
-		todo!()
-	}
-
-	fn find_free_block(size: usize) {
-		todo!()
 	}
 }
