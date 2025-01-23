@@ -1,4 +1,4 @@
-use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::repr::Repr;
 

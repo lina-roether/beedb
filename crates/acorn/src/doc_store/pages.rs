@@ -1,7 +1,4 @@
-use std::{
-	mem::{self, offset_of},
-	num::NonZeroU16,
-};
+use std::{mem, num::NonZeroU16};
 
 use static_assertions::const_assert;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
