@@ -23,7 +23,7 @@ use crate::{
 use super::{
 	generic::{FileType, GenericHeader, GenericHeaderRepr},
 	utils::CRC32,
-	FileError, PageId, TransactionState, WalIndex,
+	FileError, PageAddress, TransactionState, WalIndex,
 };
 
 const FLAG_UNDO: u8 = 0b00000001;
@@ -70,7 +70,7 @@ struct CheckpointBlockRepr {
 
 #[derive(Debug, Clone, Immutable, FromBytes, IntoBytes)]
 #[repr(C, packed)]
-struct PageIdRepr {
+struct PageAddressRepr {
 	segment_num: u32,
 	page_num: u16,
 }
@@ -217,7 +217,7 @@ impl Repr<TransactionBlock> for TransactionBlockRepr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WriteBlock {
-	page_id: PageId,
+	page_address: PageAddress,
 	offset: u16,
 	write_length: u16,
 }
@@ -225,8 +225,8 @@ struct WriteBlock {
 impl From<WriteBlock> for WriteBlockRepr {
 	fn from(value: WriteBlock) -> Self {
 		Self {
-			segment_num: value.page_id.segment_num,
-			page_num: value.page_id.page_num.get(),
+			segment_num: value.page_address.segment_num,
+			page_num: value.page_address.page_num.get(),
 			offset: value.offset,
 			write_length: value.write_length,
 		}
@@ -243,7 +243,7 @@ impl TryFrom<WriteBlockRepr> for WriteBlock {
 			));
 		};
 		Ok(Self {
-			page_id: PageId::new(value.segment_num, page_num),
+			page_address: PageAddress::new(value.segment_num, page_num),
 			offset: value.offset,
 			write_length: value.write_length,
 		})
@@ -260,8 +260,8 @@ impl Repr<CheckpointBlock> for CheckpointBlockRepr {
 	type Error = FileError;
 }
 
-impl From<PageId> for PageIdRepr {
-	fn from(value: PageId) -> Self {
+impl From<PageAddress> for PageAddressRepr {
+	fn from(value: PageAddress) -> Self {
 		Self {
 			segment_num: value.segment_num,
 			page_num: value.page_num.get(),
@@ -269,20 +269,20 @@ impl From<PageId> for PageIdRepr {
 	}
 }
 
-impl TryFrom<PageIdRepr> for PageId {
+impl TryFrom<PageAddressRepr> for PageAddress {
 	type Error = FileError;
 
-	fn try_from(value: PageIdRepr) -> Result<Self, Self::Error> {
+	fn try_from(value: PageAddressRepr) -> Result<Self, Self::Error> {
 		let Some(page_num) = NonZeroU16::new(value.page_num) else {
 			return Err(FileError::Corrupted(
 				"Found invalid page number 0".to_string(),
 			));
 		};
-		Ok(PageId::new(value.segment_num, page_num))
+		Ok(PageAddress::new(value.segment_num, page_num))
 	}
 }
 
-impl Repr<PageId> for PageIdRepr {
+impl Repr<PageAddress> for PageAddressRepr {
 	type Error = FileError;
 }
 
@@ -434,7 +434,7 @@ impl<F: Seek + Read + Write> WalFile<F> {
 		Self::write_transaction_block(&mut writer, data.transaction_data)?;
 
 		let block = WriteBlock {
-			page_id: data.page_id,
+			page_address: data.page_address,
 			offset: data.offset,
 			write_length: data
 				.to
@@ -460,8 +460,8 @@ impl<F: Seek + Read + Write> WalFile<F> {
 			num_transactions: data.transactions.len() as u64,
 		};
 		CheckpointBlockRepr::serialize(block, &mut writer)?;
-		for (page_id, wal_index) in data.dirty_pages.iter() {
-			PageIdRepr::serialize(*page_id, &mut writer)?;
+		for (page_address, wal_index) in data.dirty_pages.iter() {
+			PageAddressRepr::serialize(*page_address, &mut writer)?;
 			WalIndexRepr::serialize(*wal_index, &mut writer)?;
 		}
 		for (transaction_id, transaction_state) in data.transactions.iter() {
@@ -482,7 +482,7 @@ pub(crate) struct TransactionData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteData<'a> {
 	pub transaction_data: TransactionData,
-	pub page_id: PageId,
+	pub page_address: PageAddress,
 	pub offset: u16,
 	pub from: Option<Cow<'a, [u8]>>,
 	pub to: Cow<'a, [u8]>,
@@ -491,7 +491,7 @@ pub(crate) struct WriteData<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckpointData<'a> {
 	pub transactions: Cow<'a, HashMap<u64, TransactionState>>,
-	pub dirty_pages: Cow<'a, HashMap<PageId, WalIndex>>,
+	pub dirty_pages: Cow<'a, HashMap<PageAddress, WalIndex>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,7 +671,7 @@ impl<F: Read + Seek> ItemReader<F> {
 
 		Ok(WriteData {
 			transaction_data,
-			page_id: write_block.page_id,
+			page_address: write_block.page_address,
 			offset: write_block.offset,
 			from: from.map(Cow::Owned),
 			to: Cow::Owned(to),
@@ -681,11 +681,11 @@ impl<F: Read + Seek> ItemReader<F> {
 	fn read_checkpoint_data(mut body: impl Read) -> Result<CheckpointData<'static>, FileError> {
 		let checkpoint_block = CheckpointBlock::deserialize(&mut body)?;
 
-		let mut dirty_pages: HashMap<PageId, WalIndex> = HashMap::new();
+		let mut dirty_pages: HashMap<PageAddress, WalIndex> = HashMap::new();
 		for _ in 0..checkpoint_block.num_dirty_pages {
-			let page_id = PageIdRepr::deserialize(&mut body)?;
+			let page_address = PageAddressRepr::deserialize(&mut body)?;
 			let wal_index = WalIndexRepr::deserialize(&mut body)?;
-			dirty_pages.insert(page_id, wal_index);
+			dirty_pages.insert(page_address, wal_index);
 		}
 
 		let mut transactions: HashMap<u64, TransactionState> = HashMap::new();
@@ -807,7 +807,7 @@ mod tests {
 	use crate::{
 		files::{
 			generic::GenericHeaderRepr,
-			test_helpers::{page_id, wal_index},
+			test_helpers::{page_address, wal_index},
 		},
 		utils::test_helpers::non_zero,
 	};
@@ -870,7 +870,7 @@ mod tests {
 					transaction_id: 25,
 					prev_transaction_item: Some(wal_index!(123, 24)),
 				},
-				page_id: page_id!(123, 456),
+				page_address: page_address!(123, 456),
 				offset: 445,
 				from: Some(Cow::Owned(vec![1, 2, 3, 4])),
 				to: Cow::Owned(vec![4, 5, 6, 7]),
@@ -979,7 +979,7 @@ mod tests {
 					transaction_id: 25,
 					prev_transaction_item: Some(wal_index!(123, 24)),
 				},
-				page_id: page_id!(123, 456),
+				page_address: page_address!(123, 456),
 				offset: 445,
 				from: None,
 				to: vec![4, 5, 6, 7].into(),
@@ -1036,7 +1036,7 @@ mod tests {
 
 		// when
 		let mut dirty_pages = HashMap::new();
-		dirty_pages.insert(page_id!(1, 2), wal_index!(0, 3));
+		dirty_pages.insert(page_address!(1, 2), wal_index!(0, 3));
 		let mut transactions = HashMap::new();
 		transactions.insert(
 			69,
@@ -1073,7 +1073,7 @@ mod tests {
 			.as_bytes(),
 		);
 		expected_body.extend(
-			PageIdRepr {
+			PageAddressRepr {
 				segment_num: 1,
 				page_num: 2,
 			}
@@ -1115,7 +1115,7 @@ mod tests {
 				transaction_id: 0,
 				prev_transaction_item: None,
 			},
-			page_id: page_id!(123, 456),
+			page_address: page_address!(123, 456),
 			offset: 420,
 			from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 			to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -1139,7 +1139,7 @@ mod tests {
 					transaction_id: 0,
 					prev_transaction_item: None,
 				},
-				page_id: page_id!(123, 456),
+				page_address: page_address!(123, 456),
 				offset: 420,
 				from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 				to: Cow::Owned(vec![1, 2, 3, 4]),
@@ -1179,7 +1179,7 @@ mod tests {
 					transaction_id: 0,
 					prev_transaction_item: None,
 				},
-				page_id: page_id!(123, 456),
+				page_address: page_address!(123, 456),
 				offset: 420,
 				from: Some(Cow::Owned(vec![0, 0, 0, 0])),
 				to: Cow::Owned(vec![1, 2, 3, 4]),

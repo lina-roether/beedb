@@ -4,7 +4,7 @@ use document::SchemaError;
 use pages::PageKind;
 use thiserror::Error;
 
-use crate::page_store::{PageId, StorageError};
+use crate::page_store::{PageAddress, StorageError};
 
 mod document;
 mod document_repr;
@@ -52,17 +52,17 @@ pub(crate) struct DbPointer {
 }
 
 impl DbPointer {
-	pub fn new(page_id: PageId, index: u16) -> Self {
+	pub fn new(page_address: PageAddress, index: u16) -> Self {
 		Self {
-			segment_num: page_id.segment_num,
-			page_num: page_id.page_num,
+			segment_num: page_address.segment_num,
+			page_num: page_address.page_num,
 			index,
 		}
 	}
 
 	#[inline]
-	pub fn page_id(self) -> PageId {
-		PageId::new(self.segment_num, self.page_num)
+	pub fn page_address(self) -> PageAddress {
+		PageAddress::new(self.segment_num, self.page_num)
 	}
 
 	#[inline]

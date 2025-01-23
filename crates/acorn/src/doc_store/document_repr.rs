@@ -2,7 +2,7 @@ use std::{convert::Infallible, mem, num::NonZero};
 
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
-use crate::{page_store::PageId, repr::Repr};
+use crate::{page_store::PageAddress, repr::Repr};
 
 use super::{DatabaseError, DbPointer};
 
@@ -31,7 +31,7 @@ impl From<DbPointerRepr> for Option<DbPointer> {
 	fn from(value: DbPointerRepr) -> Self {
 		let page_num = NonZero::new(value.page_num)?;
 		Some(DbPointer::new(
-			PageId::new(value.segment_num, page_num),
+			PageAddress::new(value.segment_num, page_num),
 			value.index,
 		))
 	}

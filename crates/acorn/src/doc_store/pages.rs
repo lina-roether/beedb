@@ -7,9 +7,8 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::{
 	files::segment::PAGE_BODY_SIZE,
-	page_store::{PageId, ReadPage, WritePage},
+	page_store::{PageAddress, ReadPage, WritePage},
 	repr::Repr,
-	utils::units::B,
 };
 
 use super::DatabaseError;
@@ -68,26 +67,26 @@ impl Repr<PageHeader> for PageHeaderRepr {
 
 #[derive(Debug, Immutable, IntoBytes, FromBytes)]
 #[repr(C, packed)]
-struct PageIdRepr {
+struct PageAddressRepr {
 	segment_num: u32,
 	page_num: u16,
 }
 
-impl TryFrom<PageIdRepr> for PageId {
+impl TryFrom<PageAddressRepr> for PageAddress {
 	type Error = DatabaseError;
 
-	fn try_from(value: PageIdRepr) -> Result<Self, DatabaseError> {
+	fn try_from(value: PageAddressRepr) -> Result<Self, DatabaseError> {
 		let Some(page_num) = NonZeroU16::new(value.page_num) else {
 			return Err(DatabaseError::PageFormat(
 				"Found invalid page number '0'!".to_string(),
 			));
 		};
-		Ok(PageId::new(value.segment_num, page_num))
+		Ok(PageAddress::new(value.segment_num, page_num))
 	}
 }
 
-impl From<PageId> for PageIdRepr {
-	fn from(value: PageId) -> Self {
+impl From<PageAddress> for PageAddressRepr {
+	fn from(value: PageAddress) -> Self {
 		Self {
 			segment_num: value.segment_num,
 			page_num: value.page_num.get(),
@@ -95,20 +94,20 @@ impl From<PageId> for PageIdRepr {
 	}
 }
 
-impl From<PageIdRepr> for Option<PageId> {
-	fn from(value: PageIdRepr) -> Self {
-		Some(PageId::new(
+impl From<PageAddressRepr> for Option<PageAddress> {
+	fn from(value: PageAddressRepr) -> Self {
+		Some(PageAddress::new(
 			value.segment_num,
 			NonZeroU16::new(value.page_num)?,
 		))
 	}
 }
 
-impl From<Option<PageId>> for PageIdRepr {
-	fn from(value: Option<PageId>) -> Self {
+impl From<Option<PageAddress>> for PageAddressRepr {
+	fn from(value: Option<PageAddress>) -> Self {
 		match value {
-			Some(page_id) => page_id.into(),
-			None => PageIdRepr::new_zeroed(),
+			Some(page_address) => page_address.into(),
+			None => PageAddressRepr::new_zeroed(),
 		}
 	}
 }
@@ -176,8 +175,8 @@ macro_rules! write_array_section {
 #[repr(C, packed)]
 struct MetaPageFormat {
 	header: PageHeaderRepr,
-	freelist_head: PageIdRepr,
-	next_page_id: PageIdRepr,
+	freelist_head: PageAddressRepr,
+	next_page_address: PageAddressRepr,
 }
 
 pub(super) struct MetaPage<P>(P);
@@ -200,17 +199,17 @@ impl<P: ReadPage> MetaPage<P> {
 		Ok(Self::new_unchecked(page))
 	}
 
-	pub fn get_freelist_head(&self) -> Result<Option<PageId>, DatabaseError> {
-		read_section!(self.0, MetaPageFormat.freelist_head, PageIdRepr)
+	pub fn get_freelist_head(&self) -> Result<Option<PageAddress>, DatabaseError> {
+		read_section!(self.0, MetaPageFormat.freelist_head, PageAddressRepr)
 	}
 
-	pub fn get_next_page_id(&self) -> Result<PageId, DatabaseError> {
-		read_section!(self.0, MetaPageFormat.next_page_id, PageIdRepr)
+	pub fn get_next_page_address(&self) -> Result<PageAddress, DatabaseError> {
+		read_section!(self.0, MetaPageFormat.next_page_address, PageAddressRepr)
 	}
 }
 
 impl<P: WritePage> MetaPage<P> {
-	pub fn init(&mut self, next_page_id: PageId) -> Result<(), DatabaseError> {
+	pub fn init(&mut self, next_page_address: PageAddress) -> Result<(), DatabaseError> {
 		write_section!(
 			self.0,
 			MetaPageFormat.header,
@@ -220,30 +219,35 @@ impl<P: WritePage> MetaPage<P> {
 			}
 		)?;
 		self.set_freelist_head(None)?;
-		self.set_next_page_id(next_page_id)?;
+		self.set_next_page_address(next_page_address)?;
 		Ok(())
 	}
 
-	pub fn set_freelist_head(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
-		write_section!(self.0, MetaPageFormat.freelist_head, PageIdRepr, value)
+	pub fn set_freelist_head(&mut self, value: Option<PageAddress>) -> Result<(), DatabaseError> {
+		write_section!(self.0, MetaPageFormat.freelist_head, PageAddressRepr, value)
 	}
 
-	pub fn set_next_page_id(&mut self, value: PageId) -> Result<(), DatabaseError> {
-		write_section!(self.0, MetaPageFormat.next_page_id, PageIdRepr, value)
+	pub fn set_next_page_address(&mut self, value: PageAddress) -> Result<(), DatabaseError> {
+		write_section!(
+			self.0,
+			MetaPageFormat.next_page_address,
+			PageAddressRepr,
+			value
+		)
 	}
 }
 
 #[repr(C, packed)]
 struct FreelistPageFormat {
 	header: PageHeaderRepr,
-	next_page_id: PageIdRepr,
+	next_page_address: PageAddressRepr,
 	length: u16,
-	items: [PageIdRepr; 0],
+	items: [PageAddressRepr; 0],
 }
 
 impl FreelistPageFormat {
 	const NUM_SLOTS: usize =
-		(PAGE_BODY_SIZE - offset_of!(FreelistPageFormat, items)) / size_of::<PageIdRepr>();
+		(PAGE_BODY_SIZE - offset_of!(FreelistPageFormat, items)) / size_of::<PageAddressRepr>();
 }
 
 pub(super) struct FreelistPage<P>(P);
@@ -268,8 +272,12 @@ impl<P: ReadPage> FreelistPage<P> {
 		Ok(Self::new_unchecked(page))
 	}
 
-	pub fn get_next_page_id(&self) -> Result<Option<PageId>, DatabaseError> {
-		read_section!(self.0, FreelistPageFormat.next_page_id, PageIdRepr)
+	pub fn get_next_page_address(&self) -> Result<Option<PageAddress>, DatabaseError> {
+		read_section!(
+			self.0,
+			FreelistPageFormat.next_page_address,
+			PageAddressRepr
+		)
 	}
 
 	pub fn get_length(&self) -> Result<usize, DatabaseError> {
@@ -280,8 +288,8 @@ impl<P: ReadPage> FreelistPage<P> {
 		Ok(self.get_length()? >= FreelistPageFormat::NUM_SLOTS)
 	}
 
-	pub fn get_item(&self, index: usize) -> Result<Option<PageId>, DatabaseError> {
-		read_array_section!(self.0, FreelistPageFormat.items, PageIdRepr, index)
+	pub fn get_item(&self, index: usize) -> Result<Option<PageAddress>, DatabaseError> {
+		read_array_section!(self.0, FreelistPageFormat.items, PageAddressRepr, index)
 	}
 }
 
@@ -295,13 +303,21 @@ impl<P: WritePage> FreelistPage<P> {
 				kind: PageKind::FreelistBlock
 			}
 		)?;
-		self.set_next_page_id(None)?;
+		self.set_next_page_address(None)?;
 		self.set_length(0)?;
 		Ok(())
 	}
 
-	pub fn set_next_page_id(&mut self, value: Option<PageId>) -> Result<(), DatabaseError> {
-		write_section!(self.0, FreelistPageFormat.next_page_id, PageIdRepr, value)
+	pub fn set_next_page_address(
+		&mut self,
+		value: Option<PageAddress>,
+	) -> Result<(), DatabaseError> {
+		write_section!(
+			self.0,
+			FreelistPageFormat.next_page_address,
+			PageAddressRepr,
+			value
+		)
 	}
 
 	fn set_length(&mut self, value: usize) -> Result<(), DatabaseError> {
@@ -309,20 +325,26 @@ impl<P: WritePage> FreelistPage<P> {
 		write_section!(self.0, FreelistPageFormat.length, u16, repr)
 	}
 
-	fn set_item(&mut self, index: usize, value: Option<PageId>) -> Result<(), DatabaseError> {
-		write_array_section!(self.0, FreelistPageFormat.items, PageIdRepr, index, value)
+	fn set_item(&mut self, index: usize, value: Option<PageAddress>) -> Result<(), DatabaseError> {
+		write_array_section!(
+			self.0,
+			FreelistPageFormat.items,
+			PageAddressRepr,
+			index,
+			value
+		)
 	}
 }
 
 impl<P: ReadPage + WritePage> FreelistPage<P> {
-	pub fn push_item(&mut self, value: PageId) -> Result<(), DatabaseError> {
+	pub fn push_item(&mut self, value: PageAddress) -> Result<(), DatabaseError> {
 		let index = self.get_length()?;
 		self.set_item(index, Some(value))?;
 		self.set_length(index + 1)?;
 		Ok(())
 	}
 
-	pub fn pop_item(&mut self) -> Result<Option<PageId>, DatabaseError> {
+	pub fn pop_item(&mut self) -> Result<Option<PageAddress>, DatabaseError> {
 		let mut index = self.get_length()?;
 		loop {
 			if index == 0 {

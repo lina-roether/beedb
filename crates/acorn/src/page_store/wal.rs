@@ -23,7 +23,7 @@ use crate::{
 	tasks::{Timer, TimerHandle},
 };
 
-use super::{PageId, StorageError, TransactionState, WalIndex};
+use super::{PageAddress, StorageError, TransactionState, WalIndex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalConfig {
@@ -43,7 +43,7 @@ impl Default for WalConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartialWriteOp<'a> {
 	pub index: WalIndex,
-	pub page_id: PageId,
+	pub page_address: PageAddress,
 	pub offset: u16,
 	pub buf: &'a [u8],
 }
@@ -51,7 +51,7 @@ pub(crate) struct PartialWriteOp<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteLog<'a> {
 	pub transaction_id: u64,
-	pub page_id: PageId,
+	pub page_address: PageAddress,
 	pub offset: u16,
 	pub from: &'a [u8],
 	pub to: &'a [u8],
@@ -60,7 +60,7 @@ pub(crate) struct WriteLog<'a> {
 #[derive(Debug, Clone)]
 struct UndoLog<'a> {
 	transaction_id: u64,
-	page_id: PageId,
+	page_address: PageAddress,
 	offset: u16,
 	to: Cow<'a, [u8]>,
 }
@@ -224,7 +224,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 		mut handle: impl FnMut(PartialWriteOp) -> Result<(), StorageError>,
 	) -> Result<(), StorageError> {
 		let state = self.state.lock();
-		let Some(first_dirty_index) = state.dirty_pages.get(&data.page_id).copied() else {
+		let Some(first_dirty_index) = state.dirty_pages.get(&data.page_address).copied() else {
 			return Ok(());
 		};
 		mem::drop(state);
@@ -235,7 +235,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 
 		handle(PartialWriteOp {
 			index,
-			page_id: data.page_id,
+			page_address: data.page_address,
 			offset: data.offset,
 			buf: data.to.borrow(),
 		})?;
@@ -265,7 +265,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 
 		Some(UndoLog {
 			transaction_id: write.transaction_data.transaction_id,
-			page_id: write.page_id,
+			page_address: write.page_address,
 			offset: write.offset,
 			to: from_buf,
 		})
@@ -280,7 +280,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 		let index = self.log_undo(log.clone(), gens)?;
 
 		handle(PartialWriteOp {
-			page_id: log.page_id,
+			page_address: log.page_address,
 			offset: log.offset,
 			index,
 			buf: &log.to,
@@ -386,7 +386,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 		let transaction_data = self.create_transaction_data(write_log.transaction_id);
 		wal::WriteData {
 			transaction_data,
-			page_id: write_log.page_id,
+			page_address: write_log.page_address,
 			offset: write_log.offset,
 			from: Some(Cow::Borrowed(write_log.from)),
 			to: Cow::Borrowed(write_log.to),
@@ -397,7 +397,7 @@ impl<DF: DatabaseFolderApi + Send + Sync + 'static> Wal<DF> {
 		let transaction_data = self.create_transaction_data(undo_log.transaction_id);
 		wal::WriteData {
 			transaction_data,
-			page_id: undo_log.page_id,
+			page_address: undo_log.page_address,
 			offset: undo_log.offset,
 			from: None,
 			to: undo_log.to,
@@ -585,13 +585,13 @@ impl<DF: DatabaseFolderApi> GenerationQueue<DF> {
 
 #[derive(Debug, Clone, Default)]
 struct State {
-	dirty_pages: HashMap<PageId, WalIndex>,
+	dirty_pages: HashMap<PageAddress, WalIndex>,
 	transactions: HashMap<u64, TransactionState>,
 }
 
 impl State {
 	fn new(
-		dirty_pages: HashMap<PageId, WalIndex>,
+		dirty_pages: HashMap<PageAddress, WalIndex>,
 		transactions: HashMap<u64, TransactionState>,
 	) -> Self {
 		Self {
@@ -620,7 +620,7 @@ impl State {
 
 	fn track_write(&mut self, index: WalIndex, data: &wal::WriteData) {
 		self.track_transaction(index, data.transaction_data.transaction_id);
-		self.dirty_pages.entry(data.page_id).or_insert(index);
+		self.dirty_pages.entry(data.page_address).or_insert(index);
 	}
 
 	fn cache_did_flush(&mut self) {
@@ -651,7 +651,7 @@ mod tests {
 	use crate::{
 		files::MockDatabaseFolderApi,
 		page_store::{
-			test_helpers::{page_id, wal_index},
+			test_helpers::{page_address, wal_index},
 			wal::tests::wal::test_helpers::mock_wal_file,
 		},
 		utils::test_helpers::{map, non_zero},
@@ -721,7 +721,7 @@ mod tests {
 						transaction_id: 1,
 						prev_transaction_item: None
 					},
-					page_id: page_id!(100, 200),
+					page_address: page_address!(100, 200),
 					offset: 25,
 					from: Some(vec![2, 2, 2, 2].into()),
 					to: vec![1, 2, 3, 4].into()
@@ -737,7 +737,7 @@ mod tests {
 						transaction_id: 2,
 						prev_transaction_item: None
 					},
-					page_id: page_id!(25, 69),
+					page_address: page_address!(25, 69),
 					offset: 100,
 					from: Some(vec![0, 0, 0, 0].into()),
 					to: vec![1, 2, 3, 4].into()
@@ -753,7 +753,7 @@ mod tests {
 						}
 					}),
 					dirty_pages: Cow::Owned(map! {
-						page_id!(100, 200) => wal_index!(2, 20)
+						page_address!(100, 200) => wal_index!(2, 20)
 					})
 				}),
 
@@ -784,7 +784,7 @@ mod tests {
 							transaction_id: 1,
 							prev_transaction_item: Some(WalIndex::new(2, non_zero!(20))),
 						},
-						page_id: page_id!(100, 200),
+						page_address: page_address!(100, 200),
 						offset: 25,
 						from: None,
 						to: Cow::Owned(vec![2, 2, 2, 2]),
@@ -838,14 +838,14 @@ mod tests {
 			// This reapplies write (3, 10).
 			PartialWriteOp {
 				index: wal_index!(3, 10),
-				page_id: page_id!(25, 69),
+				page_address: page_address!(25, 69),
 				offset: 100,
 				buf: &[1, 2, 3, 4],
 			},
 			// This reverts write (2, 20).
 			PartialWriteOp {
 				index: wal_index!(3, 40),
-				page_id: page_id!(100, 200),
+				page_address: page_address!(100, 200),
 				offset: 25,
 				buf: &[2, 2, 2, 2],
 			},

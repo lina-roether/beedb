@@ -82,12 +82,12 @@ pub(crate) struct TransactionState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PageId {
+pub(crate) struct PageAddress {
 	pub segment_num: u32,
 	pub page_num: NonZeroU16,
 }
 
-impl PageId {
+impl PageAddress {
 	pub const fn new(segment_num: u32, page_num: NonZeroU16) -> Self {
 		Self {
 			segment_num,
@@ -97,7 +97,7 @@ impl PageId {
 
 	pub const fn new_unwrap(segment_num: u32, page_num: u16) -> Self {
 		if page_num == 0 {
-			panic!("Called PageId::new_unchecked with a page_num of 0");
+			panic!("Called PageAddress::new_unchecked with a page_num of 0");
 		}
 		// Safety: page_num is guaranteed not to be zero.
 		let page_num = unsafe { NonZero::new_unchecked(page_num) };
@@ -105,7 +105,7 @@ impl PageId {
 	}
 }
 
-impl fmt::Display for PageId {
+impl fmt::Display for PageAddress {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{:08x}:{:04x}", self.segment_num, self.page_num)
 	}
@@ -243,12 +243,12 @@ impl Iterator for IterWalFiles {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-	macro_rules! page_id {
+	macro_rules! page_address {
 		($segment:expr, $page:expr) => {
-			$crate::files::PageId::new($segment, std::num::NonZeroU16::new($page).unwrap())
+			$crate::files::PageAddress::new($segment, std::num::NonZeroU16::new($page).unwrap())
 		};
 	}
-	pub(crate) use page_id;
+	pub(crate) use page_address;
 
 	macro_rules! wal_index {
 		($gen:expr, $offset:expr) => {

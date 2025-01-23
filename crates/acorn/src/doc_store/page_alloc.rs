@@ -1,6 +1,6 @@
 use std::{mem, num::NonZero};
 
-use crate::page_store::{PageId, TransactionApi};
+use crate::page_store::{PageAddress, TransactionApi};
 
 use super::{
 	pages::{FreelistPage, MetaPage},
@@ -10,54 +10,58 @@ use super::{
 struct PageAllocator;
 
 impl PageAllocator {
-	const META_PAGE_ID: PageId = PageId::new_unwrap(0, 1);
+	const META_PAGE_ADDRESS: PageAddress = PageAddress::new_unwrap(0, 1);
 
 	pub fn init(t: &mut impl TransactionApi) -> Result<(), DatabaseError> {
-		let mut meta_page = MetaPage::new_unchecked(t.get_page_mut(Self::META_PAGE_ID)?);
-		meta_page.init(Self::page_id_after(Self::META_PAGE_ID))?;
+		let mut meta_page = MetaPage::new_unchecked(t.get_page_mut(Self::META_PAGE_ADDRESS)?);
+		meta_page.init(Self::page_address_after(Self::META_PAGE_ADDRESS))?;
 		Ok(())
 	}
 
-	pub fn alloc(t: &mut impl TransactionApi) -> Result<PageId, DatabaseError> {
+	pub fn alloc(t: &mut impl TransactionApi) -> Result<PageAddress, DatabaseError> {
 		if let Some(free_page) = Self::next_free_page(t)? {
 			return Ok(free_page);
 		}
 		Self::next_uninit_page(t)
 	}
 
-	pub fn free(t: &mut impl TransactionApi, page_id: PageId) -> Result<(), DatabaseError> {
+	pub fn free(
+		t: &mut impl TransactionApi,
+		page_address: PageAddress,
+	) -> Result<(), DatabaseError> {
 		let meta_page = Self::meta_page(t)?;
 		if let Some(freelist_head_id) = meta_page.get_freelist_head()? {
 			mem::drop(meta_page);
 
 			let mut freelist_head = FreelistPage::new(t.get_page_mut(freelist_head_id)?)?;
 			if !freelist_head.is_full()? {
-				freelist_head.push_item(page_id)?;
+				freelist_head.push_item(page_address)?;
 			} else {
 				mem::drop(freelist_head);
 
-				let mut new_freelist_head = FreelistPage::new_unchecked(t.get_page_mut(page_id)?);
+				let mut new_freelist_head =
+					FreelistPage::new_unchecked(t.get_page_mut(page_address)?);
 				new_freelist_head.init()?;
-				new_freelist_head.set_next_page_id(Some(freelist_head_id))?;
+				new_freelist_head.set_next_page_address(Some(freelist_head_id))?;
 				mem::drop(new_freelist_head);
 
 				let mut meta_page = Self::meta_page_mut(t)?;
-				meta_page.set_freelist_head(Some(page_id))?;
+				meta_page.set_freelist_head(Some(page_address))?;
 			}
 			return Ok(());
 		}
 		mem::drop(meta_page);
 
-		let mut freelist_head = FreelistPage::new_unchecked(t.get_page_mut(page_id)?);
+		let mut freelist_head = FreelistPage::new_unchecked(t.get_page_mut(page_address)?);
 		freelist_head.init()?;
 		mem::drop(freelist_head);
 
 		let mut meta_page = Self::meta_page_mut(t)?;
-		meta_page.set_freelist_head(Some(page_id))?;
+		meta_page.set_freelist_head(Some(page_address))?;
 		Ok(())
 	}
 
-	fn next_free_page(t: &mut impl TransactionApi) -> Result<Option<PageId>, DatabaseError> {
+	fn next_free_page(t: &mut impl TransactionApi) -> Result<Option<PageAddress>, DatabaseError> {
 		let Some(freelist_head_id) = Self::meta_page(t)?.get_freelist_head()? else {
 			return Ok(None);
 		};
@@ -66,45 +70,45 @@ impl PageAllocator {
 			return Ok(Some(id));
 		}
 
-		let new_head = freelist_page.get_next_page_id()?;
+		let new_head = freelist_page.get_next_page_address()?;
 		mem::drop(freelist_page);
 
 		Self::meta_page_mut(t)?.set_freelist_head(new_head)?;
 		Ok(Some(freelist_head_id))
 	}
 
-	fn next_uninit_page(t: &mut impl TransactionApi) -> Result<PageId, DatabaseError> {
+	fn next_uninit_page(t: &mut impl TransactionApi) -> Result<PageAddress, DatabaseError> {
 		let mut meta_page = Self::meta_page_mut(t)?;
-		let page_id = meta_page.get_next_page_id()?;
-		meta_page.set_next_page_id(Self::page_id_after(page_id))?;
-		Ok(page_id)
+		let page_address = meta_page.get_next_page_address()?;
+		meta_page.set_next_page_address(Self::page_address_after(page_address))?;
+		Ok(page_address)
 	}
 
-	fn page_id_after(page_id: PageId) -> PageId {
-		if page_id.page_num.get() == u16::MAX {
-			PageId::new(
-				page_id
+	fn page_address_after(page_address: PageAddress) -> PageAddress {
+		if page_address.page_num.get() == u16::MAX {
+			PageAddress::new(
+				page_address
 					.segment_num
 					.checked_add(1)
 					.expect("You've somehow managed to exhaust the space of page IDs ¯\\_(ツ)_/¯"),
 				NonZero::new(1).unwrap(),
 			)
 		} else {
-			PageId::new(
-				page_id.segment_num,
-				page_id.page_num.checked_add(1).unwrap(),
+			PageAddress::new(
+				page_address.segment_num,
+				page_address.page_num.checked_add(1).unwrap(),
 			)
 		}
 	}
 
 	fn meta_page<T: TransactionApi>(t: &mut T) -> Result<MetaPage<T::Page<'_>>, DatabaseError> {
-		MetaPage::new(t.get_page(Self::META_PAGE_ID)?)
+		MetaPage::new(t.get_page(Self::META_PAGE_ADDRESS)?)
 	}
 
 	fn meta_page_mut<T: TransactionApi>(
 		t: &mut T,
 	) -> Result<MetaPage<T::PageMut<'_>>, DatabaseError> {
-		MetaPage::new(t.get_page_mut(Self::META_PAGE_ID)?)
+		MetaPage::new(t.get_page_mut(Self::META_PAGE_ADDRESS)?)
 	}
 }
 
@@ -112,7 +116,7 @@ impl PageAllocator {
 mod tests {
 	use crate::{
 		doc_store::pages::PageKind,
-		page_store::{test_helpers::page_id, MockPage, MockPageMut, MockTransactionApi},
+		page_store::{test_helpers::page_address, MockPage, MockPageMut, MockTransactionApi},
 	};
 	use mockall::{predicate::*, Sequence};
 
@@ -124,7 +128,7 @@ mod tests {
 		let mut t = MockTransactionApi::new();
 		t.expect_get_page_mut()
 			.once()
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				page.expect_write()
@@ -163,7 +167,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -195,7 +199,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0x24, 0x25)))
+			.with(eq(page_address!(0x24, 0x25)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -246,10 +250,10 @@ mod tests {
 			});
 
 		// when
-		let page_id = PageAllocator::alloc(&mut t).unwrap();
+		let page_address = PageAllocator::alloc(&mut t).unwrap();
 
 		// then
-		assert_eq!(page_id, page_id!(0x69, 0x420));
+		assert_eq!(page_address, page_address!(0x69, 0x420));
 	}
 
 	#[test]
@@ -262,7 +266,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -294,7 +298,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0x24, 0x25)))
+			.with(eq(page_address!(0x24, 0x25)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -334,7 +338,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -361,10 +365,10 @@ mod tests {
 			});
 
 		// when
-		let page_id = PageAllocator::alloc(&mut t).unwrap();
+		let page_address = PageAllocator::alloc(&mut t).unwrap();
 
 		// then
-		assert_eq!(page_id, page_id!(0x24, 0x25));
+		assert_eq!(page_address, page_address!(0x24, 0x25));
 	}
 
 	#[test]
@@ -377,7 +381,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -403,7 +407,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -444,10 +448,10 @@ mod tests {
 			});
 
 		// when
-		let page_id = PageAllocator::alloc(&mut t).unwrap();
+		let page_address = PageAllocator::alloc(&mut t).unwrap();
 
 		// then
-		assert_eq!(page_id, page_id!(0x2000, 0x3));
+		assert_eq!(page_address, page_address!(0x2000, 0x3));
 	}
 
 	#[test]
@@ -460,7 +464,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -486,7 +490,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -527,10 +531,10 @@ mod tests {
 			});
 
 		// when
-		let page_id = PageAllocator::alloc(&mut t).unwrap();
+		let page_address = PageAllocator::alloc(&mut t).unwrap();
 
 		// then
-		assert_eq!(page_id, page_id!(0x2000, 0xffff));
+		assert_eq!(page_address, page_address!(0x2000, 0xffff));
 	}
 
 	#[test]
@@ -543,7 +547,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -575,7 +579,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0x2000, 0x1)))
+			.with(eq(page_address!(0x2000, 0x1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -616,7 +620,7 @@ mod tests {
 			});
 
 		// when
-		PageAllocator::free(&mut t, page_id!(0x69, 0x420)).unwrap();
+		PageAllocator::free(&mut t, page_address!(0x69, 0x420)).unwrap();
 	}
 
 	#[test]
@@ -629,7 +633,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -655,7 +659,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0x69, 0x420)))
+			.with(eq(page_address!(0x69, 0x420)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - set the page type
@@ -681,7 +685,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -708,7 +712,7 @@ mod tests {
 			});
 
 		// when
-		PageAllocator::free(&mut t, page_id!(0x69, 0x420)).unwrap();
+		PageAllocator::free(&mut t, page_address!(0x69, 0x420)).unwrap();
 	}
 
 	#[test]
@@ -721,7 +725,7 @@ mod tests {
 		t.expect_get_page()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPage::new();
 				// - check the page type
@@ -753,7 +757,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0x2000, 0x1)))
+			.with(eq(page_address!(0x2000, 0x1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - set the page type
@@ -779,7 +783,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0x69, 0x420)))
+			.with(eq(page_address!(0x69, 0x420)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - set the page type
@@ -817,7 +821,7 @@ mod tests {
 		t.expect_get_page_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(0, 1)))
+			.with(eq(page_address!(0, 1)))
 			.returning(|_| {
 				let mut page = MockPageMut::new();
 				// - check the page type
@@ -844,6 +848,6 @@ mod tests {
 			});
 
 		// when
-		PageAllocator::free(&mut t, page_id!(0x69, 0x420)).unwrap();
+		PageAllocator::free(&mut t, page_address!(0x69, 0x420)).unwrap();
 	}
 }

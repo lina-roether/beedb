@@ -12,7 +12,7 @@ use crate::{
 	utils::cache::CacheReplacer,
 };
 
-use super::{PageId, StorageError, WalIndex};
+use super::{PageAddress, StorageError, WalIndex};
 
 pub(crate) struct PhysicalStorage<DF = DatabaseFolder>
 where
@@ -69,14 +69,14 @@ where
 
 #[derive(Debug)]
 pub(crate) struct ReadOp<'a> {
-	pub page_id: PageId,
+	pub page_address: PageAddress,
 	pub buf: &'a mut [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteOp<'a> {
 	pub wal_index: WalIndex,
-	pub page_id: PageId,
+	pub page_address: PageAddress,
 	pub buf: &'a [u8],
 }
 
@@ -90,15 +90,15 @@ pub(crate) trait PhysicalStorageApi {
 
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
 	fn read(&self, op: ReadOp) -> Result<Option<WalIndex>, StorageError> {
-		self.use_segment(op.page_id.segment_num, |segment| {
-			let wal_index = segment.read(op.page_id.page_num, op.buf)?;
+		self.use_segment(op.page_address.segment_num, |segment| {
+			let wal_index = segment.read(op.page_address.page_num, op.buf)?;
 			Ok(wal_index)
 		})
 	}
 
 	fn write(&self, op: WriteOp) -> Result<(), StorageError> {
-		self.use_segment(op.page_id.segment_num, |segment| {
-			segment.write(op.page_id.page_num, op.buf, op.wal_index)?;
+		self.use_segment(op.page_address.segment_num, |segment| {
+			segment.write(op.page_address.page_num, op.buf, op.wal_index)?;
 			Ok(())
 		})
 	}
@@ -150,7 +150,7 @@ mod tests {
 	use crate::{
 		files::{
 			segment::{MockSegmentFileApi, PAGE_BODY_SIZE},
-			test_helpers::{page_id, wal_index},
+			test_helpers::{page_address, wal_index},
 			MockDatabaseFolderApi,
 		},
 		utils::test_helpers::non_zero,
@@ -187,7 +187,7 @@ mod tests {
 		// when
 		storage
 			.write(WriteOp {
-				page_id: page_id!(69, 420),
+				page_address: page_address!(69, 420),
 				buf: &[1; PAGE_BODY_SIZE],
 				wal_index: wal_index!(69, 420),
 			})
@@ -222,7 +222,7 @@ mod tests {
 		let mut buf = [0; 3];
 		let wal_index = storage
 			.read(ReadOp {
-				page_id: page_id!(69, 420),
+				page_address: page_address!(69, 420),
 				buf: &mut buf,
 			})
 			.unwrap();

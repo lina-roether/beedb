@@ -34,7 +34,7 @@ use crate::{
 
 use super::{
 	physical::{PhysicalStorage, PhysicalStorageApi, WriteOp},
-	PageId, StorageError,
+	PageAddress, StorageError,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,11 +276,11 @@ pub(crate) struct PageCache<PS: PhysicalStorageApi = PhysicalStorage> {
 	buf: Arc<PageBuffer>,
 	physical_storage: Arc<PS>,
 	thread_pool: Arc<ThreadPool>,
-	indices: Arc<RwLock<HashMap<PageId, usize>>>,
-	replacer: RwLock<CacheReplacer<PageId>>,
+	indices: Arc<RwLock<HashMap<PageAddress, usize>>>,
+	replacer: RwLock<CacheReplacer<PageAddress>>,
 	scrap: Mutex<Vec<usize>>,
 	has_scrap: AtomicBool,
-	dirty_list: Arc<Mutex<Vec<PageId>>>,
+	dirty_list: Arc<Mutex<Vec<PageAddress>>>,
 	locks: Arc<Box<[RawRwLock]>>,
 	max_num_dirty: usize,
 	flush_timer_handle: TimerHandle,
@@ -338,9 +338,9 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 		}
 	}
 
-	fn evict_for(&self, page_id: PageId) -> Option<PageId> {
+	fn evict_for(&self, page_address: PageAddress) -> Option<PageAddress> {
 		let mut replacer = self.replacer.write();
-		let mut maybe_evict = replacer.evict_replace(page_id);
+		let mut maybe_evict = replacer.evict_replace(page_address);
 		mem::drop(replacer);
 
 		loop {
@@ -356,7 +356,7 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 				//
 				// Note that this ends up in an infinite loop if all pages in the cache are
 				// locked over an extended period, but that should rarely happen.
-				if evicted == page_id || self.locks[index].is_locked() {
+				if evicted == page_address || self.locks[index].is_locked() {
 					let mut replacer = self.replacer.write();
 					maybe_evict = replacer.evict_replace(evicted);
 					continue;
@@ -367,9 +367,9 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 		maybe_evict
 	}
 
-	fn get_store_index(&self, page_id: PageId) -> usize {
+	fn get_store_index(&self, page_address: PageAddress) -> usize {
 		let indices = self.indices.read();
-		if let Some(stored_index) = indices.get(&page_id).copied() {
+		if let Some(stored_index) = indices.get(&page_address).copied() {
 			return stored_index;
 		}
 		mem::drop(indices);
@@ -381,31 +381,31 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 			}
 		}
 
-		let maybe_evict = self.evict_for(page_id);
+		let maybe_evict = self.evict_for(page_address);
 		let mut indices = self.indices.write();
 		if let Some(evict) = maybe_evict {
 			let index = indices
 				.remove(&evict)
 				.expect("Tried to evict a page that is not in the cache!");
-			indices.insert(page_id, index);
+			indices.insert(page_address, index);
 			index
 		} else {
 			let index = self
 				.buf
 				.push_page()
 				.expect("Failed to evict a page when the buffer was full!");
-			indices.insert(page_id, index);
+			indices.insert(page_address, index);
 			index
 		}
 	}
 
-	fn get_load_index(&self, page_id: PageId) -> Option<usize> {
+	fn get_load_index(&self, page_address: PageAddress) -> Option<usize> {
 		let indices = self.indices.read();
-		let index = indices.get(&page_id).copied()?;
+		let index = indices.get(&page_address).copied()?;
 		mem::drop(indices);
 
 		let replacer = self.replacer.read();
-		let access_successful = replacer.access(&page_id);
+		let access_successful = replacer.access(&page_address);
 		debug_assert!(access_successful);
 		mem::drop(replacer);
 
@@ -453,8 +453,8 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 
 	fn flush(
 		physical_storage: &PS,
-		dirty_list: &Mutex<Vec<PageId>>,
-		indices: &RwLock<HashMap<PageId, usize>>,
+		dirty_list: &Mutex<Vec<PageAddress>>,
+		indices: &RwLock<HashMap<PageAddress, usize>>,
 		locks: &[RawRwLock],
 		buf: &PageBuffer,
 	) -> Result<(), StorageError> {
@@ -464,9 +464,9 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 		mem::drop(dirty_list_guard);
 
 		let mut error: Option<StorageError> = None;
-		for page_id in dirty_list_copy.iter().copied() {
+		for page_address in dirty_list_copy.iter().copied() {
 			let indices = indices.read();
-			let Some(index) = indices.get(&page_id).copied() else {
+			let Some(index) = indices.get(&page_address).copied() else {
 				continue;
 			};
 			mem::drop(indices);
@@ -477,7 +477,7 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 			}
 			if let Err(err) = physical_storage.write(WriteOp {
 				wal_index: guard.header().wal_index(),
-				page_id,
+				page_address,
 				buf: guard.body(),
 			}) {
 				error = Some(err);
@@ -500,8 +500,8 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 
 	async fn flush_ok(
 		physical_storage: &PS,
-		dirty_list: &Mutex<Vec<PageId>>,
-		indices: &RwLock<HashMap<PageId, usize>>,
+		dirty_list: &Mutex<Vec<PageAddress>>,
+		indices: &RwLock<HashMap<PageAddress, usize>>,
 		locks: &[RawRwLock],
 		buf: &PageBuffer,
 	) {
@@ -512,8 +512,8 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 
 	async fn single_flush_task(
 		physical_storage: Arc<PS>,
-		dirty_list: Arc<Mutex<Vec<PageId>>>,
-		indices: Arc<RwLock<HashMap<PageId, usize>>>,
+		dirty_list: Arc<Mutex<Vec<PageAddress>>>,
+		indices: Arc<RwLock<HashMap<PageAddress, usize>>>,
 		locks: Arc<Box<[RawRwLock]>>,
 		buf: Arc<PageBuffer>,
 	) {
@@ -523,8 +523,8 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 	async fn periodic_flush_task(
 		timer: Timer,
 		physical_storage: Arc<PS>,
-		dirty_list: Arc<Mutex<Vec<PageId>>>,
-		indices: Arc<RwLock<HashMap<PageId, usize>>>,
+		dirty_list: Arc<Mutex<Vec<PageAddress>>>,
+		indices: Arc<RwLock<HashMap<PageAddress, usize>>>,
 		locks: Arc<Box<[RawRwLock]>>,
 		buf: Arc<PageBuffer>,
 	) {
@@ -547,13 +547,13 @@ pub(crate) trait PageCacheApi {
 	where
 		Self: 'a;
 
-	fn has_page(&self, page_id: PageId) -> bool;
-	fn load<'a>(&'a self, page_id: PageId) -> Option<Self::ReadGuard<'a>>;
-	fn load_mut<'a>(&'a self, page_id: PageId) -> Option<Self::WriteGuard<'a>>;
-	fn store<'a>(&'a self, page_id: PageId) -> Self::WriteGuard<'a>;
+	fn has_page(&self, page_address: PageAddress) -> bool;
+	fn load<'a>(&'a self, page_address: PageAddress) -> Option<Self::ReadGuard<'a>>;
+	fn load_mut<'a>(&'a self, page_address: PageAddress) -> Option<Self::WriteGuard<'a>>;
+	fn store<'a>(&'a self, page_address: PageAddress) -> Self::WriteGuard<'a>;
 	fn flush(&self);
 	fn flush_sync(&self) -> Result<(), StorageError>;
-	fn scrap(&self, page_id: PageId);
+	fn scrap(&self, page_address: PageAddress);
 	fn downgrade_guard<'a>(&'a self, guard: Self::WriteGuard<'a>) -> Self::ReadGuard<'a>;
 }
 
@@ -561,24 +561,24 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCacheApi for PageCache<
 	type ReadGuard<'a> = PageReadGuard<'a>;
 	type WriteGuard<'a> = PageWriteGuard<'a>;
 
-	fn has_page(&self, page_id: PageId) -> bool {
+	fn has_page(&self, page_address: PageAddress) -> bool {
 		let indices = self.indices.read();
-		indices.contains_key(&page_id)
+		indices.contains_key(&page_address)
 	}
 
-	fn load(&self, page_id: PageId) -> Option<PageReadGuard<'_>> {
-		let index = self.get_load_index(page_id)?;
+	fn load(&self, page_address: PageAddress) -> Option<PageReadGuard<'_>> {
+		let index = self.get_load_index(page_address)?;
 		Some(Self::load_direct(&self.locks, &self.buf, index))
 	}
 
-	fn load_mut(&self, page_id: PageId) -> Option<Self::WriteGuard<'_>> {
-		let index = self.get_load_index(page_id)?;
+	fn load_mut(&self, page_address: PageAddress) -> Option<Self::WriteGuard<'_>> {
+		let index = self.get_load_index(page_address)?;
 		Some(Self::load_mut_direct(&self.locks, &self.buf, index))
 	}
 
-	fn store(&self, page_id: PageId) -> PageWriteGuard<'_> {
+	fn store(&self, page_address: PageAddress) -> PageWriteGuard<'_> {
 		let mut dirty_list = self.dirty_list.lock();
-		dirty_list.push(page_id);
+		dirty_list.push(page_address);
 		if dirty_list.len() >= self.max_num_dirty {
 			self.thread_pool.spawn_ok(Self::single_flush_task(
 				Arc::clone(&self.physical_storage),
@@ -590,7 +590,7 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCacheApi for PageCache<
 		}
 		mem::drop(dirty_list);
 
-		let index = self.get_store_index(page_id);
+		let index = self.get_store_index(page_address);
 		Self::load_mut_direct(&self.locks, &self.buf, index)
 	}
 
@@ -619,9 +619,9 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCacheApi for PageCache<
 		)
 	}
 
-	fn scrap(&self, page_id: PageId) {
+	fn scrap(&self, page_address: PageAddress) {
 		let mut indices = self.indices.write();
-		let Some(index) = indices.remove(&page_id) else {
+		let Some(index) = indices.remove(&page_address) else {
 			return;
 		};
 		mem::drop(indices);
@@ -656,7 +656,7 @@ mod tests {
 	use crate::{
 		page_store::{
 			physical::MockPhysicalStorageApi,
-			test_helpers::{page_id, wal_index},
+			test_helpers::{page_address, wal_index},
 		},
 		utils::units::MIB,
 	};
@@ -678,12 +678,12 @@ mod tests {
 		// when
 		let expected_page = [69; PAGE_BODY_SIZE];
 		cache
-			.store(page_id!(69, 420))
+			.store(page_address!(69, 420))
 			.write(0, &expected_page, wal_index!(1, 2));
 
 		let mut received_page = [0; PAGE_BODY_SIZE];
 		cache
-			.load(page_id!(69, 420))
+			.load(page_address!(69, 420))
 			.unwrap()
 			.read(0, &mut received_page);
 
@@ -704,7 +704,7 @@ mod tests {
 		);
 
 		// when
-		let guard = cache.load(page_id!(69, 420));
+		let guard = cache.load(page_address!(69, 420));
 
 		// then
 		assert!(guard.is_none())
@@ -723,24 +723,24 @@ mod tests {
 		);
 
 		// when
-		cache.store(page_id!(1, 1)); // add 1, 1 to recent
-		cache.store(page_id!(2, 2)); // add 2, 2 to recent
-		cache.store(page_id!(3, 3)); // add 3, 3 to recent
-		cache.store(page_id!(4, 4)); // add 4, 4 to recent
-		cache.load(page_id!(1, 1)); // 1, 1 was referenced in recent
-		cache.load(page_id!(2, 2)); // 2, 2 was referenced in recent
-		cache.load(page_id!(1, 1)); // 1, 1 is promoted to frequent
+		cache.store(page_address!(1, 1)); // add 1, 1 to recent
+		cache.store(page_address!(2, 2)); // add 2, 2 to recent
+		cache.store(page_address!(3, 3)); // add 3, 3 to recent
+		cache.store(page_address!(4, 4)); // add 4, 4 to recent
+		cache.load(page_address!(1, 1)); // 1, 1 was referenced in recent
+		cache.load(page_address!(2, 2)); // 2, 2 was referenced in recent
+		cache.load(page_address!(1, 1)); // 1, 1 is promoted to frequent
 
 		// recent is large, therefore 3, 3 is evicted as it is the first
 		// non-referenced item in frequent
-		cache.store(page_id!(5, 5));
+		cache.store(page_address!(5, 5));
 
 		// then
-		assert!(cache.load(page_id!(1, 1)).is_some());
-		assert!(cache.load(page_id!(2, 2)).is_some());
-		assert!(cache.load(page_id!(3, 3)).is_none());
-		assert!(cache.load(page_id!(4, 4)).is_some());
-		assert!(cache.load(page_id!(5, 5)).is_some());
+		assert!(cache.load(page_address!(1, 1)).is_some());
+		assert!(cache.load(page_address!(2, 2)).is_some());
+		assert!(cache.load(page_address!(3, 3)).is_none());
+		assert!(cache.load(page_address!(4, 4)).is_some());
+		assert!(cache.load(page_address!(5, 5)).is_some());
 	}
 
 	#[test]
@@ -756,25 +756,25 @@ mod tests {
 		);
 
 		// when
-		cache.store(page_id!(1, 1)); // add 1, 1 to recent
-		cache.store(page_id!(2, 2)); // add 2, 2 to recent
-		let guard = cache.store(page_id!(3, 3)); // add 3, 3 to recent
-		cache.store(page_id!(4, 4)); // add 4, 4 to recent
-		cache.load(page_id!(1, 1)); // 1, 1 was referenced in recent
-		cache.load(page_id!(2, 2)); // 2, 2 was referenced in recent
-		cache.load(page_id!(1, 1)); // 1, 1 is promoted to frequent
+		cache.store(page_address!(1, 1)); // add 1, 1 to recent
+		cache.store(page_address!(2, 2)); // add 2, 2 to recent
+		let guard = cache.store(page_address!(3, 3)); // add 3, 3 to recent
+		cache.store(page_address!(4, 4)); // add 4, 4 to recent
+		cache.load(page_address!(1, 1)); // 1, 1 was referenced in recent
+		cache.load(page_address!(2, 2)); // 2, 2 was referenced in recent
+		cache.load(page_address!(1, 1)); // 1, 1 is promoted to frequent
 
 		// recent is large, therefore 3, 3 would be evicted, but it is locked, so 4, 4
 		// is evicted instead
-		cache.store(page_id!(5, 5));
+		cache.store(page_address!(5, 5));
 
 		mem::drop(guard);
 
 		// then
-		assert!(cache.load(page_id!(1, 1)).is_some());
-		assert!(cache.load(page_id!(2, 2)).is_some());
-		assert!(cache.load(page_id!(3, 3)).is_some());
-		assert!(cache.load(page_id!(4, 4)).is_none());
-		assert!(cache.load(page_id!(5, 5)).is_some());
+		assert!(cache.load(page_address!(1, 1)).is_some());
+		assert!(cache.load(page_address!(2, 2)).is_some());
+		assert!(cache.load(page_address!(3, 3)).is_some());
+		assert!(cache.load(page_address!(4, 4)).is_none());
+		assert!(cache.load(page_address!(5, 5)).is_some());
 	}
 }

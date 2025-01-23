@@ -18,7 +18,7 @@ use crate::files::DatabaseFolder;
 use crate::files::FileError;
 use crate::page_store::cache::PageWriteGuardApi;
 
-pub(crate) use crate::files::PageId;
+pub(crate) use crate::files::PageAddress;
 use crate::files::TransactionState;
 use crate::files::WalIndex;
 
@@ -112,7 +112,7 @@ pub(crate) struct PageMut<'t, 'a, PC, W>
 where
 	PC: PageCacheApi + 't,
 {
-	page_id: PageId,
+	page_address: PageAddress,
 	transaction_id: u64,
 	guard: &'a mut PC::WriteGuard<'t>,
 	wal: &'a W,
@@ -139,7 +139,7 @@ where
 
 		let wal_index = self.wal.log_write(wal::WriteLog {
 			transaction_id: self.transaction_id,
-			page_id: self.page_id,
+			page_address: self.page_address,
 			offset: u16::try_from(offset).expect("Write offset must be 16-bit!"),
 			from: &from,
 			to: buf,
@@ -178,7 +178,7 @@ where
 	W: WalApi,
 {
 	id: u64,
-	locks: HashMap<PageId, PC::WriteGuard<'t>>,
+	locks: HashMap<PageAddress, PC::WriteGuard<'t>>,
 	storage: &'t PageStorage<PS, PC, W>,
 	completed: bool,
 }
@@ -198,9 +198,9 @@ where
 		}
 	}
 
-	fn acquire_lock(&mut self, page_id: PageId) -> Result<(), StorageError> {
-		if let Entry::Vacant(e) = self.locks.entry(page_id) {
-			let guard = self.storage.write_guard(page_id)?;
+	fn acquire_lock(&mut self, page_address: PageAddress) -> Result<(), StorageError> {
+		if let Entry::Vacant(e) = self.locks.entry(page_address) {
+			let guard = self.storage.write_guard(page_address)?;
 			e.insert(guard);
 		}
 		Ok(())
@@ -208,7 +208,7 @@ where
 
 	fn undo_impl(&mut self) -> Result<(), StorageError> {
 		self.storage.wal.undo(self.id, |write_op| {
-			let Some(guard) = self.locks.get_mut(&write_op.page_id) else {
+			let Some(guard) = self.locks.get_mut(&write_op.page_address) else {
 				panic!("An undo operation tried to undo a write to a page that the transaction did not access!");
 			};
 			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
@@ -247,8 +247,11 @@ pub(crate) trait TransactionApi {
 		Self: 'a;
 
 	fn id(&self) -> u64;
-	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError>;
-	fn get_page_mut(&mut self, page_id: PageId) -> Result<Self::PageMut<'_>, StorageError>;
+	fn get_page(&self, page_address: PageAddress) -> Result<Self::Page<'_>, StorageError>;
+	fn get_page_mut(
+		&mut self,
+		page_address: PageAddress,
+	) -> Result<Self::PageMut<'_>, StorageError>;
 	fn commit(self) -> Result<(), StorageError>;
 	fn undo(self) -> Result<(), StorageError>;
 }
@@ -266,23 +269,26 @@ where
 		self.id
 	}
 
-	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError> {
-		if let Some(guard) = self.locks.get(&page_id) {
+	fn get_page(&self, page_address: PageAddress) -> Result<Self::Page<'_>, StorageError> {
+		if let Some(guard) = self.locks.get(&page_address) {
 			Ok(Page {
 				guard: WriteablePageGuard::Exclusive(guard),
 			})
 		} else {
 			Ok(Page {
-				guard: WriteablePageGuard::Shared(self.storage.read_guard(page_id)?),
+				guard: WriteablePageGuard::Shared(self.storage.read_guard(page_address)?),
 			})
 		}
 	}
 
-	fn get_page_mut<'a>(&'a mut self, page_id: PageId) -> Result<Self::PageMut<'a>, StorageError> {
-		self.acquire_lock(page_id)?;
-		let guard: &'a mut PC::WriteGuard<'t> = self.locks.get_mut(&page_id).unwrap();
+	fn get_page_mut<'a>(
+		&'a mut self,
+		page_address: PageAddress,
+	) -> Result<Self::PageMut<'a>, StorageError> {
+		self.acquire_lock(page_address)?;
+		let guard: &'a mut PC::WriteGuard<'t> = self.locks.get_mut(&page_address).unwrap();
 		Ok(PageMut {
-			page_id,
+			page_address,
 			transaction_id: self.id,
 			guard,
 			wal: &self.storage.wal,
@@ -399,31 +405,34 @@ where
 		}
 	}
 
-	fn load_into_cache(&self, page_id: PageId) -> Result<PC::WriteGuard<'_>, StorageError> {
-		let mut guard = self.cache.store(page_id);
+	fn load_into_cache(
+		&self,
+		page_address: PageAddress,
+	) -> Result<PC::WriteGuard<'_>, StorageError> {
+		let mut guard = self.cache.store(page_address);
 		if let Err(error) = self.physical.read(ReadOp {
-			page_id,
+			page_address,
 			buf: guard.body_mut(),
 		}) {
-			self.cache.scrap(page_id);
+			self.cache.scrap(page_address);
 			return Err(error);
 		}
 		Ok(guard)
 	}
 
-	fn read_guard(&self, page_id: PageId) -> Result<PC::ReadGuard<'_>, StorageError> {
-		if let Some(guard) = self.cache.load(page_id) {
+	fn read_guard(&self, page_address: PageAddress) -> Result<PC::ReadGuard<'_>, StorageError> {
+		if let Some(guard) = self.cache.load(page_address) {
 			return Ok(guard);
 		}
-		let guard = self.load_into_cache(page_id)?;
+		let guard = self.load_into_cache(page_address)?;
 		Ok(self.cache.downgrade_guard(guard))
 	}
 
-	fn write_guard(&self, page_id: PageId) -> Result<PC::WriteGuard<'_>, StorageError> {
-		if let Some(guard) = self.cache.load_mut(page_id) {
+	fn write_guard(&self, page_address: PageAddress) -> Result<PC::WriteGuard<'_>, StorageError> {
+		if let Some(guard) = self.cache.load_mut(page_address) {
 			return Ok(guard);
 		}
-		self.load_into_cache(page_id)
+		self.load_into_cache(page_address)
 	}
 }
 
@@ -440,7 +449,7 @@ pub(crate) trait PageStorageApi {
 		Self: 'a;
 
 	fn recover(&self) -> Result<(), StorageError>;
-	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError>;
+	fn get_page(&self, page_address: PageAddress) -> Result<Self::Page<'_>, StorageError>;
 	fn transaction(&self) -> Result<Self::Transaction<'_>, StorageError>;
 	fn flush(&self);
 	fn flush_sync(&self) -> Result<(), StorageError>;
@@ -457,20 +466,20 @@ where
 
 	fn recover(&self) -> Result<(), StorageError> {
 		self.wal.recover(&mut |write_op| {
-			let mut guard = self.write_guard(write_op.page_id)?;
+			let mut guard = self.write_guard(write_op.page_address)?;
 			guard.write(write_op.offset.into(), write_op.buf, write_op.index);
 			self.physical.write(WriteOp {
 				wal_index: write_op.index,
-				page_id: write_op.page_id,
+				page_address: write_op.page_address,
 				buf: guard.body(),
 			})?;
 			Ok(())
 		})
 	}
 
-	fn get_page(&self, page_id: PageId) -> Result<Self::Page<'_>, StorageError> {
+	fn get_page(&self, page_address: PageAddress) -> Result<Self::Page<'_>, StorageError> {
 		Ok(Page {
-			guard: WriteablePageGuard::Shared(self.read_guard(page_id)?),
+			guard: WriteablePageGuard::Shared(self.read_guard(page_address)?),
 		})
 	}
 
@@ -508,7 +517,7 @@ mod tests {
 	use self::{
 		cache::MockPageCacheApi,
 		physical::MockPhysicalStorageApi,
-		test_helpers::{page_id, wal_index},
+		test_helpers::{page_address, wal_index},
 		wal::MockWalApi,
 	};
 
@@ -524,14 +533,14 @@ mod tests {
 		wal.expect_recover().returning(|handler| {
 			handler(wal::PartialWriteOp {
 				index: wal_index!(69, 420),
-				page_id: page_id!(1, 2),
+				page_address: page_address!(1, 2),
 				offset: 10,
 				buf: &[1, 2, 3],
 			})
 			.unwrap();
 			handler(wal::PartialWriteOp {
 				index: wal_index!(10, 24),
-				page_id: page_id!(4, 5),
+				page_address: page_address!(4, 5),
 				offset: 12,
 				buf: &[2, 2, 1],
 			})
@@ -544,13 +553,13 @@ mod tests {
 			.expect_load_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(1, 2)))
+			.with(eq(page_address!(1, 2)))
 			.returning(|_| None);
 		cache
 			.expect_store()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(1, 2)))
+			.with(eq(page_address!(1, 2)))
 			.returning(|_| {
 				let mut guard = MockPageWriteGuardApi::new();
 				guard
@@ -566,7 +575,7 @@ mod tests {
 			.expect_read()
 			.once()
 			.in_sequence(&mut seq)
-			.withf(|read_op| read_op.page_id == page_id!(1, 2))
+			.withf(|read_op| read_op.page_address == page_address!(1, 2))
 			.returning(|read_op| {
 				read_op.buf.fill(0);
 				Ok(Some(wal_index!(69, 420)))
@@ -577,7 +586,7 @@ mod tests {
 			.in_sequence(&mut seq)
 			.withf(|write_op| {
 				write_op.wal_index == wal_index!(69, 420)
-					&& write_op.page_id == page_id!(1, 2)
+					&& write_op.page_address == page_address!(1, 2)
 					&& write_op.buf == [10; PAGE_BODY_SIZE]
 			})
 			.returning(|_| Ok(()));
@@ -585,7 +594,7 @@ mod tests {
 			.expect_load_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(4, 5)))
+			.with(eq(page_address!(4, 5)))
 			.returning(|_| {
 				let mut guard = MockPageWriteGuardApi::new();
 				guard
@@ -603,7 +612,7 @@ mod tests {
 			.in_sequence(&mut seq)
 			.withf(|write_op| {
 				write_op.wal_index == wal_index!(10, 24)
-					&& write_op.page_id == page_id!(4, 5)
+					&& write_op.page_address == page_address!(4, 5)
 					&& write_op.buf == [20; PAGE_BODY_SIZE]
 			})
 			.returning(|_| Ok(()));
@@ -625,13 +634,13 @@ mod tests {
 			.expect_load()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(69, 420)))
+			.with(eq(page_address!(69, 420)))
 			.returning(|_| None);
 		cache
 			.expect_store()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(69, 420)))
+			.with(eq(page_address!(69, 420)))
 			.returning(|_| {
 				let mut guard = MockPageWriteGuardApi::new();
 				guard
@@ -643,7 +652,7 @@ mod tests {
 			.expect_read()
 			.once()
 			.in_sequence(&mut seq)
-			.withf(|read_op| read_op.page_id == page_id!(69, 420))
+			.withf(|read_op| read_op.page_address == page_address!(69, 420))
 			.returning(|read_op| {
 				read_op
 					.buf
@@ -673,7 +682,7 @@ mod tests {
 		// when
 		let mut buf = [0; 5];
 		storage
-			.get_page(page_id!(69, 420))
+			.get_page(page_address!(69, 420))
 			.unwrap()
 			.read(10, &mut buf)
 			.unwrap();
@@ -694,13 +703,13 @@ mod tests {
 			.expect_load_mut()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(1, 2)))
+			.with(eq(page_address!(1, 2)))
 			.returning(|_| None);
 		cache
 			.expect_store()
 			.once()
 			.in_sequence(&mut seq)
-			.with(eq(page_id!(1, 2)))
+			.with(eq(page_address!(1, 2)))
 			.returning(|_| {
 				let mut guard = MockPageWriteGuardApi::new();
 				let mut seq = Sequence::new();
@@ -732,7 +741,7 @@ mod tests {
 			.expect_read()
 			.once()
 			.in_sequence(&mut seq)
-			.withf(|read_op| read_op.page_id == page_id!(1, 2))
+			.withf(|read_op| read_op.page_address == page_address!(1, 2))
 			.returning(|read_op| {
 				read_op.buf.fill(0);
 				Ok(Some(wal_index!(69, 420)))
@@ -744,7 +753,7 @@ mod tests {
 				*write_log
 					== WriteLog {
 						transaction_id: 0,
-						page_id: page_id!(1, 2),
+						page_address: page_address!(1, 2),
 						offset: 10,
 						from: &[69, 25],
 						to: &[1, 2],
@@ -762,12 +771,12 @@ mod tests {
 
 		// when
 		let mut t = storage.transaction().unwrap();
-		t.get_page_mut(page_id!(1, 2))
+		t.get_page_mut(page_address!(1, 2))
 			.unwrap()
 			.write(10, &[1, 2])
 			.unwrap();
 		let mut received = [0; 2];
-		t.get_page(page_id!(1, 2))
+		t.get_page(page_address!(1, 2))
 			.unwrap()
 			.read(10, &mut received)
 			.unwrap();
@@ -787,12 +796,12 @@ mod tests {
 
 		let mut t = page_storage.transaction().unwrap();
 
-		t.get_page_mut(page_id!(69, 420))
+		t.get_page_mut(page_address!(69, 420))
 			.unwrap()
 			.write(25, &[1, 2, 3, 4])
 			.unwrap();
 		let mut data = [0; 4];
-		t.get_page(page_id!(69, 420))
+		t.get_page(page_address!(69, 420))
 			.unwrap()
 			.read(25, &mut data)
 			.unwrap();
@@ -828,7 +837,7 @@ mod tests {
 		b.iter(|| {
 			let mut t = page_storage.transaction().unwrap();
 
-			let mut page = t.get_page_mut(page_id!(69, 420)).unwrap();
+			let mut page = t.get_page_mut(page_address!(69, 420)).unwrap();
 			page.write(25, DATA).unwrap();
 
 			t.commit().unwrap();
@@ -838,6 +847,6 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-	pub(crate) use crate::files::test_helpers::page_id;
+	pub(crate) use crate::files::test_helpers::page_address;
 	pub(super) use crate::files::test_helpers::wal_index;
 }
