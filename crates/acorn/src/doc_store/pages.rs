@@ -142,7 +142,7 @@ macro_rules! read_array_section {
 		let mut repr = <$field_repr as FromZeros>::new_zeroed();
 		let index = mem::offset_of!($page_repr, $field) + mem::size_of::<$field_repr>() * $index;
 		if index + mem::size_of::<$field_repr>() > PAGE_BODY_SIZE {
-			Err(DatabaseError::PageIndexOutOfBounds)
+			Err(DatabaseError::PageOutOfBounds)
 		} else {
 			ReadPage::read(
 				&$page,
@@ -356,5 +356,90 @@ impl<P: ReadPage + WritePage> FreelistPage<P> {
 				return Ok(Some(item));
 			}
 		}
+	}
+}
+
+#[repr(C, packed)]
+struct RecordsPageFormat {
+	header: PageHeaderRepr,
+	record_length: u16,
+	num_records: u16,
+	offsets: [u16; 0],
+	// records themselves stacked end-to front afterwards
+}
+
+pub(super) struct RecordsPage<P>(P);
+
+impl<P> RecordsPage<P> {
+	pub fn new_unchecked(page: P) -> Self {
+		Self(page)
+	}
+}
+
+impl<P: ReadPage> RecordsPage<P> {
+	pub fn new(page: P) -> Result<Self, DatabaseError> {
+		let header: PageHeader = read_section!(page, RecordsPageFormat.header, PageHeaderRepr)?;
+		if header.kind != PageKind::Records {
+			return Err(DatabaseError::UnexpectedPageKind {
+				expected: PageKind::Records,
+				received: header.kind,
+			});
+		}
+		Ok(Self::new_unchecked(page))
+	}
+
+	pub fn get_record_length(&self) -> Result<usize, DatabaseError> {
+		read_section!(self.0, RecordsPageFormat.record_length, u16)
+	}
+
+	pub fn get_num_records(&self) -> Result<usize, DatabaseError> {
+		read_section!(self.0, RecordsPageFormat.num_records, u16)
+	}
+
+	pub fn get_record(&self, index: usize, buf: &mut [u8]) -> Result<(), DatabaseError> {
+		let len = self.get_record_length()?;
+		let offset = self.get_offset_at(index)?;
+		if offset + len > PAGE_BODY_SIZE {
+			return Err(DatabaseError::PageOutOfBounds);
+		}
+		self.0.read(offset, &mut buf[0..len])?;
+		Ok(())
+	}
+
+	fn get_offset_at(&self, index: usize) -> Result<usize, DatabaseError> {
+		if index >= self.get_num_records()? {
+			return Err(DatabaseError::InvalidRecordIndex);
+		}
+		read_array_section!(self.0, RecordsPageFormat.offsets, u16, index)
+	}
+
+	fn get_first_record_offset(&self) -> Result<usize, DatabaseError> {
+		let offset =
+			offset_of!(RecordsPageFormat, offsets) + self.get_num_records()? * size_of::<u16>();
+		Ok(offset)
+	}
+}
+impl<P: ReadPage + WritePage> RecordsPage<P> {
+	pub fn set_record(&mut self, index: usize, buf: &[u8]) -> Result<(), DatabaseError> {
+		let len = self.get_record_length()?;
+		let offset = self.get_offset_at(index)?;
+		if offset + len > PAGE_BODY_SIZE {
+			return Err(DatabaseError::PageOutOfBounds);
+		}
+		self.0.write(offset, &buf[0..len])?;
+		Ok(())
+	}
+
+	fn set_record_length(&mut self, length: usize) -> Result<(), DatabaseError> {
+		let repr: u16 = length.try_into().expect("Record length must be 16-bit!");
+		write_section!(self.0, RecordsPageFormat.record_length, u16, repr)
+	}
+
+	fn set_offset_at(&mut self, index: usize, offset: usize) -> Result<(), DatabaseError> {
+		if index >= self.get_num_records()? {
+			return Err(DatabaseError::InvalidRecordIndex);
+		}
+		let repr: u16 = offset.try_into().expect("Record offset must be 16-bit!");
+		write_array_section!(self.0, RecordsPageFormat.offsets, u16, index, repr)
 	}
 }
