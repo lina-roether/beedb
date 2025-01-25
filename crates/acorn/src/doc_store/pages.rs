@@ -365,7 +365,7 @@ struct RecordsPageFormat {
 	record_length: u16,
 	num_records: u16,
 	offsets: [u16; 0],
-	// records themselves stacked end-to front afterwards
+	// records themselves stacked end-to-front afterwards
 }
 
 pub(super) struct RecordsPage<P>(P);
