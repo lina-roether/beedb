@@ -8,7 +8,10 @@ use static_assertions::assert_impl_all;
 
 use crate::{
 	consts::DEFAULT_MAX_NUM_OPEN_SEGMENTS,
-	files::{segment::SegmentFileApi, DatabaseFolder, DatabaseFolderApi},
+	files::{
+		segment::{SegmentFileApi, SegmentReadOp, SegmentWriteOp},
+		DatabaseFolder, DatabaseFolderApi,
+	},
 	utils::cache::CacheReplacer,
 };
 
@@ -91,14 +94,21 @@ pub(crate) trait PhysicalStorageApi {
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
 	fn read(&self, op: ReadOp) -> Result<Option<WalIndex>, StorageError> {
 		self.use_segment(op.page_address.segment_num, |segment| {
-			let wal_index = segment.read(op.page_address.page_num, op.buf)?;
+			let wal_index = segment.read(SegmentReadOp {
+				page_num: op.page_address.page_num,
+				buf: op.buf,
+			})?;
 			Ok(wal_index)
 		})
 	}
 
 	fn write(&self, op: WriteOp) -> Result<(), StorageError> {
 		self.use_segment(op.page_address.segment_num, |segment| {
-			segment.write(op.page_address.page_num, op.buf, op.wal_index)?;
+			segment.write(SegmentWriteOp {
+				page_num: op.page_address.page_num,
+				wal_index: op.wal_index,
+				buf: op.buf,
+			})?;
 			Ok(())
 		})
 	}
@@ -172,12 +182,14 @@ mod tests {
 				segment
 					.expect_write()
 					.once()
-					.with(
-						eq(non_zero!(420)),
-						eq([1; PAGE_BODY_SIZE]),
-						eq(wal_index!(69, 420)),
-					)
-					.returning(|_, _, _| Ok(()));
+					.withf(|op| {
+						*op == SegmentWriteOp {
+							page_num: non_zero!(420),
+							wal_index: wal_index!(69, 420),
+							buf: &[1; PAGE_BODY_SIZE],
+						}
+					})
+					.returning(|_| Ok(()));
 				Ok(segment)
 			});
 
@@ -207,9 +219,9 @@ mod tests {
 				segment
 					.expect_read()
 					.once()
-					.with(eq(non_zero!(420)), always())
-					.returning(|_, buf| {
-						buf[0..3].copy_from_slice(&[1, 2, 3]);
+					.withf(|op| op.page_num == non_zero!(420))
+					.returning(|op| {
+						op.buf[0..3].copy_from_slice(&[1, 2, 3]);
 						Ok(Some(wal_index!(69, 420)))
 					});
 				Ok(segment)

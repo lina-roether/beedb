@@ -167,22 +167,34 @@ impl SegmentFile {
 	}
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SegmentReadOp<'a> {
+	pub page_num: NonZeroU16,
+	pub buf: &'a mut [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SegmentWriteOp<'a> {
+	pub page_num: NonZeroU16,
+	pub wal_index: WalIndex,
+	pub buf: &'a [u8],
+}
+
 #[cfg_attr(test, automock)]
 pub(crate) trait SegmentFileApi {
-	fn read(&self, page_num: NonZeroU16, buf: &mut [u8]) -> Result<Option<WalIndex>, FileError>;
-	fn write(&self, page_num: NonZeroU16, buf: &[u8], wal_index: WalIndex)
-		-> Result<(), FileError>;
+	fn read<'a>(&self, op: SegmentReadOp<'a>) -> Result<Option<WalIndex>, FileError>;
+	fn write<'a>(&self, op: SegmentWriteOp<'a>) -> Result<(), FileError>;
 }
 
 impl SegmentFileApi for SegmentFile {
-	fn read(&self, page_num: NonZeroU16, buf: &mut [u8]) -> Result<Option<WalIndex>, FileError> {
-		debug_assert_eq!(buf.len(), PAGE_BODY_SIZE);
+	fn read(&self, op: SegmentReadOp) -> Result<Option<WalIndex>, FileError> {
+		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
 
 		let mut page_buf = [0; PAGE_SIZE];
-		self.read_exact_at(&mut page_buf, Self::get_page_offset(page_num))?;
+		self.read_exact_at(&mut page_buf, Self::get_page_offset(op.page_num))?;
 		let header = PageHeaderRepr::from_bytes(&page_buf[0..PageHeaderRepr::SIZE])?;
 		let PageHeader::Init(header) = header else {
-			buf.fill(0);
+			op.buf.fill(0);
 			return Ok(None);
 		};
 
@@ -193,27 +205,25 @@ impl SegmentFileApi for SegmentFile {
 			return Err(FileError::ChecksumMismatch);
 		}
 
-		buf.copy_from_slice(body);
+		op.buf.copy_from_slice(body);
 
 		Ok(Some(header.wal_index))
 	}
 
-	fn write(
-		&self,
-		page_num: NonZeroU16,
-		buf: &[u8],
-		wal_index: WalIndex,
-	) -> Result<(), FileError> {
-		debug_assert_eq!(buf.len(), PAGE_BODY_SIZE);
+	fn write(&self, op: SegmentWriteOp) -> Result<(), FileError> {
+		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
 
-		let crc = CRC16.checksum(buf);
-		let header = PageHeader::Init(InitPageHeader { wal_index, crc });
+		let crc = CRC16.checksum(op.buf);
+		let header = PageHeader::Init(InitPageHeader {
+			wal_index: op.wal_index,
+			crc,
+		});
 
 		let mut page_buf = [0; PAGE_SIZE];
 		page_buf[0..PageHeaderRepr::SIZE].copy_from_slice(PageHeaderRepr::from(header).as_bytes());
-		page_buf[PageHeaderRepr::SIZE..].copy_from_slice(buf);
+		page_buf[PageHeaderRepr::SIZE..].copy_from_slice(op.buf);
 
-		self.write_all_at(&page_buf, Self::get_page_offset(page_num))?;
+		self.write_all_at(&page_buf, Self::get_page_offset(op.page_num))?;
 		Ok(())
 	}
 }
@@ -282,7 +292,11 @@ mod tests {
 
 		// when
 		segment
-			.write(non_zero!(3), &[3; PAGE_BODY_SIZE], wal_index!(69, 420))
+			.write(SegmentWriteOp {
+				page_num: non_zero!(3),
+				wal_index: wal_index!(69, 420),
+				buf: &[3; PAGE_BODY_SIZE],
+			})
 			.unwrap();
 
 		// then
@@ -313,12 +327,21 @@ mod tests {
 		let tempdir = tempfile::tempdir().unwrap();
 		let segment = SegmentFile::create_file(tempdir.path().join("0")).unwrap();
 		segment
-			.write(non_zero!(5), &[25; PAGE_BODY_SIZE], wal_index!(69, 420))
+			.write(SegmentWriteOp {
+				page_num: non_zero!(5),
+				wal_index: wal_index!(69, 420),
+				buf: &[25; PAGE_BODY_SIZE],
+			})
 			.unwrap();
 
 		// when
 		let mut data = [0; PAGE_BODY_SIZE];
-		let wal_index = segment.read(non_zero!(5), &mut data).unwrap();
+		let wal_index = segment
+			.read(SegmentReadOp {
+				page_num: non_zero!(5),
+				buf: &mut data,
+			})
+			.unwrap();
 
 		// then
 		assert_eq!(wal_index, Some(wal_index!(69, 420)));
