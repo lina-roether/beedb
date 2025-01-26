@@ -163,7 +163,7 @@ impl SegmentFile {
 	}
 
 	#[cfg(unix)]
-	fn batch(&self, ops: &mut [RawIoOp]) -> Result<(), FileError> {
+	fn exec_batch(&self, ops: &mut [RawIoOp]) -> Result<(), FileError> {
 		use io_uring::IoUring;
 		use std::mem;
 
@@ -200,11 +200,6 @@ impl SegmentFile {
 		}
 
 		Ok(())
-	}
-
-	#[cfg(unix)]
-	fn write_batch(&self, ops: &[RawWriteOp]) -> Result<(), FileError> {
-		todo!()
 	}
 
 	#[cfg(not(unix))]
@@ -350,9 +345,11 @@ pub(crate) enum SegmentOp<'a> {
 }
 
 #[cfg_attr(test, automock)]
+#[allow(clippy::needless_lifetimes)]
 pub(crate) trait SegmentFileApi {
 	fn read<'a>(&self, op: SegmentReadOp<'a>) -> Result<(), FileError>;
 	fn write<'a>(&self, op: SegmentWriteOp<'a>) -> Result<(), FileError>;
+	fn batch<'a>(&self, ops: &mut [SegmentOp<'a>]) -> Result<(), FileError>;
 }
 
 impl SegmentFileApi for SegmentFile {
@@ -371,6 +368,22 @@ impl SegmentFileApi for SegmentFile {
 		let mut page_buf = [0; PAGE_SIZE];
 		let raw_op = RawWriteOp::new(&op, &mut page_buf);
 		self.write_all_at(&raw_op)?;
+
+		Ok(())
+	}
+
+	fn batch(&self, ops: &mut [SegmentOp]) -> Result<(), FileError> {
+		let mut buffers = vec![[0; PAGE_SIZE]; ops.len()];
+		let mut raw_ops: Vec<RawIoOp> = Vec::with_capacity(ops.len());
+		for (op, buf) in ops.iter().zip(buffers.iter_mut()) {
+			raw_ops.push(RawIoOp::new(op, buf));
+		}
+
+		self.exec_batch(&mut raw_ops)?;
+
+		for (raw_op, op) in raw_ops.iter().zip(ops.iter_mut()) {
+			raw_op.complete(op)?
+		}
 
 		Ok(())
 	}
