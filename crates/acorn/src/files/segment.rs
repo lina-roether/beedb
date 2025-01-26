@@ -2,10 +2,11 @@ use std::{
 	fs::{File, OpenOptions},
 	io::{Seek, SeekFrom},
 	num::{NonZeroU16, NonZeroU64},
-	os,
+	os::{self, fd::AsRawFd as _},
 	path::Path,
 };
 
+use io_uring::{cqueue, opcode, squeue, types};
 #[cfg(test)]
 use mockall::automock;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
@@ -95,6 +96,9 @@ pub(crate) struct SegmentFile {
 	file: File,
 }
 
+const READ_OP_ID: u64 = 1;
+const WRITE_OP_ID: u64 = 2;
+
 impl SegmentFile {
 	pub fn create_file(path: impl AsRef<Path>) -> Result<Self, FileError> {
 		let mut file = OpenOptions::new()
@@ -147,29 +151,188 @@ impl SegmentFile {
 	}
 
 	#[cfg(unix)]
-	fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), FileError> {
-		os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)?;
+	fn read_exact_at(&self, op: &mut RawReadOp) -> Result<(), FileError> {
+		os::unix::fs::FileExt::read_exact_at(&self.file, op.buf, op.offset)?;
 		Ok(())
 	}
 
 	#[cfg(unix)]
-	fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), FileError> {
-		os::unix::fs::FileExt::write_all_at(&self.file, buf, offset)?;
+	fn write_all_at(&self, op: &RawWriteOp) -> Result<(), FileError> {
+		os::unix::fs::FileExt::write_all_at(&self.file, op.buf, op.offset)?;
 		Ok(())
+	}
+
+	#[cfg(unix)]
+	fn batch(&self, ops: &mut [RawIoOp]) -> Result<(), FileError> {
+		use io_uring::IoUring;
+		use std::mem;
+
+		let num_ops = ops.len();
+
+		let Ok(queue_size): Result<u32, _> = ops.len().next_power_of_two().try_into() else {
+			return Err(FileError::TooManyConcurrent);
+		};
+
+		let mut ring = IoUring::new(queue_size)?;
+
+		let mut queue = ring.submission();
+		for op in ops {
+			let entry = op.as_cqueue_entry(&self.file);
+			unsafe { queue.push(&entry) }?;
+		}
+		mem::drop(queue);
+
+		ring.submit_and_wait(1)?;
+
+		let mut cqueue = ring.completion();
+		for _ in 0..num_ops {
+			let Some(cqe) = cqueue.next() else {
+				return Err(FileError::Unexpected);
+			};
+
+			if cqe.result() < 0 {
+				match cqe.user_data() {
+					READ_OP_ID => return Err(FileError::ConcurrentReadFail(cqe.result())),
+					WRITE_OP_ID => return Err(FileError::ConcurrentWriteFail(cqe.result())),
+					_ => return Err(FileError::Unexpected),
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	fn write_batch(&self, ops: &[RawWriteOp]) -> Result<(), FileError> {
+		todo!()
 	}
 
 	#[cfg(not(unix))]
 	compile_error!("Functionality not implemented on this platform!");
+}
 
-	#[inline]
-	fn get_page_offset(page_num: NonZeroU16) -> u64 {
-		page_num.get() as u64 * PAGE_SIZE as u64
+#[inline]
+fn get_page_offset(page_num: NonZeroU16) -> u64 {
+	page_num.get() as u64 * PAGE_SIZE as u64
+}
+
+struct RawReadOp<'a> {
+	offset: u64,
+	buf: &'a mut [u8],
+}
+
+impl<'a> RawReadOp<'a> {
+	fn new(op: &SegmentReadOp, buf: &'a mut [u8]) -> Self {
+		debug_assert_eq!(buf.len(), PAGE_SIZE);
+		Self {
+			offset: get_page_offset(op.page_num),
+			buf,
+		}
+	}
+
+	fn complete(&self, op: &mut SegmentReadOp) -> Result<(), FileError> {
+		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
+
+		let header = PageHeaderRepr::from_bytes(&self.buf[0..PageHeaderRepr::SIZE])?;
+		let PageHeader::Init(header) = header else {
+			op.buf.fill(0);
+			*op.wal_index = None;
+			return Ok(());
+		};
+
+		let body = &self.buf[PageHeaderRepr::SIZE..];
+
+		let crc = CRC16.checksum(body);
+		if header.crc != crc {
+			return Err(FileError::ChecksumMismatch);
+		}
+
+		*op.wal_index = Some(header.wal_index);
+		op.buf.copy_from_slice(body);
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	fn as_opcode(&mut self, fd: &File) -> opcode::Read {
+		opcode::Read::new(
+			types::Fd(fd.as_raw_fd()),
+			self.buf.as_mut_ptr(),
+			self.buf.len().try_into().expect("Read operation too large"),
+		)
+	}
+}
+
+struct RawWriteOp<'a> {
+	offset: u64,
+	buf: &'a [u8],
+}
+
+impl<'a> RawWriteOp<'a> {
+	fn new(op: &SegmentWriteOp, buf: &'a mut [u8]) -> Self {
+		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
+		debug_assert_eq!(buf.len(), PAGE_SIZE);
+
+		let crc = CRC16.checksum(&op.buf);
+		let header = PageHeader::Init(InitPageHeader {
+			wal_index: op.wal_index,
+			crc,
+		});
+
+		buf[0..PageHeaderRepr::SIZE].copy_from_slice(PageHeaderRepr::from(header).as_bytes());
+		buf[PageHeaderRepr::SIZE..].copy_from_slice(op.buf);
+
+		Self {
+			offset: get_page_offset(op.page_num),
+			buf,
+		}
+	}
+
+	#[cfg(unix)]
+	fn as_opcode(&self, fd: &File) -> opcode::Write {
+		opcode::Write::new(
+			types::Fd(fd.as_raw_fd()),
+			self.buf.as_ptr(),
+			self.buf.len().try_into().expect("Read operation too large"),
+		)
+	}
+}
+
+enum RawIoOp<'a> {
+	Read(RawReadOp<'a>),
+	Write(RawWriteOp<'a>),
+}
+
+impl<'a> RawIoOp<'a> {
+	fn new(op: &SegmentOp, buf: &'a mut [u8]) -> Self {
+		match op {
+			SegmentOp::Read(read_op) => Self::Read(RawReadOp::new(read_op, buf)),
+			SegmentOp::Write(write_op) => Self::Write(RawWriteOp::new(write_op, buf)),
+		}
+	}
+
+	fn complete(&self, op: &mut SegmentOp) -> Result<(), FileError> {
+		match (self, op) {
+			(Self::Read(read_op), SegmentOp::Read(ref mut segment_read_op)) => {
+				read_op.complete(segment_read_op)
+			}
+			(Self::Write(..), SegmentOp::Write(..)) => Ok(()),
+			_ => Err(FileError::Unexpected),
+		}
+	}
+
+	#[cfg(unix)]
+	fn as_cqueue_entry(&mut self, fd: &File) -> squeue::Entry {
+		match self {
+			Self::Read(read_op) => read_op.as_opcode(fd).build().user_data(READ_OP_ID),
+			Self::Write(write_op) => write_op.as_opcode(fd).build().user_data(WRITE_OP_ID),
+		}
 	}
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SegmentReadOp<'a> {
 	pub page_num: NonZeroU16,
+	pub wal_index: &'a mut Option<WalIndex>,
 	pub buf: &'a mut [u8],
 }
 
@@ -180,50 +343,35 @@ pub(crate) struct SegmentWriteOp<'a> {
 	pub buf: &'a [u8],
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SegmentOp<'a> {
+	Read(SegmentReadOp<'a>),
+	Write(SegmentWriteOp<'a>),
+}
+
 #[cfg_attr(test, automock)]
 pub(crate) trait SegmentFileApi {
-	fn read<'a>(&self, op: SegmentReadOp<'a>) -> Result<Option<WalIndex>, FileError>;
+	fn read<'a>(&self, op: SegmentReadOp<'a>) -> Result<(), FileError>;
 	fn write<'a>(&self, op: SegmentWriteOp<'a>) -> Result<(), FileError>;
 }
 
 impl SegmentFileApi for SegmentFile {
-	fn read(&self, op: SegmentReadOp) -> Result<Option<WalIndex>, FileError> {
+	fn read(&self, mut op: SegmentReadOp) -> Result<(), FileError> {
 		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
 
 		let mut page_buf = [0; PAGE_SIZE];
-		self.read_exact_at(&mut page_buf, Self::get_page_offset(op.page_num))?;
-		let header = PageHeaderRepr::from_bytes(&page_buf[0..PageHeaderRepr::SIZE])?;
-		let PageHeader::Init(header) = header else {
-			op.buf.fill(0);
-			return Ok(None);
-		};
-
-		let body = &page_buf[PageHeaderRepr::SIZE..];
-
-		let crc = CRC16.checksum(body);
-		if header.crc != crc {
-			return Err(FileError::ChecksumMismatch);
-		}
-
-		op.buf.copy_from_slice(body);
-
-		Ok(Some(header.wal_index))
+		let mut raw_op = RawReadOp::new(&op, &mut page_buf);
+		self.read_exact_at(&mut raw_op)?;
+		raw_op.complete(&mut op)
 	}
 
 	fn write(&self, op: SegmentWriteOp) -> Result<(), FileError> {
 		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
 
-		let crc = CRC16.checksum(op.buf);
-		let header = PageHeader::Init(InitPageHeader {
-			wal_index: op.wal_index,
-			crc,
-		});
-
 		let mut page_buf = [0; PAGE_SIZE];
-		page_buf[0..PageHeaderRepr::SIZE].copy_from_slice(PageHeaderRepr::from(header).as_bytes());
-		page_buf[PageHeaderRepr::SIZE..].copy_from_slice(op.buf);
+		let raw_op = RawWriteOp::new(&op, &mut page_buf);
+		self.write_all_at(&raw_op)?;
 
-		self.write_all_at(&page_buf, Self::get_page_offset(op.page_num))?;
 		Ok(())
 	}
 }
@@ -336,9 +484,11 @@ mod tests {
 
 		// when
 		let mut data = [0; PAGE_BODY_SIZE];
-		let wal_index = segment
+		let mut wal_index = None;
+		segment
 			.read(SegmentReadOp {
 				page_num: non_zero!(5),
+				wal_index: &mut wal_index,
 				buf: &mut data,
 			})
 			.unwrap();

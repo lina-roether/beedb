@@ -412,6 +412,7 @@ where
 		let mut guard = self.cache.store(page_address);
 		if let Err(error) = self.physical.read(ReadOp {
 			page_address,
+			wal_index: &mut None,
 			buf: guard.body_mut(),
 		}) {
 			self.cache.scrap(page_address);
@@ -578,7 +579,8 @@ mod tests {
 			.withf(|read_op| read_op.page_address == page_address!(1, 2))
 			.returning(|read_op| {
 				read_op.buf.fill(0);
-				Ok(Some(wal_index!(69, 420)))
+				*read_op.wal_index = Some(wal_index!(69, 420));
+				Ok(())
 			});
 		physical
 			.expect_write()
@@ -659,7 +661,8 @@ mod tests {
 					.iter_mut()
 					.enumerate()
 					.for_each(|(i, b)| *b = i as u8);
-				Ok(Some(wal_index!(1, 2)))
+				*read_op.wal_index = Some(wal_index!(1, 2));
+				Ok(())
 			});
 		cache
 			.expect_downgrade_guard()
@@ -744,7 +747,8 @@ mod tests {
 			.withf(|read_op| read_op.page_address == page_address!(1, 2))
 			.returning(|read_op| {
 				read_op.buf.fill(0);
-				Ok(Some(wal_index!(69, 420)))
+				*read_op.wal_index = Some(wal_index!(69, 420));
+				Ok(())
 			});
 		wal.expect_log_write()
 			.once()

@@ -8,6 +8,7 @@ use std::{
 	path::PathBuf,
 };
 
+use io_uring::squeue::PushError;
 use thiserror::Error;
 
 #[cfg(test)]
@@ -55,6 +56,21 @@ pub(crate) enum FileError {
 
 	#[error("Unexpected file in database folder: {}", _0.to_string_lossy())]
 	UnexpectedFile(OsString),
+
+	#[error("Too many concurrent IO operations!")]
+	TooManyConcurrent,
+
+	#[error("Failed to push to IO queue: {0:?}")]
+	IoQueuePush(#[from] PushError),
+
+	#[error("Concurrent read failed with code {0}")]
+	ConcurrentReadFail(i32),
+
+	#[error("Concurrent write failed with code {0}")]
+	ConcurrentWriteFail(i32),
+
+	#[error("An unexpected IO error occurred")]
+	Unexpected,
 
 	#[error(transparent)]
 	Io(io::Error),

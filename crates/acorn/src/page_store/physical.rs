@@ -73,6 +73,7 @@ where
 #[derive(Debug)]
 pub(crate) struct ReadOp<'a> {
 	pub page_address: PageAddress,
+	pub wal_index: &'a mut Option<WalIndex>,
 	pub buf: &'a mut [u8],
 }
 
@@ -86,19 +87,20 @@ pub(crate) struct WriteOp<'a> {
 #[cfg_attr(test, automock)]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait PhysicalStorageApi {
-	fn read<'a>(&self, op: ReadOp<'a>) -> Result<Option<WalIndex>, StorageError>;
+	fn read<'a>(&self, op: ReadOp<'a>) -> Result<(), StorageError>;
 
 	fn write<'a>(&self, op: WriteOp<'a>) -> Result<(), StorageError>;
 }
 
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
-	fn read(&self, op: ReadOp) -> Result<Option<WalIndex>, StorageError> {
+	fn read(&self, op: ReadOp) -> Result<(), StorageError> {
 		self.use_segment(op.page_address.segment_num, |segment| {
-			let wal_index = segment.read(SegmentReadOp {
+			segment.read(SegmentReadOp {
 				page_num: op.page_address.page_num,
+				wal_index: op.wal_index,
 				buf: op.buf,
 			})?;
-			Ok(wal_index)
+			Ok(())
 		})
 	}
 
@@ -222,7 +224,8 @@ mod tests {
 					.withf(|op| op.page_num == non_zero!(420))
 					.returning(|op| {
 						op.buf[0..3].copy_from_slice(&[1, 2, 3]);
-						Ok(Some(wal_index!(69, 420)))
+						*op.wal_index = Some(wal_index!(69, 420));
+						Ok(())
 					});
 				Ok(segment)
 			});
@@ -232,9 +235,11 @@ mod tests {
 
 		// when
 		let mut buf = [0; 3];
-		let wal_index = storage
+		let mut wal_index = None;
+		storage
 			.read(ReadOp {
 				page_address: page_address!(69, 420),
+				wal_index: &mut wal_index,
 				buf: &mut buf,
 			})
 			.unwrap();
