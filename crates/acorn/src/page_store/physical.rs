@@ -9,7 +9,7 @@ use static_assertions::assert_impl_all;
 use crate::{
 	consts::DEFAULT_MAX_NUM_OPEN_SEGMENTS,
 	files::{
-		segment::{SegmentFileApi, SegmentReadOp, SegmentWriteOp},
+		segment::{SegmentFileApi, SegmentOp, SegmentReadOp, SegmentWriteOp},
 		DatabaseFolder, DatabaseFolderApi,
 	},
 	utils::cache::CacheReplacer,
@@ -52,11 +52,11 @@ where
 		}
 	}
 
-	fn use_segment<T>(
+	fn use_segment(
 		&self,
 		segment_num: u32,
-		handler: impl FnOnce(&DF::SegmentFile) -> Result<T, StorageError>,
-	) -> Result<T, StorageError> {
+		handler: impl FnOnce(&DF::SegmentFile) -> Result<(), StorageError>,
+	) -> Result<(), StorageError> {
 		let cache = self.descriptor_cache.read();
 		if let Some(segment) = cache.get_descriptor(segment_num) {
 			return handler(segment);
@@ -70,11 +70,21 @@ where
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ReadOp<'a> {
 	pub page_address: PageAddress,
 	pub wal_index: &'a mut Option<WalIndex>,
 	pub buf: &'a mut [u8],
+}
+
+impl<'a> From<ReadOp<'a>> for SegmentReadOp<'a> {
+	fn from(op: ReadOp<'a>) -> Self {
+		SegmentReadOp {
+			page_num: op.page_address.page_num,
+			wal_index: op.wal_index,
+			buf: op.buf,
+		}
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,35 +94,76 @@ pub(crate) struct WriteOp<'a> {
 	pub buf: &'a [u8],
 }
 
+impl<'a> From<WriteOp<'a>> for SegmentWriteOp<'a> {
+	fn from(op: WriteOp<'a>) -> Self {
+		SegmentWriteOp {
+			page_num: op.page_address.page_num,
+			wal_index: op.wal_index,
+			buf: op.buf,
+		}
+	}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Op<'a> {
+	Read(ReadOp<'a>),
+	Write(WriteOp<'a>),
+}
+
 #[cfg_attr(test, automock)]
 #[allow(clippy::needless_lifetimes)]
 pub(crate) trait PhysicalStorageApi {
 	fn read<'a>(&self, op: ReadOp<'a>) -> Result<(), StorageError>;
 
 	fn write<'a>(&self, op: WriteOp<'a>) -> Result<(), StorageError>;
+
+	fn batch<'a>(&self, ops: Box<[Op<'a>]>) -> Result<(), StorageError>;
 }
 
 impl<DF: DatabaseFolderApi> PhysicalStorageApi for PhysicalStorage<DF> {
 	fn read(&self, op: ReadOp) -> Result<(), StorageError> {
 		self.use_segment(op.page_address.segment_num, |segment| {
-			segment.read(SegmentReadOp {
-				page_num: op.page_address.page_num,
-				wal_index: op.wal_index,
-				buf: op.buf,
-			})?;
+			segment.read(op.into())?;
 			Ok(())
 		})
 	}
 
 	fn write(&self, op: WriteOp) -> Result<(), StorageError> {
 		self.use_segment(op.page_address.segment_num, |segment| {
-			segment.write(SegmentWriteOp {
-				page_num: op.page_address.page_num,
-				wal_index: op.wal_index,
-				buf: op.buf,
-			})?;
+			segment.write(op.into())?;
 			Ok(())
 		})
+	}
+
+	fn batch(&self, ops: Box<[Op]>) -> Result<(), StorageError> {
+		let mut segment_batches: HashMap<u32, Vec<SegmentOp>> = HashMap::new();
+		for op in ops {
+			let segment_num: u32;
+			let segment_op: SegmentOp;
+			match op {
+				Op::Read(read_op) => {
+					segment_num = read_op.page_address.segment_num;
+					segment_op = SegmentOp::Read(read_op.into());
+				}
+				Op::Write(write_op) => {
+					segment_num = write_op.page_address.segment_num;
+					segment_op = SegmentOp::Write(write_op.into());
+				}
+			}
+			segment_batches
+				.entry(segment_num)
+				.or_default()
+				.push(segment_op);
+		}
+
+		for (segment_num, mut ops) in segment_batches.into_iter() {
+			self.use_segment(segment_num, |segment| {
+				segment.batch(&mut ops)?;
+				Ok(())
+			})?
+		}
+
+		Ok(())
 	}
 }
 
@@ -139,6 +190,10 @@ impl<DF: DatabaseFolderApi> DescriptorCache<DF> {
 		debug_assert!(access_successful);
 
 		Some(descriptor)
+	}
+
+	pub fn has_descriptor(&self, segment_num: u32) -> bool {
+		self.descriptors.contains_key(&segment_num)
 	}
 
 	pub fn store_descriptor(

@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::{
-	physical::{PhysicalStorage, PhysicalStorageApi, WriteOp},
+	physical::{Op, PhysicalStorage, PhysicalStorageApi, WriteOp},
 	PageAddress, StorageError,
 };
 
@@ -295,6 +295,12 @@ unsafe impl<PS: PhysicalStorageApi + Send + Sync> Send for PageCache<PS> {}
 // locks.
 unsafe impl<PS: PhysicalStorageApi + Send + Sync> Sync for PageCache<PS> {}
 
+struct DirtyPage<'a> {
+	page_address: PageAddress,
+	index: usize,
+	guard: PageReadGuard<'a>,
+}
+
 impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 	pub fn new(
 		config: &PageCacheConfig,
@@ -464,9 +470,11 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 		mem::drop(dirty_list_guard);
 
 		let mut error: Option<StorageError> = None;
-		for page_address in dirty_list_copy.iter().copied() {
+		let mut dirty_pages: Vec<DirtyPage> = Vec::with_capacity(dirty_list_copy.len());
+
+		for page_address in dirty_list_copy.iter() {
 			let indices = indices.read();
-			let Some(index) = indices.get(&page_address).copied() else {
+			let Some(index) = indices.get(page_address).copied() else {
 				continue;
 			};
 			mem::drop(indices);
@@ -475,17 +483,32 @@ impl<PS: PhysicalStorageApi + Send + Sync + 'static> PageCache<PS> {
 			if !guard.header().dirty() {
 				continue;
 			}
-			if let Err(err) = physical_storage.write(WriteOp {
-				wal_index: guard.header().wal_index(),
-				page_address,
-				buf: guard.body(),
-			}) {
-				error = Some(err);
-				break;
-			};
-			mem::drop(guard);
 
-			let mut guard_mut = Self::load_mut_direct(locks, buf, index);
+			dirty_pages.push(DirtyPage {
+				page_address: *page_address,
+				index,
+				guard,
+			});
+		}
+
+		let ops: Vec<Op> = dirty_pages
+			.iter()
+			.map(|dp| {
+				Op::Write(WriteOp {
+					wal_index: dp.guard.header().wal_index(),
+					page_address: dp.page_address,
+					buf: dp.guard.body(),
+				})
+			})
+			.collect();
+
+		if let Err(err) = physical_storage.batch(ops.into()) {
+			error = Some(err);
+		}
+
+		for dirty_page in dirty_pages.into_iter() {
+			mem::drop(dirty_page.guard);
+			let mut guard_mut = Self::load_mut_direct(locks, buf, dirty_page.index);
 			guard_mut.header_mut().set_dirty(false);
 		}
 

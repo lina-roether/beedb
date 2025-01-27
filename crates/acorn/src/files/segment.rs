@@ -182,7 +182,7 @@ impl SegmentFile {
 		}
 		mem::drop(queue);
 
-		ring.submit_and_wait(1)?;
+		ring.submit_and_wait(num_ops)?;
 
 		let mut cqueue = ring.completion();
 		for _ in 0..num_ops {
