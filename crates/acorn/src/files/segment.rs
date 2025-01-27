@@ -2,11 +2,13 @@ use std::{
 	fs::{File, OpenOptions},
 	io::{Seek, SeekFrom},
 	num::{NonZeroU16, NonZeroU64},
-	os::{self, fd::AsRawFd as _},
+	os::{self},
 	path::Path,
 };
 
+#[cfg(feature = "io_uring")]
 use io_uring::{cqueue, opcode, squeue, types};
+
 #[cfg(test)]
 use mockall::automock;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
@@ -162,7 +164,7 @@ impl SegmentFile {
 		Ok(())
 	}
 
-	#[cfg(unix)]
+	#[cfg(feature = "io_uring")]
 	fn exec_batch(&self, ops: &mut [RawIoOp]) -> Result<(), FileError> {
 		use io_uring::IoUring;
 		use std::mem;
@@ -199,6 +201,17 @@ impl SegmentFile {
 			}
 		}
 
+		Ok(())
+	}
+
+	#[cfg(not(feature = "io_uring"))]
+	fn exec_batch(&self, ops: &mut [RawIoOp]) -> Result<(), FileError> {
+		for op in ops {
+			match op {
+				RawIoOp::Read(read_op) => self.read_exact_at(read_op)?,
+				RawIoOp::Write(write_op) => self.write_all_at(write_op)?,
+			}
+		}
 		Ok(())
 	}
 
@@ -248,8 +261,10 @@ impl<'a> RawReadOp<'a> {
 		Ok(())
 	}
 
-	#[cfg(unix)]
+	#[cfg(feature = "io_uring")]
 	fn as_opcode(&mut self, fd: &File) -> opcode::Read {
+		use std::os::fd::AsRawFd;
+
 		opcode::Read::new(
 			types::Fd(fd.as_raw_fd()),
 			self.buf.as_mut_ptr(),
@@ -285,8 +300,10 @@ impl<'a> RawWriteOp<'a> {
 		}
 	}
 
-	#[cfg(unix)]
+	#[cfg(feature = "io_uring")]
 	fn as_opcode(&self, fd: &File) -> opcode::Write {
+		use std::os::fd::AsRawFd;
+
 		opcode::Write::new(
 			types::Fd(fd.as_raw_fd()),
 			self.buf.as_ptr(),
@@ -320,7 +337,7 @@ impl<'a> RawIoOp<'a> {
 		}
 	}
 
-	#[cfg(unix)]
+	#[cfg(feature = "io_uring")]
 	fn as_cqueue_entry(&mut self, fd: &File) -> squeue::Entry {
 		match self {
 			Self::Read(read_op) => read_op.as_opcode(fd).build().user_data(READ_OP_ID),

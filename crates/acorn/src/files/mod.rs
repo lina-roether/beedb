@@ -8,6 +8,7 @@ use std::{
 	path::PathBuf,
 };
 
+#[cfg(feature = "io_uring")]
 use io_uring::squeue::PushError;
 use thiserror::Error;
 
@@ -60,6 +61,7 @@ pub(crate) enum FileError {
 	#[error("Too many concurrent IO operations!")]
 	TooManyConcurrent,
 
+	#[cfg(feature = "io_uring")]
 	#[error("Failed to push to IO queue: {0:?}")]
 	IoQueuePush(#[from] PushError),
 

@@ -13,9 +13,12 @@ static_assertions = { version = "1.1.0", features = ["nightly"] }
 parking_lot = { version = "0.12.3", features = ["nightly"] }
 log = "0.4.25"
 futures = { version = "0.3.31", features = ["thread-pool"] }
-io-uring = "0.7.4"
+io-uring = { version = "0.7.4", optional = true }
 
 [dev-dependencies]
 mockall = { version = "0.13.1", features = ["nightly"] }
 tempfile = { version = "3.15.0", features = ["nightly"] }
 pretty_assertions = { path = "../pretty_assertions" }
+
+[features]
+io_uring = ["dep:io-uring"]
