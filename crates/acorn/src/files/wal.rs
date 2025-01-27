@@ -1166,7 +1166,7 @@ mod tests {
 			iter.next().unwrap().unwrap(),
 			(non_zero!(75), items[1].clone())
 		);
-		assert!(dbg!(iter.next()).is_none());
+		assert!(iter.next().is_none());
 	}
 
 	#[test]
