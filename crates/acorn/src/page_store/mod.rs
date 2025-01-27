@@ -849,6 +849,28 @@ mod tests {
 	}
 
 	#[bench]
+	fn bench_flush(b: &mut Bencher) {
+		let tempdir = tempdir().unwrap();
+
+		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
+		let thread_pool = Arc::new(ThreadPool::new().unwrap());
+		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
+
+		const DATA: &[u8] = &[69; 16 * KIB];
+
+		b.iter(|| {
+			let mut t = page_storage.transaction().unwrap();
+
+			let mut page = t.get_page_mut(page_address!(69, 420)).unwrap();
+			page.write(25, DATA).unwrap();
+
+			t.commit().unwrap();
+
+			page_storage.flush_sync().unwrap();
+		})
+	}
+
+	#[bench]
 	fn bench_multi_page_write_and_commit(b: &mut Bencher) {
 		let tempdir = tempdir().unwrap();
 
@@ -881,7 +903,76 @@ mod tests {
 				.write(25, DATA)
 				.unwrap();
 
+			t.get_page_mut(page_address!(69, 234))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 1234))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 1344))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
 			t.commit().unwrap();
+		})
+	}
+
+	#[bench]
+	fn bench_multi_page_flush(b: &mut Bencher) {
+		let tempdir = tempdir().unwrap();
+
+		let folder = Arc::new(DatabaseFolder::open(tempdir.path().to_path_buf()));
+		let thread_pool = Arc::new(ThreadPool::new().unwrap());
+		let page_storage = PageStorage::create(folder, thread_pool, &Default::default()).unwrap();
+
+		const DATA: &[u8] = &[69; 16 * KIB];
+
+		b.iter(|| {
+			let mut t = page_storage.transaction().unwrap();
+
+			t.get_page_mut(page_address!(69, 420))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 423))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 123))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 69))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 234))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 1234))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.get_page_mut(page_address!(69, 1344))
+				.unwrap()
+				.write(25, DATA)
+				.unwrap();
+
+			t.commit().unwrap();
+
+			page_storage.flush_sync().unwrap();
 		})
 	}
 }
