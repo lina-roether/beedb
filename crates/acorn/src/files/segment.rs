@@ -255,6 +255,7 @@ impl<'a> RawReadOp<'a> {
 			self.buf.as_mut_ptr(),
 			self.buf.len().try_into().expect("Read operation too large"),
 		)
+		.offset(self.offset)
 	}
 }
 
@@ -269,7 +270,7 @@ impl<'a> RawWriteOp<'a> {
 		debug_assert_eq!(op.buf.len(), PAGE_BODY_SIZE);
 		debug_assert_eq!(buf.len(), PAGE_SIZE);
 
-		let crc = CRC16.checksum(&op.buf);
+		let crc = CRC16.checksum(op.buf);
 		let header = PageHeader::Init(InitPageHeader {
 			wal_index: op.wal_index,
 			crc,
@@ -291,6 +292,7 @@ impl<'a> RawWriteOp<'a> {
 			self.buf.as_ptr(),
 			self.buf.len().try_into().expect("Read operation too large"),
 		)
+		.offset(self.offset)
 	}
 }
 
