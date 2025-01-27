@@ -211,6 +211,7 @@ fn get_page_offset(page_num: NonZeroU16) -> u64 {
 	page_num.get() as u64 * PAGE_SIZE as u64
 }
 
+#[derive(Debug)]
 struct RawReadOp<'a> {
 	offset: u64,
 	buf: &'a mut [u8],
@@ -257,6 +258,7 @@ impl<'a> RawReadOp<'a> {
 	}
 }
 
+#[derive(Debug)]
 struct RawWriteOp<'a> {
 	offset: u64,
 	buf: &'a [u8],
@@ -292,6 +294,7 @@ impl<'a> RawWriteOp<'a> {
 	}
 }
 
+#[derive(Debug)]
 enum RawIoOp<'a> {
 	Read(RawReadOp<'a>),
 	Write(RawWriteOp<'a>),
