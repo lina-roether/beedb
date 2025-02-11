@@ -22,7 +22,7 @@ pub(crate) enum DatabaseError {
 		received: PageKind,
 	},
 
-	#[error("Received unknown page kind {0}. This may mean acorn is out of date.")]
+	#[error("Received unknown page kind {0}. This may mean BeeDB is out of date.")]
 	UnknownPageKind(u8),
 
 	#[error("Tried to access data on a page that's out of bounds")]

@@ -115,7 +115,7 @@ mod tests {
 			version: 1,
 		};
 		let err = GenericHeader::try_from(header_repr).unwrap_err();
-		assert_eq!(err.to_string(), "The file is not an acorn database file");
+		assert_eq!(err.to_string(), "The file is not a BeeDB database file");
 	}
 
 	#[test]

@@ -31,7 +31,7 @@ pub(crate) mod wal;
 
 #[derive(Debug, Error)]
 pub(crate) enum FileError {
-	#[error("The file is not an acorn database file")]
+	#[error("The file is not a BeeDB database file")]
 	MissingMagic,
 
 	#[error("The file was created on a platform with a different byte order and cannot be opened")]

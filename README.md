@@ -1,6 +1,6 @@
-# tomedb
+# BeeDB
 
-TomeDB is supposed to be a modern, novel database system that unites the strengths of relational databases and document stores/relational databases.
+BeeDB is (going to be) a modern, novel database system that unites the strengths of relational databases and document stores/relational databases.
 
 The ideas are as follows:
 
@@ -14,7 +14,7 @@ The ideas are as follows:
 
 All source code files in this repository are subject to the GNU General Public License Version 3.
 
-    tomedb Copyright (C) 2023 Nicholas Roether
+    BeeDB Copyright (C) 2025 Lina Roether
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
